@@ -1,0 +1,11 @@
+node_modules/
+*.log
+.DS_Store
+# Generated images must never be committed.
+generated-images/
+# Python bytecode is machine-local (it lands under resources/): never ship it.
+__pycache__/
+*.pyc
+
+# Test-harness build output: not shipped in the package, not committed.
+testlib/

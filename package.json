@@ -1,0 +1,69 @@
+{
+  "name": "dsh-image-forge",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: Qwen-Image 出图工具，把官方提示词契约的 wh_ratio 做成一等参数（云 API 后端，BYO-key）",
+  "license": "MIT",
+  "author": "Demerier",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "qwen",
+    "qwen-image",
+    "text-to-image",
+    "image-edit",
+    "comfyui"
+  ],
+  "private": false,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "resources/*.py",
+    "cordis.yml",
+    "README.md",
+    "skill.md",
+    "references"
+  ],
+  "scripts": {
+    "build": "tsdown && tsdown -c tsdown.client.config.ts",
+    "test": "node test/ratio.test.mjs && node test/local-edit-budget.test.mjs && node test/surface.test.mjs && node test/api-e2e.test.mjs && node test/comfyui-e2e.test.mjs && node test/worker-lifecycle.test.mjs && node test/edit-e2e.test.mjs && node test/vram-gate.test.mjs && node test/settings.test.mjs && node test/package-contents.test.mjs",
+    "test:live": "node test/live-worker-e2e.mjs",
+    "test:live:edit": "node test/live-edit-e2e.mjs both"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "platform": "web"
+    }
+  },
+  "devDependencies": {
+    "tsdown": "0.22.14",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.6 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6 || ^0.2.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  }
+}
