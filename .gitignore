@@ -9,3 +9,6 @@ __pycache__/
 
 # Test-harness build output: not shipped in the package, not committed.
 testlib/
+
+# Local working plans / status archive: read locally, never committed. Not in `files`, so never packed.
+docs/plans/
