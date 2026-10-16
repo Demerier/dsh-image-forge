@@ -6,12 +6,14 @@
   "author": "Demerier",
   "keywords": [
     "dsh",
+    "dsh-plugin",
     "deepseek-harness",
-    "plugin",
+    "cordis",
     "qwen",
     "qwen-image",
     "text-to-image",
     "image-edit",
+    "image-generation",
     "comfyui"
   ],
   "private": false,

@@ -1,5 +1,7 @@
 # dsh-image-forge
 
+[![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
+
 DeepSeek Harness 插件：**Qwen-Image 出图 / 参考图编辑**，并把 Qwen 官方提示词契约的 `wh_ratio` 做成工具的**一等参数**。
 
 现有 DSH 出图插件全部只收「成品 prompt」——契约输出的画幅比必须人工翻译成像素宽高。
