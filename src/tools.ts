@@ -758,7 +758,7 @@ export interface LocalEditBudgetGate {
  * The **canvas-side** half of the gate's advice: a warning, never a refusal.
  *
  * The bands band the conditioning budget alone, because that is what the failure
- * boundary tracks. The *speed* boundary does not: `_r5\REPORT.md` measured budget
+ * boundary tracks. The *speed* boundary does not: `docs/evidence/r5-budget-canvas-matrix.md` measured budget
  * 896 at 1.9 s/step on a 0.82 MP canvas and at **67 s/step** on a 1.55 MP one —
  * the same budget, ≈28 min for 25 steps instead of ≈1. All of it without an
  * error, so nothing else in the stack would have told the caller.
@@ -787,7 +787,7 @@ function canvasSideWarning(width: number, height: number, budget: number): strin
     `  1.0 MP 这条线落在两个实测端点之间，是**插值**（未测）；1.5MP 画布上量过的只有 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET}（跑完）与 896（跑不完）两点，` +
     `${LOCAL_EDIT_CANVAS_SAFE_BUDGET + 1}–${LOCAL_EDIT_BUDGET_RELIABLE - 1} 这段没量过。\n` +
     `  建议：把配置 \`localReferenceBudget\` 设成 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET}（出图尺寸不变，只是参考图条件化分辨率变低），` +
-    `或改用 backend:"comfyui"。出处：_r5\\REPORT.md。`
+    `或改用 backend:"comfyui"。出处：docs/evidence/r5-budget-canvas-matrix.md。`
   )
 }
 
@@ -848,7 +848,7 @@ export function localEditBudgetGate(
           `  本机实测（RTX 4070 Laptop 8188 MiB）这一档确实通过了，但峰值 reserved 8492 MiB 已经超过显卡总量 8188 MiB，` +
           `靠 WDDM 共享内存撑住，去噪 21.19 s ≈ 928 档的 2 倍——能过，但可能显著变慢，也可能失败。\n` +
           `  要可靠就把 _reference_budget 降到 ≤ ${LOCAL_EDIT_BUDGET_RELIABLE}（例如 1216×672——896 那条线正是在这张 0.82 MP 画布上量的），` +
-          `或改用 backend:"comfyui"。出处：_r4b\\REPORT.md §(b)。`,
+          `或改用 backend:"comfyui"。出处：docs/evidence/r4b-local-edit-failures.md §(b)。`,
       ),
     }
   }
@@ -867,7 +867,7 @@ export function localEditBudgetGate(
     `（wall 109.5 s、峰值 reserved 6488 MiB、worker 存活），${LOCAL_EDIT_CANVAS_SAFE_BUDGET + 1}–${LOCAL_EDIT_BUDGET_RELIABLE - 1} 这段没量过；` +
     '降的是参考图条件化分辨率，换速度与可跑性——保真度：同画布（1216×672）896 vs 512 目视看不出差别（n=1、1 位评判者），1.5MP 画布上只测了 512；' +
     '④ 接受风险、显式放行：配置 `allowLocalEditOverBudget: true`（默认 false）。\n' +
-    '  出处：_r4b\\REPORT.md §(a)/§(b)、_r5\\REPORT.md。'
+    '  出处：docs/evidence/r4b-local-edit-failures.md §(a)/§(b)、docs/evidence/r5-budget-canvas-matrix.md。'
   if (!allowOverBudget) return { budget, budgetSource: source, canvasBudget, tier, allowed: false, overridden: false, warning: over }
   return {
     budget,
@@ -879,7 +879,7 @@ export function localEditBudgetGate(
     warning: withCanvas(
       `本地编辑尺寸门：allowLocalEditOverBudget 为 true，按用户显式授权放行（${where}）。\n` +
         '  预期风险（本机实测）：992–1024 在 GPU 去噪段 CUDA OOM；≥1216 在 CPU 文本编码段访问违例，worker 进程可能直接消失。' +
-        '出处：_r4b\\REPORT.md §(a)。',
+        '出处：docs/evidence/r4b-local-edit-failures.md §(a)。',
     ),
   }
 }

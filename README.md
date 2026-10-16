@@ -1,15 +1,17 @@
 # dsh-image-forge
 
-DeepSeek Harness 插件：**Qwen-Image 出图**，并把 Qwen 官方提示词契约的 `wh_ratio` 做成工具的**一等参数**。
+DeepSeek Harness 插件：**Qwen-Image 出图 / 参考图编辑**，并把 Qwen 官方提示词契约的 `wh_ratio` 做成工具的**一等参数**。
 
 现有 DSH 出图插件全部只收「成品 prompt」——契约输出的画幅比必须人工翻译成像素宽高。
 本插件消除这一步：契约里的 `wh_ratio` 直接传给 `qwen_image_generate`，换算由插件做。
 
 - 工具：`qwen_image_generate`（文生图）、`qwen_image_edit`（参考图编辑 / 图生图）、`qwen_image_status`、`qwen_image_env`
 - 技能：`qwen-image-forge`（意图路由 + 自撰的 T2I / Edit 改写规则）
-- 后端：云 API（自带 key）为主；**本地后端由本插件自己拥有并管理生命周期**——随包分发 worker 脚本
-  （`resources/worker.py`），负责拉起 / 健康轮询 / 掉线重拉 / 空闲回收显存，并自带 `install` / `fetch-weights`
-  两个环境动作（venv + CUDA torch + 10.63 GiB 的 nf4 权重，走 hf-mirror.com）
+- 后端：`auto`（默认）/ `local` / `comfyui` / `api` 四选一 ——
+  **`local` 由本插件自己拥有并管理生命周期**（随包分发 worker 脚本 `resources/worker.py`：拉起 / 健康轮询 / 掉线重拉 /
+  空闲回收显存，并自带 `install` / `fetch-weights` 两个环境动作——venv + CUDA torch + 10.63 GiB 的 nf4 权重，走
+  hf-mirror.com，**不需要你先装 ComfyUI**）；`comfyui` 复用你本机已装的实例（只经 HTTP 通信，不含也不分发其代码）；
+  `api` 是自带 key 的云端点。`auto` 的次序见下文「后端」；**8 GB 卡上出图 / 编辑都建议显式用 `comfyui`**（速度与画质）
 
 ---
 
@@ -305,7 +307,7 @@ qwen_image_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
 > ⚠️ **896 这条可靠线只按预算分档，画布自身的代价不在内**：它的实测出处是 1216×672（0.82 MP，1.9 s/步）；
 > 同一预算搬到 1.5MP 画布（1248×1248）上实测 **67 s/步**、25 步外推 ≈28 min（**不报错**，但等于不可用）——
 > 那张画布上唯一实测跑得完的是 **512**（wall **109.5 s**、峰值 reserved **6488 MiB**、worker 存活）。
-> 依据与逐次原始记录：`_r4b\REPORT.md` §(a)/§(b)、`_r5\REPORT.md`。
+> 依据与逐次原始记录：`docs/evidence/r4b-local-edit-failures.md` §(a)/§(b)、`docs/evidence/r5-budget-canvas-matrix.md`。
 要显式像素就用 `width`/`height`（必须 32 的倍数，否则报错并给出最近的合法值）——**显式值永远优先**。
 
 落盘命名：`<outputDir>/<prefix>_<W>x<H>_<n>.png`，`prefix` 默认 `qwen`，可用 `preset` 覆盖；
@@ -500,7 +502,7 @@ budget，再分档——三条路径都有测试钉住（`test/local-edit-budget
 
 | budget | 行为 | 依据（本机 RTX 4070 Laptop 8188 MiB） |
 |---|---|---|
-| **≤ 896** | 放行，不插话；但**画布 > 1.0 MP 且预算 > 512** 时会附一条**画布侧建议**（`local_edit_budget.warning`，仍放行） | 1216×672 → 峰值 reserved **7458 MiB**，3/3 次逐位一致；同一预算在 1248×1248 上是 **67 s/步**（`_r5`） |
+| **≤ 896** | 放行，不插话；但**画布 > 1.0 MP 且预算 > 512** 时会附一条**画布侧建议**（`local_edit_budget.warning`，仍放行） | 1216×672 → 峰值 reserved **7458 MiB**，3/3 次逐位一致；同一预算在 1248×1248 上是 **67 s/步**（`docs/evidence/r5-budget-canvas-matrix.md`） |
 | **897–960** | **放行，但结果里带警告**（`local_edit_budget.warning`，并写进 `summary` 的可见文本） | 960×960 通过，但峰值 reserved **8492 MiB > 卡总量 8188**（走 WDDM 共享内存），去噪 21.19 s ≈ 928 档的 2 倍 |
 | **> 960** | **默认拒绝**，抛一条点明失败形态与四条出路的错误 | 992–1024 = GPU 去噪 `torch.OutOfMemoryError`；≥1216 = CPU 文本编码段 **访问违例**，worker 进程有时直接消失 |
 
@@ -508,7 +510,7 @@ budget，再分档——三条路径都有测试钉住（`test/local-edit-budget
 推导。回执里的 `local_edit_budget.budget_source`（`config` / `canvas`）、`canvas_budget` 与 `configured_budget`
 把这次用的是哪一个说明白。
 
-> ⚠️ **分档只按预算，不含画布本身的代价**——这是本节最容易读错的一处，也是 `_r5` 实测纠正的地方：
+> ⚠️ **分档只按预算，不含画布本身的代价**——这是本节最容易读错的一处，也是 `docs/evidence/r5-budget-canvas-matrix.md` 实测纠正的地方：
 > 896 那条「可靠线」的出处是 **1216×672**（0.82 MP）。
 
 > **`localReferenceBudget` 让 `local` 编辑在 1.5MP 画布上可跑，但只有 `512` 这一档**：七档默认画布算出的预算都是
@@ -518,7 +520,7 @@ budget，再分档——三条路径都有测试钉住（`test/local-edit-budget
 > （换到的是速度：§19 预算 992 → 512 时编码 37.7 → 16.5 s、每步 3.4 → 1.67 s。）
 > 保真度：同画布（1216×672）896 vs 512 **目视看不出差别**（n=1、1 位评判者），1.5MP 画布上只测了 512；
 > **513–895 这段在 1.5MP 画布上没有量过**，所以文档与工具文案都不写「无副作用」。预算填 `0`（默认）= 由画布推导，
-> 与没有这个旋钮时逐位一致。出处：`_r5\REPORT.md`。
+> 与没有这个旋钮时逐位一致。出处：`docs/evidence/r5-budget-canvas-matrix.md`。
 
 拒绝信息的措辞是有意为之：失败形态**不是**「显存不足」，所以现有那条「空闲显存不够 → 先给 ComfyUI 发
 `POST /free`」的补救提示在这里没用，消息里直接劝住，并给出四条出路——① 改用 `comfyui` 后端；
@@ -531,11 +533,11 @@ n=1、1 位评判者）；
 用的是哪一档、budget 是多少、是不是靠覆盖开关过的；`comfyui` 走另一条路，不受这道门约束（回执
 `local_edit_budget: null`）。
 
-**画布侧警告（`_r5` 之后新增，**放行**、不是拒绝）**：**生效预算 > 512** 且**画布面积 > 1.0 MP** 时，
+**画布侧警告（`docs/evidence/r5-budget-canvas-matrix.md` 之后新增，**放行**、不是拒绝）**：**生效预算 > 512** 且**画布面积 > 1.0 MP** 时，
 尺寸门在放行的同时把一条画布侧建议写进同一个 `local_edit_budget.warning`（并照旧进 `summary`）——
 它只在预算本身没被拒的档（可靠档的新增情形、贴边档、以及覆盖开关放行的档）里出现，措辞与那一档的原有结论并列
 而不冲突（覆盖放行时同一条警告里既有「按用户显式授权放行」，也有画布侧实测）。阈值 **1.0 MP** 是插值：
-两个实测端点是 `0.82 MP / 896 = 1.9 s/步` ↔ `1.55 MP / 896 = 67 s/步`，**中间没有测过**（`_r5\REPORT.md`）；
+两个实测端点是 `0.82 MP / 896 = 1.9 s/步` ↔ `1.55 MP / 896 = 67 s/步`，**中间没有测过**（`docs/evidence/r5-budget-canvas-matrix.md`）；
 它只给建议（设 `512` 或换 `comfyui`），不新增任何拒绝路径。
 
 **为什么不去抬 `minFreeVramMiB`（启动前显存门禁）？** 这道尺寸门与它管的是两件事：门禁保护的是
@@ -628,10 +630,10 @@ pnpm test
   `localReferenceBudget` 的四条语义也在这里钉住：**没配置时请求体里连 `reference_budget` 这个键都没有**（默认路径
   逐字节不变）、配了 `512` 时那张 1248×1248 画布**被放行**且 worker 真的收到 `reference_budget: 512`（画布不变）、
   配一个**本身超线**的值（1248）仍然被拒（旋钮两个方向都生效）、`500` 这种非 32 对齐值**点名报错**而不是被悄悄接受。
-  `_r5` 之后又加了**画布侧警告**这条（放行）：1248×1248 + 896 有警告、同一笔预算在 0.82 MP 画布上**没有**、
+  `docs/evidence/r5-budget-canvas-matrix.md` 之后又加了**画布侧警告**这条（放行）：1248×1248 + 896 有警告、同一笔预算在 0.82 MP 画布上**没有**、
   1.5MP 画布 + 512 也**没有**、插值区的画布（1216×1024 = 1.25 MP）照样触发并如实报出面积，
   以及覆盖开关放行时同一条 warning 里同时含覆盖与画布两侧；最后一条**防回潮**断言钉住
-  「`≤896` 与『画布停在 1.5MP』并列」这条被 `_r5` 证伪的说法不再出现在 README、
+  「`≤896` 与『画布停在 1.5MP』并列」这条被 `docs/evidence/r5-budget-canvas-matrix.md` 证伪的说法不再出现在 README、
   **compose 后的 skill 正文**与 `lib/index.js` 里的工具文案三处
 - `test/edit-e2e.test.mjs`：**参考图编辑**。参考 PNG 由测试自己生成（尺寸要真，所以不能拿假字节糊弄）：
   假 ComfyUI 收到 `/upload/image` multipart（**上传字节与参考图逐字节一致**、文件名按内容哈希）、

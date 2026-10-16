@@ -39,7 +39,7 @@ export const MAX_SIDE = 4096
  * default canvases lands above the reliable edit budget**. The i2i numbers — and
  * the gate the tool layer now derives from them — are
  * {@link LOCAL_EDIT_BUDGET_RELIABLE}, {@link LOCAL_EDIT_BUDGET_EDGE} and
- * `_r4b\REPORT.md` §(a)/§(b).
+ * `docs/evidence/r4b-local-edit-failures.md` §(a)/§(b).
  */
 export const DEFAULT_MEGAPIXELS = 1.5
 
@@ -98,11 +98,11 @@ export function referenceBudget(width: number, height: number): number {
  * Measured on the card class this plugin targets (RTX 4070 Laptop, 8188 MiB,
  * `_fresh2` venv, 1 step): canvas **1216×672** → budget 896 → condition 896×896 →
  * peak `reserved` **7458 MiB**, 3/3 runs bit-identical. This is *this card's* wall,
- * not a law about editing — `_r4b\REPORT.md` §(b).
+ * not a law about editing — `docs/evidence/r4b-local-edit-failures.md` §(b).
  *
  * The line is **budget-only**: it says nothing about the canvas's own cost. The
  * same 896 on a 1.5 MP canvas (1248×1248) measured **67 s/step** — no error, just
- * ~28 min for 25 steps — while 0.82 MP measured 1.9 s/step. `_r5\REPORT.md`.
+ * ~28 min for 25 steps — while 0.82 MP measured 1.9 s/step. `docs/evidence/r5-budget-canvas-matrix.md`.
  */
 export const LOCAL_EDIT_BUDGET_RELIABLE = 896
 
@@ -113,7 +113,7 @@ export const LOCAL_EDIT_BUDGET_RELIABLE = 896
  * The two measured endpoints are **0.82 MP** at budget 896 → 1.9 s/step
  * (1216×672) and **1.55 MP** at the *same* 896 → 67 s/step (1248×1248); 1.0 MP
  * sits between them, so this line is **interpolation, not a measurement** —
- * nothing has been run at 1.0 MP itself. `_r5\REPORT.md`.
+ * nothing has been run at 1.0 MP itself. `docs/evidence/r5-budget-canvas-matrix.md`.
  */
 export const LOCAL_EDIT_CANVAS_WARN_AREA = 1_000_000
 
@@ -122,7 +122,7 @@ export const LOCAL_EDIT_CANVAS_WARN_AREA = 1_000_000
  *
  * 1248×1248 + 512 → HTTP 200, wall 109.5 s, peak `reserved` **6488 MiB**, worker
  * alive; the same canvas at 896 never finished (two runs, 67 s/step, extrapolated
- * ≈28 min, **no error**). `_r5\REPORT.md`.
+ * ≈28 min, **no error**). `docs/evidence/r5-budget-canvas-matrix.md`.
  */
 export const LOCAL_EDIT_CANVAS_SAFE_BUDGET = 512
 
@@ -133,7 +133,7 @@ export const LOCAL_EDIT_CANVAS_SAFE_BUDGET = 512
  * i.e. **above this card's 8188 MiB total** — it only held because the driver fell
  * back to WDDM shared memory, and denoise took 21.19 s (≈ 2× the 928 tier). Above
  * this line the same card fails: 992–1024 in the GPU denoise stage, ≥1216 with a
- * native access violation in the CPU text-encode stage. `_r4b\REPORT.md` §(a)/§(b).
+ * native access violation in the CPU text-encode stage. `docs/evidence/r4b-local-edit-failures.md` §(a)/§(b).
  */
 export const LOCAL_EDIT_BUDGET_EDGE = 960
 

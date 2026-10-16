@@ -79,7 +79,7 @@ ComfyUI 8 步 19–23 s，受管 worker 6 步 219 s。原因是显存被**超额
 把 reserved 顶到 8666 MiB、越过 8188 MiB 物理上限，驱动走 WDDM 分页，去噪每一步 20–40 s（文生图同尺寸约 2 s/步）。
 ⚠️ **上面这组数字（8666 MiB / 1312×736 / 6 步 219 s）是历史实测（`_r4` 时代），不是今天的复现结果。**
 R4-B 在 cu126 + 当前 worker 上**复现不出这次 1312×736「超额认购但仍跑完」的记录**：同样配置今天是**干净的
-CUDA OOM**（`_r4b\REPORT.md` §(a)）。最可能的解释是当时主机内存更空、WDDM 共享内存借得到——**这是假设，
+CUDA OOM**（`docs/evidence/r4b-local-edit-failures.md` §(a)）。最可能的解释是当时主机内存更空、WDDM 共享内存借得到——**这是假设，
 未定案**，不要当结论复述（共享内存本身仍可复现：960×960 的 reserved 到过 8492 MiB > 8188）。
 **现状（本地编辑尺寸门）**：`local` 编辑（含 `auto` 回退到 local）现在按**参考图条件化预算 `_reference_budget`** 分三档：
 - `≤ 896`：**可靠档，正常放行**（实测画布 1216×672 → 峰值 reserved 7458 MiB）。⚠️ **这条线只按预算分档、
@@ -89,7 +89,7 @@ CUDA OOM**（`_r4b\REPORT.md` §(a)）。最可能的解释是当时主机内存
   靠 WDDM 共享内存撑住，denoise 21.19 s ≈ 928 档的两倍）。
 - `> 960`：**默认直接拒绝**；只有用户把配置 `allowLocalEditOverBudget` 设为 `true`（默认 `false`）才放行。
   失败分界（RTX 4070 Laptop 8188 MiB）：992–1024 在 **GPU 去噪段** CUDA OOM；≥1216 在 **CPU 文本编码段**
-  native access violation，worker 进程可能直接消失——出处 `_r4b\REPORT.md` §(a)/§(b)。
+  native access violation，worker 进程可能直接消失——出处 `docs/evidence/r4b-local-edit-failures.md` §(a)/§(b)。
 - **这道门会拦住默认画布**：7 档默认画布算出的 `_reference_budget` 全是 **1216–1248**（`1:1→1248`，
   `4:3`/`3:4→1216`，其余→1248），所以**不给更小的 `width`/`height`，默认画布上的 `local` 编辑会被直接拒绝**；
   要走 local 就显式给可靠档尺寸（例如 1216×672）。

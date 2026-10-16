@@ -1,7 +1,7 @@
 {
   "name": "dsh-image-forge",
   "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: Qwen-Image 出图工具，把官方提示词契约的 wh_ratio 做成一等参数（云 API 后端，BYO-key）",
+  "description": "DeepSeek Harness plugin: Qwen-Image 文生图 / 参考图编辑，把官方提示词契约的 wh_ratio 做成一等参数；后端 local（本插件自带受管运行时）/ comfyui / api，默认 auto",
   "license": "MIT",
   "author": "Demerier",
   "keywords": [
@@ -33,7 +33,8 @@
     "cordis.yml",
     "README.md",
     "skill.md",
-    "references"
+    "references",
+    "docs/evidence"
   ],
   "scripts": {
     "build": "tsdown && tsdown -c tsdown.client.config.ts",
