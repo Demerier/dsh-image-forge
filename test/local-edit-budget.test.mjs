@@ -19,7 +19,7 @@
  * evidence is `docs/evidence/r4b-local-edit-failures.md` §(a)/§(b), and the numbers are
  * quoted in `src/ratio.ts` next to the constants.
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -133,6 +133,16 @@ test('the tier boundaries sit on the measured lines', () => {
 // The three bands, through the tool
 // ---------------------------------------------------------------------------
 
+/**
+ * Ephemeral runtime for the whole file: a machine that already has
+ * ~/.dsh-image-forge/venv must not make tests spawn that worker.
+ */
+const HERMETIC_RUNTIME = mkdtempSync(join(tmpdir(), 'forge-rt-'))
+
+after(() => {
+  rmSync(HERMETIC_RUNTIME, { recursive: true, force: true })
+})
+
 /** Register the plugin against a stub context and hand back the tool map. */
 function register(config) {
   const tools = new Map()
@@ -140,7 +150,7 @@ function register(config) {
     tools: { register: (definition) => tools.set(definition.name, definition) },
     skills: { register: () => undefined },
   }
-  plugin.apply(ctx, { ...plugin.Config({}), ...config })
+  plugin.apply(ctx, { ...plugin.Config({}), runtimeDir: HERMETIC_RUNTIME, ...config })
   return tools
 }
 

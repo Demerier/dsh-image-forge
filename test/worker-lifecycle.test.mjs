@@ -12,7 +12,7 @@
  * resume, sha256 verification and the `lm_head` strip testable without
  * downloading 10.6 GiB.
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -33,6 +33,16 @@ async function freePort() {
   return port
 }
 
+/**
+ * Ephemeral runtime for the whole file: a machine that already has
+ * ~/.dsh-image-forge/venv must not make tests spawn that worker.
+ */
+const HERMETIC_RUNTIME = mkdtempSync(join(tmpdir(), 'forge-rt-'))
+
+after(() => {
+  rmSync(HERMETIC_RUNTIME, { recursive: true, force: true })
+})
+
 /** Register the plugin against a stub context and hand back the tool map. */
 function register(config) {
   const tools = new Map()
@@ -40,7 +50,7 @@ function register(config) {
     tools: { register: (definition) => tools.set(definition.name, definition) },
     skills: { register: () => undefined },
   }
-  plugin.apply(ctx, { ...plugin.Config({}), ...config })
+  plugin.apply(ctx, { ...plugin.Config({}), runtimeDir: HERMETIC_RUNTIME, ...config })
   return tools
 }
 

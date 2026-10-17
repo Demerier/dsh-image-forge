@@ -72,7 +72,11 @@ if (mode === 'crash') {
 // What a CUDA allocation failure during load looks like from the outside on
 // Windows: NTSTATUS 0xC0000005, and nothing in the log that names a cause.
 if (mode === 'crash-access-violation') {
+  // Print the NT status as well as exiting with it: non-Windows keeps only the
+  // low 8 bits of the process status, so the log is the only place the full
+  // 0xC0000005 survives for `explainWorkerExit` to recover.
   console.error('fake-worker: loading pipeline from <models-dir>')
+  console.error('fake-worker: fatal exception code 3221225477 (0xC0000005 ACCESS_VIOLATION)')
   process.exit(3221225477)
 }
 if (mode === 'exit-silent') process.exit(0)

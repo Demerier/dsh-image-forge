@@ -17,7 +17,7 @@
  * not block on a card it cannot read), so the GPU-dependent tests detect that and
  * skip instead of failing.
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -35,6 +35,16 @@ const HUGE = 10_000_000
 /** What a refusal quotes back, so the numbers can be checked for consistency. */
 const GATE_NUMBERS = /空闲 (\d+|) MiB \/ (\d+|) MiB，需要至少 (\d+) MiB；还差 (\d+) MiB/
 
+/**
+ * Ephemeral runtime: a machine that already has ~/.dsh-image-forge/venv must
+ * not make these tests spawn that worker.
+ */
+const HERMETIC_RUNTIME = mkdtempSync(join(tmpdir(), 'forge-rt-'))
+
+after(() => {
+  rmSync(HERMETIC_RUNTIME, { recursive: true, force: true })
+})
+
 async function register(config) {
   const plugin = await import('../lib/index.js')
   const tools = new Map()
@@ -42,7 +52,7 @@ async function register(config) {
     tools: { register: (definition) => tools.set(definition.name, definition) },
     skills: { register: () => undefined },
   }
-  plugin.apply(ctx, { ...plugin.Config({}), ...config })
+  plugin.apply(ctx, { ...plugin.Config({}), runtimeDir: HERMETIC_RUNTIME, ...config })
   return tools
 }
 

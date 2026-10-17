@@ -6,7 +6,7 @@
  * lands on disk under the required name. Also pins the failure modes — no key,
  * no worker, upstream error — as readable messages rather than crashes.
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -49,6 +49,18 @@ async function startFakeEndpoint() {
   }
 }
 
+/**
+ * Ephemeral runtime for the whole file.
+ *
+ * The machine's real `~/.dsh-image-forge` may already have a venv — without
+ * this, a "no backend" generate would try to spawn that worker and hang.
+ */
+const HERMETIC_RUNTIME = mkdtempSync(join(tmpdir(), 'forge-rt-'))
+
+after(() => {
+  rmSync(HERMETIC_RUNTIME, { recursive: true, force: true })
+})
+
 /** Register the plugin against a stub context and hand back the tool map. */
 function register(config) {
   const tools = new Map()
@@ -56,7 +68,7 @@ function register(config) {
     tools: { register: (definition) => tools.set(definition.name, definition) },
     skills: { register: () => undefined },
   }
-  plugin.apply(ctx, { ...plugin.Config({}), ...config })
+  plugin.apply(ctx, { ...plugin.Config({}), runtimeDir: HERMETIC_RUNTIME, ...config })
   return tools
 }
 

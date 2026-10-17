@@ -136,11 +136,27 @@ export interface WorkerExitExplanation {
  * @returns the headline plus ordered hints.
  */
 export function explainWorkerExit(code: number | null, signal: string | null, tail: string): WorkerExitExplanation {
-  const status = code === null ? undefined : WINDOWS_EXIT_STATUS[code]
+  // Linux/macOS keep only the low 8 bits of a child's exit status, so a Windows
+  // NTSTATUS such as 0xC0000005 arrives here as `5`. When the log names the real
+  // status, prefer that over the truncated number.
+  let resolvedCode = code
+  let status = resolvedCode === null ? undefined : WINDOWS_EXIT_STATUS[resolvedCode]
+  if (status === undefined) {
+    const hexInTail = /0xC0[0-9A-Fa-f]{6}/i.exec(tail)?.[0]?.toUpperCase()
+    if (hexInTail !== undefined) {
+      const entry = Object.entries(WINDOWS_EXIT_STATUS).find(([, value]) => value.hex === hexInTail)
+      if (entry !== undefined) {
+        resolvedCode = Number(entry[0])
+        status = WINDOWS_EXIT_STATUS[resolvedCode]
+      }
+    }
+  }
   const headline =
     status === undefined
       ? `exit code ${code ?? 'null'}${signal === null ? '' : ` signal ${signal}`}`
-      : `exit code ${code} = ${status.hex} ${status.cause}`
+      : code !== null && code !== resolvedCode
+        ? `exit code ${resolvedCode} = ${status.hex} ${status.cause}（本机进程状态只保留了低 8 位，原码 ${code}）`
+        : `exit code ${resolvedCode} = ${status.hex} ${status.cause}`
   const cudaInLog = /CUDA out of memory|OutOfMemoryError|CUDA error|no CUDA-capable device|out of memory/i.test(tail)
   const crashLike = status !== undefined && (status.hex === '0xC0000005' || status.hex === '0xC0000374')
   const hints: string[] = []
