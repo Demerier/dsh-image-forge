@@ -1,7 +1,7 @@
 name: Release
 
-# Tag-driven publish: push a `v*` tag (e.g. v0.1.0) to cut a GitHub Release and
-# publish the same tarball to npm. `workflow_dispatch` can re-run a tag that
+# Tag-driven publish: push a `v*` tag (e.g. v0.1.0) to publish that exact tree to
+# npm and then cut the GitHub Release for it. `workflow_dispatch` can re-run a tag that
 # already exists without moving it.
 on:
   push:
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   release:
-    name: Pack, GitHub Release, npm
+    name: Pack, npm, GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -70,6 +70,14 @@ jobs:
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
           shasum -a 256 "$TARBALL" | tee "$TARBALL.sha256"
 
+      # Publish first. A token that cannot publish must not leave a GitHub Release
+      # behind for a version npm never received — that is the one failure mode here
+      # that cannot be undone by re-running the job.
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -94,8 +102,3 @@ jobs:
             ${{ steps.pack.outputs.tarball }}.sha256
           fail_on_unmatched_files: true
           generate_release_notes: true
-
-      - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
