@@ -62,21 +62,37 @@ key 只存在于内存，随 `Authorization: Bearer` 发出；**不写盘、不�
 
 ## 设置页（DSH Web GUI）
 
-除了在 profile 里手写配置，**上面这 32 个字段都能在 DSH 设置页里读和写**：
+除了在 profile 里手写配置，**schema 里 33 个字段仍全部可写**；但设置页**只展示日常需要的 16 个**，
+自定义环境配置（解释器路径、wheel 标签、镜像、端口段…）**不外露**——本地安装交给「一键部署」。
 
 - 菜单位置：**设置 → 「Qwen 出图」**——这是和「通用设置 / 模式 / 插件 / Agent 预设」同级的**一级菜单项**
   （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。
-- 字段按用途分成七块，不是一张平铺的长表：
+- **多标签布局**：页面不是一条长卷轴，而是四个标签页，字段在宽栏下两列铺开：
+
+  | 标签 | 内容 |
+  |---|---|
+  | 出图 | `backend`、步数三项、`outputDir` / `timeoutMs`，以及后端性能说明 |
+  | 云端 API | `apiBaseUrl`、`apiKey`、`apiModel`、`apiStyle` |
+  | 本地环境 | **一键部署卡片** + `minFreeVramMiB`、`freeComfyBeforeLocalStart`、`allowLocalEditOverBudget`、`localReferenceBudget` |
+  | ComfyUI | `comfyEndpoint`、`comfyPorts` |
+
+- **本地运行时一键部署**：调用宿主侧回环桥（`127.0.0.1:8411`，`GET /status` / `POST /deploy`），
+  自动建 venv、装 CUDA torch、下载 nf4 权重（约 10.63 GiB）。胶囊实时显示 venv / 权重就绪度。
+- **页面可见字段**（六块）：
 
   | 分区 | 字段 |
   |---|---|
   | 后端选择 | `backend` |
   | 步数（画质与耗时） | `defaultSteps`、`comfyuiSteps`、`localSteps` |
   | 云端 API | `apiBaseUrl`、`apiKey`、`apiModel`、`apiStyle` |
-  | 本地运行时 | `runtimeDir`、`modelsDir`、`modelRepo`、`hfMirror`、`localEndpoint`、`workerPorts`、`workerStartTimeoutMs`、`idleUnloadMs`、`manageWorker`、`minFreeVramMiB`、`freeComfyBeforeLocalStart`、`allowLocalEditOverBudget`、`localReferenceBudget` |
-  | ComfyUI | `comfyEndpoint`、`comfyPorts`、`comfyModelsDir` |
+  | 本地运行时 | `minFreeVramMiB`、`freeComfyBeforeLocalStart`、`allowLocalEditOverBudget`、`localReferenceBudget`（+ 一键部署卡片） |
+  | ComfyUI | `comfyEndpoint`、`comfyPorts` |
   | 输出与超时 | `outputDir`、`timeoutMs` |
-  | Python、依赖与权重（高级） | `pythonPath`、`workerScript`、`basePython`、`torchWheels`、`pipIndexUrl`、`reuseBaseTorch`、`skipLmHead` |
+
+- **不外露（schema 仍可写，profile/测试可设）**：`runtimeDir`、`modelsDir`、`modelRepo`、`hfMirror`、
+  `localEndpoint`、`workerPorts`、`workerStartTimeoutMs`、`idleUnloadMs`、`manageWorker`、`comfyModelsDir`，
+  以及整块 `python`（`pythonPath`、`workerScript`、`basePython`、`torchWheels`、`pipIndexUrl`、`reuseBaseTorch`、`skipLmHead`）。
+  这些进阶项的默认值就是一键部署用的那一套；要改请写 profile，或等将来需要时再暴露。
 
 - **`apiKey` 只写不读**：输入框是密码框，已保存的密钥永远只显示成掩码（`••••••••`），
   留空表示「不修改已保存的密钥」。保存失败时的提示里也不会出现密钥内容。

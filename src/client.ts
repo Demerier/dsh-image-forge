@@ -1,42 +1,43 @@
 /**
- * Client half: the `qwen_image_generate` keyed tool view **and** the
+ * Client half: keyed tool views for every `qwen_image_*` tool **and** the
  * `dsh-image-forge` first-level settings section.
  *
- * ## The tool view
+ * ## Tool views
  *
  * `tool.call.toolview` is a **keyed** slot, and the key must be the tool's wire
- * name (`qwen_image_generate`) for the card to own that call's row — a
- * mismatched key silently registers a view nothing ever dispatches to.
+ * name for the card to own that call's row — a mismatched key silently
+ * registers a view nothing ever dispatches to. All four tools are seated:
+ * generate/edit show the landed images, status/env show a compact digest of the
+ * JSON the tool already returned in full.
  *
- * Scope note: this entry only adds a row that shows progress and, once the
- * result carries absolute paths, renders the images inline through the
- * session-authorized `loadImage` loader the row receives. The primary display
- * path stays the Markdown `![](absolute path)` lines the Host returns in the
- * tool result — if this card cannot render for any reason it renders nothing
- * and the conversation still shows the images. Everything here is defensive for
- * exactly that reason.
+ * Scope note: these cards are supplementary. The primary display path stays the
+ * Markdown `![](absolute path)` lines the Host returns in the tool result — if
+ * a card cannot render for any reason it renders nothing and the conversation
+ * still shows the images. Everything here is defensive for exactly that reason.
  *
  * ## The settings section
  *
  * `settings.section` is a **list** slot (seated by `id`), and a seat there is a
  * first-level entry in the DSH settings page. The page the section renders is
  * bound to the Host's own shared config form for this plugin's profile entry —
- * see `./settings-section.ts` for the binding and save semantics. All the logic
- * lives there, react-free and service-free, so it can be tested; this file is
- * the React layer on top of it.
+ * see `./settings-section.ts` for the binding and save semantics. Field tables
+ * live in `./settings-fields.ts`; layout CSS in `./client-styles.ts`. This file
+ * is the React layer on top of those.
  *
  * Nothing here reaches for a service at activation time: `configForms` is looked
  * up optionally, and a page that serves none gets a notice in the section rather
- * than losing the plugin's client half (and with it the tool card).
+ * than losing the plugin's client half (and with it the tool cards).
  */
 import { createElement, useEffect, useState, type ReactNode } from 'react'
+import { injectClientStyles } from './client-styles.ts'
 import {
   SECRET_MASK,
+  SETTINGS_TABS,
   advisoryAfterGroup,
   displayValue,
-  groupedFields,
   isSecretField,
   resolveHint,
+  tabFields,
   type SettingsAdvisory,
   type SettingsField,
   type SettingsGroup,
@@ -73,60 +74,384 @@ const name = 'dsh-image-forge-client'
  */
 export const inject = ['slots', 'configForms']
 
+/** Every tool this plugin registers, in the order the cards are seated. */
+const TOOL_KEYS = [
+  'qwen_image_generate',
+  'qwen_image_edit',
+  'qwen_image_status',
+  'qwen_image_env',
+] as const
+
 /** Minimal shape of the host-provided image loader. */
 type LoadImage = (path: string) => unknown
+
+/**
+ * One item of a tool-result `content` array: the Host renders execute() output
+ * as text blocks carrying the JSON payload.
+ */
+interface ToolContentItem {
+  readonly type?: string
+  readonly text?: string
+}
+
+/**
+ * The tool-result block the Host actually hands the view.
+ *
+ * Discovered on a real client (2026-10-17): the view is **not** given
+ * `result.value`. It receives `toolName`, `phase`, `loadImage` and a `block`
+ * of kind `tool-result` whose `content[].text` is the JSON that `execute()`
+ * returned (after the tool layer validated it). Reading the wrong shape made
+ * every card show its empty-state fallbacks in a real client while the Node
+ * tests still passed — see `docs/evidence/` for the live capture.
+ */
+interface ToolResultBlock {
+  readonly kind?: string
+  readonly name?: string
+  readonly content?: readonly ToolContentItem[]
+  readonly isError?: boolean
+}
 
 /** The row props this view reads; every field is optional by design. */
 interface ToolRowProps {
   readonly phase?: string
   readonly toolName?: string
   readonly loadImage?: LoadImage
+  readonly block?: ToolResultBlock
+  /** Legacy/guessed shape kept as a fallback if the Host ever passes it. */
   readonly result?: {
     readonly value?: unknown
   }
 }
 
-/** Pull `images[].path` out of the tool's canonical payload, tolerantly. */
-function imagePaths(props: ToolRowProps): string[] {
-  const value = props.result?.value
-  if (typeof value !== 'object' || value === null) return []
-  const images = (value as { images?: unknown }).images
-  if (!Array.isArray(images)) return []
-  return images
-    .map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { path?: unknown }).path : undefined))
-    .filter((path): path is string => typeof path === 'string' && path.length > 0)
-}
-
-/** One-line status text for the current lifecycle phase. */
-function statusText(props: ToolRowProps): string {
-  const phase = props.phase ?? 'start'
-  if (phase === 'preparing') return '准备出图参数…'
-  if (phase === 'result') {
-    const count = imagePaths(props).length
-    return count > 0 ? `出图完成：${count} 张` : '出图结束（未落盘，请看工具结果）'
-  }
-  return '正在出图（云端 API 或本地 worker）…'
+/** Tolerant read of one nested object field from a tool payload. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
 }
 
 /**
- * The tool row itself.
+ * The tool payload, from the Host's tool-result block (or a `result.value`
+ * fallback).
+ *
+ * @param props - the row props.
+ * @returns the parsed JSON object `execute()` returned, if any.
+ */
+function payloadOf(props: ToolRowProps): Record<string, unknown> | undefined {
+  const content = props.block?.content
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      const text = item?.text
+      if (typeof text !== 'string' || text.length === 0) continue
+      try {
+        const parsed: unknown = JSON.parse(text)
+        const record = asRecord(parsed)
+        if (record !== undefined) return record
+      } catch {
+        // Not every text block is JSON; keep looking.
+      }
+    }
+  }
+  return asRecord(props.result?.value)
+}
+
+/** Wire name of the tool this row is rendering. */
+function toolNameOf(props: ToolRowProps): string {
+  return props.toolName ?? props.block?.name ?? ''
+}
+
+/** Pull `images[].path` out of the tool's canonical payload, tolerantly. */
+function imagePaths(props: ToolRowProps): string[] {
+  const images = payloadOf(props)?.['images']
+  if (!Array.isArray(images)) return []
+  return images
+    .map((entry) => asRecord(entry)?.['path'])
+    .filter((path): path is string => typeof path === 'string' && path.length > 0)
+}
+
+/** One meta chip; `tone` maps onto the pill modifiers in the stylesheet. */
+function pill(key: string, text: string, tone: 'ok' | 'warn' | 'bad' | 'neutral' = 'neutral'): ReactNode {
+  const className =
+    tone === 'neutral' ? 'dsh-image-forge-pill' : `dsh-image-forge-pill dsh-image-forge-pill-${tone}`
+  return createElement('span', { key, className }, text)
+}
+
+/** Compact `1664×928` from a result `size` object, or null. */
+function sizeChip(value: Record<string, unknown> | undefined): ReactNode {
+  const size = asRecord(value?.['size'])
+  const width = size?.['width']
+  const height = size?.['height']
+  if (typeof width !== 'number' || typeof height !== 'number') return null
+  return pill('size', `${width}×${height}`)
+}
+
+/** Status / running / done line for the current lifecycle phase. */
+function phaseLabel(props: ToolRowProps, done: string, running: string): string {
+  const phase = props.phase ?? 'start'
+  if (phase === 'preparing') return '准备参数…'
+  if (phase === 'result') return done
+  return running
+}
+
+/** Shared card shell: title, status line, optional pills, then children. */
+function CardShell(props: {
+  title: string
+  status: string
+  pills: ReactNode[]
+  children: ReactNode[]
+}): ReactNode {
+  return createElement('div', { className: 'dsh-image-forge-row' }, [
+    createElement('div', { key: 'head', className: 'dsh-image-forge-row-head' }, [
+      createElement('h4', { key: 'title', className: 'dsh-image-forge-row-title' }, props.title),
+      createElement('span', { key: 'status', className: 'dsh-image-forge-row-status' }, props.status),
+    ]),
+    props.pills.length > 0
+      ? createElement('div', { key: 'meta', className: 'dsh-image-forge-row-meta' }, props.pills)
+      : null,
+    ...props.children,
+  ])
+}
+
+/** The image grid both generate and edit render once paths exist. */
+function ImageGrid(props: ToolRowProps): ReactNode {
+  const paths = imagePaths(props)
+  if (paths.length === 0 || typeof props.loadImage !== 'function') return null
+  return createElement(
+    'div',
+    { key: 'images', className: 'dsh-image-forge-images' },
+    paths.map((path, index) =>
+      createElement('img', {
+        key: `image-${index}`,
+        src: props.loadImage?.(path) as string,
+        alt: path,
+        loading: 'lazy',
+      }),
+    ),
+  )
+}
+
+/**
+ * Generate / edit card: the landed images plus the facts that explain them.
  *
  * @param props - owner props supplied by ui-tool's dispatch.
- * @returns a small card: a status line plus any images the loader accepts.
+ * @returns the card, or nothing on a presentation failure.
  */
-function QwenImageGenerateRow(props: ToolRowProps): ReactNode {
+function ImageResultRow(props: ToolRowProps): ReactNode {
   try {
-    const children: ReactNode[] = [createElement('span', { key: 'status' }, statusText(props))]
-    const paths = imagePaths(props)
-    if (paths.length > 0 && typeof props.loadImage === 'function') {
-      paths.forEach((path, index) => {
-        children.push(createElement('img', { key: `image-${index}`, src: props.loadImage?.(path) as string, alt: path }))
-      })
+    const payload = payloadOf(props)
+    const isEdit = toolNameOf(props) === 'qwen_image_edit'
+    const count = imagePaths(props).length
+    const done =
+      count > 0
+        ? `完成：${count} 张`
+        : isEdit
+          ? '改图结束（未落盘，请看工具结果）'
+          : '出图结束（未落盘，请看工具结果）'
+    const status = phaseLabel(props, done, isEdit ? '正在改图…' : '正在出图…')
+    const pills: ReactNode[] = []
+    const size = sizeChip(payload)
+    if (size !== null) pills.push(size)
+    const backend = payload?.['backend']
+    if (typeof backend === 'string' && backend.length > 0) pills.push(pill('backend', backend))
+    const ratio = payload?.['wh_ratio']
+    if (typeof ratio === 'string' && ratio.length > 0) pills.push(pill('ratio', `wh_ratio ${ratio}`))
+    const follow = payload?.['ratio_follow']
+    if (typeof follow === 'string' && follow.length > 0) pills.push(pill('follow', `← ${follow}`))
+    const stepsUsed = payload?.['steps_used']
+    if (typeof stepsUsed === 'number') pills.push(pill('steps', `${stepsUsed} 步`))
+    const refs = payload?.['references']
+    if (Array.isArray(refs) && refs.length > 0) pills.push(pill('refs', `${refs.length} 张参考`))
+
+    const notes: ReactNode[] = []
+    const gate = asRecord(payload?.['local_edit_budget'])
+    const gateWarning = gate?.['warning']
+    if (typeof gateWarning === 'string' && gateWarning.length > 0) {
+      notes.push(
+        createElement('p', { key: 'gate', className: 'dsh-image-forge-row-note' }, gateWarning.split('\n')[0] ?? ''),
+      )
     }
-    return createElement('div', { className: 'dsh-image-forge-row' }, children)
+
+    return createElement(CardShell, {
+      title: isEdit ? '参考图编辑' : '文生图',
+      status,
+      pills,
+      children: [createElement(ImageGrid, { key: 'grid', ...props }), ...notes],
+    })
   } catch {
     // A presentation failure must never take down the conversation row.
     return null
+  }
+}
+
+/** One checklist cell: a short label over a one-line verdict. */
+function checkCell(key: string, label: string, text: string, tone: 'ok' | 'warn' | 'bad' | 'neutral'): ReactNode {
+  return createElement('div', { key, className: 'dsh-image-forge-check' }, [
+    createElement('span', { key: 'label', className: 'dsh-image-forge-check-label' }, label),
+    createElement('span', { key: 'value', className: 'dsh-image-forge-check-value' }, text),
+    pill('tone', tone === 'neutral' ? '—' : tone === 'ok' ? 'OK' : tone === 'warn' ? '注意' : '不可用', tone),
+  ])
+}
+
+/**
+ * Status card: a four-cell digest of the health probe.
+ *
+ * The full JSON stays in the tool result; this is the glanceable half.
+ *
+ * @param props - owner props supplied by ui-tool's dispatch.
+ * @returns the card, or nothing on a presentation failure.
+ */
+function StatusRow(props: ToolRowProps): ReactNode {
+  try {
+    const payload = payloadOf(props)
+    const status = phaseLabel(props, '探测完成', '正在探测后端…')
+    const api = asRecord(payload?.['api'])
+    const comfy = asRecord(payload?.['comfyui'])
+    const worker = asRecord(payload?.['worker'])
+    const venv = asRecord(payload?.['venv'])
+    const weights = asRecord(payload?.['weights'])
+
+    const apiOk = api?.['reachable'] === true
+    const apiAuth = api?.['authenticated'] === true
+    const apiHasKey = api?.['keyPresent'] === true
+    const apiTone: 'ok' | 'warn' | 'bad' =
+      apiOk && apiAuth ? 'ok' : apiOk || (api?.['reachable'] === null && apiHasKey) ? 'warn' : 'bad'
+    const apiText = !apiHasKey && api?.['reachable'] !== true
+      ? '未配置 key'
+      : !apiOk
+        ? api?.['reachable'] === null
+          ? '未探测（无 key）'
+          : '不可达'
+        : apiAuth
+          ? '可达，key 被接受'
+          : '可达，但 key 被拒绝'
+
+    const comfyOk = comfy?.['reachable'] === true
+    const models = asRecord(comfy?.['models'])
+    const comfyTone: 'ok' | 'warn' | 'bad' = comfyOk ? (models?.['ok'] === true ? 'ok' : 'warn') : 'bad'
+    const comfyText = !comfyOk
+      ? '没找到在跑的实例'
+      : models?.['ok'] === true
+        ? '在跑，三个权重齐'
+        : '在跑，但缺 Qwen 权重'
+
+    const workerOk = worker?.['ready'] === true || worker?.['reachable'] === true
+    const workerTone: 'ok' | 'warn' | 'bad' = worker?.['ready'] === true ? 'ok' : workerOk ? 'warn' : 'bad'
+    const workerText = worker?.['ready'] === true
+      ? `ready${typeof worker['pid'] === 'number' ? ` · pid ${worker['pid']}` : ''}`
+      : workerOk
+        ? '进程在，未就绪'
+        : '不在跑（按需拉起）'
+
+    const localReady = venv?.['exists'] === true && weights?.['ready'] === true
+    const localTone: 'ok' | 'warn' | 'bad' = localReady ? 'ok' : venv?.['exists'] === true ? 'warn' : 'bad'
+    const localText = localReady
+      ? 'venv + 权重就绪'
+      : venv?.['exists'] === true
+        ? '权重未就绪'
+        : '本地运行时未安装'
+
+    return createElement(CardShell, {
+      title: '后端健康',
+      status,
+      pills: [
+        pill(
+          'backend',
+          `配置后端 ${typeof payload?.['configured_backend'] === 'string' ? payload['configured_backend'] : '?'}`,
+        ),
+      ],
+      children: [
+        createElement(
+          'div',
+          { key: 'checks', className: 'dsh-image-forge-checklist' },
+          [
+            checkCell('api', '云端 API', apiText, apiTone),
+            checkCell('comfy', 'ComfyUI', comfyText, comfyTone),
+            checkCell('worker', '本地 worker', workerText, workerTone),
+            checkCell('local', '本地运行时', localText, localTone),
+          ],
+        ),
+      ],
+    })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Env card: which action ran and the one number that matters for it.
+ *
+ * @param props - owner props supplied by ui-tool's dispatch.
+ * @returns the card, or nothing on a presentation failure.
+ */
+function EnvRow(props: ToolRowProps): ReactNode {
+  try {
+    const payload = payloadOf(props)
+    const action = typeof payload?.['action'] === 'string' ? (payload['action'] as string) : 'status'
+    const dryRun = payload?.['dry_run'] === true
+    const ok = payload?.['ok'] !== false
+    const status = phaseLabel(
+      props,
+      ok ? (dryRun ? `完成（dry-run）：${action}` : `完成：${action}`) : `未完成：${action}`,
+      `正在执行 ${action}…`,
+    )
+    const pills: ReactNode[] = [
+      pill('action', action),
+      pill('ok', ok ? 'ok' : 'failed', ok ? 'ok' : 'bad'),
+    ]
+    if (dryRun) pills.push(pill('dry', 'dry-run', 'warn'))
+
+    if (action === 'unload') {
+      const before = payload?.['vram_before_MiB']
+      const after = payload?.['vram_after_MiB']
+      if (typeof before === 'number' && typeof after === 'number') {
+        pills.push(pill('vram', `显存 ${before} → ${after} MiB`, after < before ? 'ok' : 'neutral'))
+      }
+    }
+    if (action === 'status') {
+      const gate = asRecord(payload?.['worker_start_gate'])
+      if (gate?.['would_refuse_start'] === true) pills.push(pill('gate', 'worker 将被拒绝启动', 'warn'))
+      else if (gate?.['would_refuse_start'] === false) pills.push(pill('gate', 'worker 可启动', 'ok'))
+    }
+    const files = payload?.['files']
+    if (Array.isArray(files) && files.length > 0 && action === 'fetch-weights') {
+      pills.push(pill('files', `${files.length} 个文件`))
+    }
+    const steps = payload?.['steps']
+    if (Array.isArray(steps) && action === 'install') {
+      const planned = steps.filter((step) => asRecord(step)?.['status'] === 'planned').length
+      if (planned > 0) pills.push(pill('steps', `${planned} 步待执行`, 'warn'))
+    }
+
+    const note = payload?.['note']
+    const children: ReactNode[] = []
+    if (typeof note === 'string' && note.length > 0) {
+      children.push(createElement('p', { key: 'note', className: 'dsh-image-forge-row-note' }, note))
+    }
+
+    return createElement(CardShell, {
+      title: '环境与运行时',
+      status,
+      pills,
+      children,
+    })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Build the tool row bound to one wire name.
+ *
+ * The Host does not guarantee `toolName` on the props, so the key is closed over
+ * at registration time instead of being read back from the call.
+ *
+ * @param toolName - the tool's wire name.
+ * @returns a component that renders that tool's card.
+ */
+function createToolRow(toolName: string): (props: ToolRowProps) => ReactNode {
+  return function QwenImageToolRow(props: ToolRowProps): ReactNode {
+    const bound: ToolRowProps = { ...props, toolName: toolNameOf(props) || toolName }
+    if (toolName === 'qwen_image_status') return StatusRow(bound)
+    if (toolName === 'qwen_image_env') return EnvRow(bound)
+    return ImageResultRow(bound)
   }
 }
 
@@ -164,6 +489,7 @@ function FieldRow(props: ControlProps): ReactNode {
   const [draft, setDraft] = useState<string | null>(null)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [saved, setSaved] = useState(false)
+  const controlId = `dsh-image-forge-field-${field.key}`
 
   const commit = (next: unknown): void => {
     setFailure(undefined)
@@ -191,7 +517,7 @@ function FieldRow(props: ControlProps): ReactNode {
     )
   }
 
-  const control = buildControl(field, value, disabled, draft, setDraft, commit)
+  const control = buildControl(field, value, disabled, draft, setDraft, commit, controlId)
   const status: ReactNode[] = []
   if (failure !== undefined) {
     status.push(
@@ -219,7 +545,11 @@ function FieldRow(props: ControlProps): ReactNode {
   }
 
   return createElement('div', { className: 'dsh-image-forge-setting' }, [
-    createElement('label', { key: 'label', className: 'dsh-image-forge-setting-label' }, field.label),
+    createElement(
+      'label',
+      { key: 'label', className: 'dsh-image-forge-setting-label', htmlFor: controlId },
+      field.label,
+    ),
     createElement('div', { key: 'control', className: 'dsh-image-forge-setting-control' }, control),
     // Hints may carry the runtime-directory token, which is substituted with the
     // live value: an empty `modelsDir`/`pythonPath` follows `runtimeDir`, so the
@@ -238,7 +568,8 @@ function FieldRow(props: ControlProps): ReactNode {
  * @param draft - the local text draft, when the user has typed.
  * @param setDraft - draft setter.
  * @param commit - write callback.
- * @returns the control element.
+ * @param controlId - the input id the label points at.
+ * @returns the control element (and the unit suffix, for numbers).
  */
 function buildControl(
   field: SettingsField,
@@ -247,90 +578,249 @@ function buildControl(
   draft: string | null,
   setDraft: (next: string | null) => void,
   commit: (next: unknown) => void,
-): ReactNode {
+  controlId: string,
+): ReactNode[] {
   const key = field.key
+  const unit =
+    field.unit === undefined
+      ? []
+      : [createElement('span', { key: 'unit', className: 'dsh-image-forge-setting-unit' }, field.unit)]
+
   if (field.kind === 'boolean') {
-    return createElement('input', {
-      type: 'checkbox',
-      checked: value === true,
-      disabled,
-      onChange: (event: { target: { checked: boolean } }) => {
-        commit(event.target.checked)
-      },
-    })
+    return [
+      createElement('input', {
+        key: 'input',
+        id: controlId,
+        type: 'checkbox',
+        checked: value === true,
+        disabled,
+        onChange: (event: { target: { checked: boolean } }) => {
+          commit(event.target.checked)
+        },
+      }),
+      ...unit,
+    ]
   }
   if (field.kind === 'enum') {
     const choices = field.choices ?? []
     const current = typeof value === 'string' ? value : ''
-    return createElement(
-      'select',
-      {
-        value: current,
-        disabled,
-        onChange: (event: { target: { value: string } }) => {
-          commit(event.target.value)
+    return [
+      createElement(
+        'select',
+        {
+          key: 'input',
+          id: controlId,
+          value: current,
+          disabled,
+          onChange: (event: { target: { value: string } }) => {
+            commit(event.target.value)
+          },
         },
-      },
-      choices.map((choice) => createElement('option', { key: choice.value, value: choice.value }, choice.label)),
-    )
+        choices.map((choice) => createElement('option', { key: choice.value, value: choice.value }, choice.label)),
+      ),
+      ...unit,
+    ]
   }
   if (field.kind === 'number') {
     // Numbers commit on blur so a half-typed value is never written, and are
     // range-checked against the field's own bounds before anything is sent. On a
     // nullable field an emptied box writes `unset` — a real state that means
     // "fall through to another setting", not the number zero.
-    return createElement('input', {
-      type: 'number',
-      ...(field.min === undefined ? {} : { min: field.min }),
-      ...(field.max === undefined ? {} : { max: field.max }),
-      value: draft ?? (value === undefined || value === null ? '' : String(value)),
-      disabled,
-      placeholder: field.nullable === true ? '留空 = 用默认步数' : undefined,
-      onChange: (event: { target: { value: string } }) => {
-        setDraft(event.target.value)
-      },
-      onBlur: () => {
-        if (draft === null) return
-        if (draft.trim() === '') {
-          if (field.nullable === true) commit(undefined)
+    return [
+      createElement('input', {
+        key: 'input',
+        id: controlId,
+        type: 'number',
+        ...(field.min === undefined ? {} : { min: field.min }),
+        ...(field.max === undefined ? {} : { max: field.max }),
+        value: draft ?? (value === undefined || value === null ? '' : String(value)),
+        disabled,
+        placeholder: field.nullable === true ? '留空 = 用默认步数' : undefined,
+        onChange: (event: { target: { value: string } }) => {
+          setDraft(event.target.value)
+        },
+        onBlur: () => {
+          if (draft === null) return
+          if (draft.trim() === '') {
+            if (field.nullable === true) commit(undefined)
+            setDraft(null)
+            return
+          }
+          const parsed = Number(draft)
+          if (!Number.isFinite(parsed)) {
+            setDraft(null)
+            return
+          }
+          if ((field.min !== undefined && parsed < field.min) || (field.max !== undefined && parsed > field.max)) return
+          commit(parsed)
           setDraft(null)
-          return
-        }
-        const parsed = Number(draft)
-        if (!Number.isFinite(parsed)) {
-          setDraft(null)
-          return
-        }
-        if ((field.min !== undefined && parsed < field.min) || (field.max !== undefined && parsed > field.max)) return
-        commit(parsed)
-        setDraft(null)
-      },
-    })
+        },
+      }),
+      ...unit,
+    ]
   }
   // Text-ish: `string`, `path` and `secret`. A secret is a password input whose
   // value starts empty and is only ever sent, never echoed back.
   const secret = field.kind === 'secret'
   const storedPresent = secret && typeof value === 'string' && value.length > 0
-  return createElement('input', {
-    type: secret ? 'password' : 'text',
-    value: draft ?? (secret ? '' : typeof value === 'string' ? value : ''),
-    disabled,
-    placeholder: storedPresent ? '已保存（留空表示不修改）' : (field.placeholder ?? ''),
-    autoComplete: secret ? 'off' : undefined,
-    onChange: (event: { target: { value: string } }) => {
-      setDraft(event.target.value)
-    },
-    onBlur: () => {
-      if (draft === null) return
-      // An untouched empty secret box means "leave the stored key alone".
-      if (secret && draft === '') {
+  return [
+    createElement('input', {
+      key: 'input',
+      id: controlId,
+      type: secret ? 'password' : 'text',
+      value: draft ?? (secret ? '' : typeof value === 'string' ? value : ''),
+      disabled,
+      placeholder: storedPresent ? '已保存（留空表示不修改）' : (field.placeholder ?? ''),
+      autoComplete: secret ? 'off' : undefined,
+      onChange: (event: { target: { value: string } }) => {
+        setDraft(event.target.value)
+      },
+      onBlur: () => {
+        if (draft === null) return
+        // An untouched empty secret box means "leave the stored key alone".
+        if (secret && draft === '') {
+          setDraft(null)
+          return
+        }
+        commit(draft)
         setDraft(null)
-        return
-      }
-      commit(draft)
-      setDraft(null)
-    },
-  })
+      },
+    }),
+    ...unit,
+  ]
+}
+
+// ---------------------------------------------------------------------------
+// One-click local deploy (settings).
+// ---------------------------------------------------------------------------
+
+/** Loopback bridge the host half serves; see `src/deploy-server.ts`. */
+const DEPLOY_BASE = 'http://127.0.0.1:8411'
+
+/** Shape of `GET /status` from the deploy bridge. */
+interface DeployStatusPayload {
+  readonly deploying?: boolean
+  readonly phase?: string | null
+  readonly venv?: { readonly exists?: boolean }
+  readonly weights?: {
+    readonly ready?: boolean
+    readonly present?: number
+    readonly missing?: number
+    readonly total_MiB?: number
+  }
+  readonly last?: { readonly ok?: boolean; readonly message?: string; readonly at?: string } | null
+}
+
+/**
+ * One-click deploy card: readiness chips + the button that runs venv install
+ * and the 10.63 GiB weight fetch through the host-side bridge.
+ *
+ * @returns the block, or a notice when the bridge is unreachable.
+ */
+function DeployBlock(): ReactNode {
+  const [status, setStatus] = useState<DeployStatusPayload | null>(null)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let stopped = false
+    const pull = (): void => {
+      void fetch(`${DEPLOY_BASE}/status`)
+        .then((response) => response.json() as Promise<DeployStatusPayload>)
+        .then((payload) => {
+          if (stopped) return
+          setStatus(payload)
+          setError(undefined)
+        })
+        .catch(() => {
+          if (stopped) return
+          setStatus(null)
+          setError('一键部署服务未响应（宿主插件未运行，或端口 8411 被占用）。')
+        })
+    }
+    pull()
+    const timer = setInterval(pull, 4000)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  const deploy = (): void => {
+    setBusy(true)
+    setError(undefined)
+    void fetch(`${DEPLOY_BASE}/deploy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dryRun: false, weights: true }),
+    })
+      .then(async (response) => {
+        const payload = (await response.json()) as { ok?: boolean; error?: string }
+        if (!response.ok || payload.ok === false) {
+          setError(payload.error ?? `部署失败（HTTP ${response.status}）`)
+        }
+        return fetch(`${DEPLOY_BASE}/status`)
+      })
+      .then((response) => response.json() as Promise<DeployStatusPayload>)
+      .then((payload) => {
+        setStatus(payload)
+        setBusy(false)
+      })
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause))
+        setBusy(false)
+      })
+  }
+
+  const venvOk = status?.venv?.exists === true
+  const weightsOk = status?.weights?.ready === true
+  const ready = venvOk && weightsOk
+  const deploying = status?.deploying === true || busy
+
+  return createElement('section', { className: 'dsh-image-forge-deploy', 'data-dsh-part': 'local-deploy' }, [
+    createElement('h4', { key: 'title', className: 'dsh-image-forge-deploy-title' }, '本地运行时一键部署'),
+    createElement(
+      'p',
+      { key: 'hint', className: 'dsh-image-forge-deploy-hint' },
+      '自动创建 venv、安装 CUDA torch，并下载 Qwen-Image nf4 权重（约 10.63 GiB）。自定义路径与镜像使用默认值，不在设置页暴露。',
+    ),
+    createElement('div', { key: 'chips', className: 'dsh-image-forge-row-meta' }, [
+      pill('venv', venvOk ? 'venv 就绪' : 'venv 未安装', venvOk ? 'ok' : 'warn'),
+      pill(
+        'weights',
+        weightsOk
+          ? `权重就绪 · ${status?.weights?.total_MiB ?? 0} MiB`
+          : `权重缺 ${status?.weights?.missing ?? '?'} 个文件`,
+        weightsOk ? 'ok' : 'warn',
+      ),
+      ...(status?.deploying === true && status.phase
+        ? [pill('phase', `部署中：${status.phase}`, 'warn')]
+        : []),
+      ...(status?.last
+        ? [
+            pill(
+              'last',
+              status.last.ok ? `上次成功${status.last.at ? '' : ''}` : '上次未完成',
+              status.last.ok ? 'ok' : 'bad',
+            ),
+          ]
+        : []),
+    ]),
+    createElement(
+      'button',
+      {
+        key: 'go',
+        type: 'button',
+        className: 'dsh-image-forge-deploy-go',
+        disabled: deploying,
+        onClick: deploy,
+      },
+      deploying ? '部署中…' : ready ? '重新部署' : '一键部署本地环境',
+    ),
+    ...(error !== undefined
+      ? [createElement('p', { key: 'error', className: 'dsh-image-forge-setting-failure' }, error)]
+      : []),
+  ])
 }
 
 /**
@@ -345,25 +835,44 @@ function GroupBlock(props: {
   value: Record<string, unknown>
   disabled: boolean
   write: Write
+  beforeFields?: ReactNode
+  dense?: boolean
 }): ReactNode {
-  const { group, fields, value, disabled, write } = props
-  return createElement('section', { className: 'dsh-image-forge-settings-group', key: group.id }, [
-    createElement('h3', { key: 'title', className: 'dsh-image-forge-settings-group-title' }, group.label),
-    createElement('p', { key: 'hint', className: 'dsh-image-forge-settings-group-hint' }, group.hint),
-    createElement(
-      'div',
-      { key: 'fields', className: 'dsh-image-forge-settings-fields' },
-      fields.map((field) =>
-        createElement(FieldRow, {
-          key: field.key,
-          field,
-          value: value[field.key],
-          disabled,
-          write,
-        }),
+  const { group, fields, value, disabled, write, beforeFields, dense } = props
+  return createElement(
+    'section',
+    {
+      className: dense
+        ? 'dsh-image-forge-settings-group dsh-image-forge-settings-group-dense'
+        : 'dsh-image-forge-settings-group',
+      key: group.id,
+      'data-group': group.id,
+      ...(group.advanced === true ? { 'data-advanced': 'true' } : {}),
+    },
+    [
+      createElement('h3', { key: 'title', className: 'dsh-image-forge-settings-group-title' }, group.label),
+      createElement('p', { key: 'hint', className: 'dsh-image-forge-settings-group-hint' }, group.hint),
+      beforeFields ?? null,
+      createElement(
+        'div',
+        {
+          key: 'fields',
+          className: dense
+            ? 'dsh-image-forge-settings-fields dsh-image-forge-settings-fields-grid'
+            : 'dsh-image-forge-settings-fields',
+        },
+        fields.map((field) =>
+          createElement(FieldRow, {
+            key: field.key,
+            field,
+            value: value[field.key],
+            disabled,
+            write,
+          }),
+        ),
       ),
-    ),
-  ])
+    ],
+  )
 }
 
 /**
@@ -398,6 +907,7 @@ function AdvisoryBlock(props: { advisory: SettingsAdvisory }): ReactNode {
 function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNode {
   const form = props.form as ConfigFormLike<unknown> | undefined
   const [tick, setTick] = useState(0)
+  const [tabId, setTabId] = useState<string>(SETTINGS_TABS[0]?.id ?? 'generate')
 
   useEffect(() => {
     if (form === undefined) return undefined
@@ -448,26 +958,66 @@ function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNo
       (error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }),
     )
 
-  return createElement('div', { className: 'dsh-image-forge-settings' }, [
+  const activeTab = SETTINGS_TABS.find((tab) => tab.id === tabId) ?? SETTINGS_TABS[0]
+  const panels = activeTab === undefined ? [] : tabFields(activeTab)
+
+  return createElement('div', { className: 'dsh-image-forge-settings', 'data-dsh-tick': tick }, [
+    createElement(
+      'div',
+      { key: 'tabs', className: 'dsh-image-forge-tabs', role: 'tablist' },
+      SETTINGS_TABS.map((tab) =>
+        createElement(
+          'button',
+          {
+            key: tab.id,
+            type: 'button',
+            role: 'tab',
+            className:
+              tab.id === activeTab?.id
+                ? 'dsh-image-forge-tab dsh-image-forge-tab-active'
+                : 'dsh-image-forge-tab',
+            'aria-selected': tab.id === activeTab?.id,
+            onClick: () => setTabId(tab.id),
+          },
+          tab.label,
+        ),
+      ),
+    ),
     createElement(
       'p',
       { key: 'lead', className: 'dsh-image-forge-settings-lead' },
-      disabled ? '当前配置条目为只读，无法保存修改。' : '改动会立即写入本插件的配置。',
+      [
+        activeTab?.hint ?? '',
+        disabled ? ' 当前配置条目为只读。' : ' 改动会立即写入。',
+      ]
+        .filter((part) => part.length > 0)
+        .join(' '),
     ),
-    ...groupedFields().flatMap(({ group, fields }) => {
-      const block = createElement(GroupBlock, { key: group.id, group, fields, value, disabled, write })
-      // The backend advisory rides directly under the backend controls, where
-      // the choice it talks about is actually made.
-      const advisory = advisoryAfterGroup(group.id)
-      return advisory === undefined
-        ? [block]
-        : [block, createElement(AdvisoryBlock, { key: advisory.id, advisory })]
-    }),
+    createElement(
+      'div',
+      { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' },
+      panels.map(({ group, fields }) => {
+        const block = createElement(GroupBlock, {
+          key: group.id,
+          group,
+          fields,
+          value,
+          disabled,
+          write,
+          dense: true,
+          ...(group.id === 'local' ? { beforeFields: createElement(DeployBlock, { key: 'deploy' }) } : {}),
+        })
+        const advisory = advisoryAfterGroup(group.id)
+        return advisory === undefined
+          ? [block]
+          : [block, createElement(AdvisoryBlock, { key: advisory.id, advisory })]
+      }),
+    ),
   ])
 }
 
 /**
- * Register the keyed tool view and the first-level settings section.
+ * Register the keyed tool views and the first-level settings section.
  *
  * @param ctx - cordis client context providing `slots`, and optionally `get`.
  */
@@ -478,8 +1028,22 @@ export function apply(ctx: {
   }
   get?(name: string): unknown
 }): void {
-  ctx.slots.inject('tool.call.toolview', () =>
-    ctx.slots.register({ name: 'tool.call.toolview', key: 'qwen_image_generate' }, QwenImageGenerateRow),
-  )
+  injectClientStyles()
+  // One inject, four keyed seats: each key is a separate toolview dispatch
+  // target, and a single component factory keeps the defensive shell shared.
+  ctx.slots.inject('tool.call.toolview', () => {
+    const seats = TOOL_KEYS.map((toolName) =>
+      ctx.slots.register({ name: 'tool.call.toolview', key: toolName }, createToolRow(toolName)),
+    )
+    return () => {
+      for (const seat of seats) {
+        try {
+          if (typeof seat === 'function') (seat as () => void)()
+        } catch {
+          // The slot fiber is already gone during teardown.
+        }
+      }
+    }
+  })
   registerSettingsSection(ctx, QwenImageSettingsSection)
 }

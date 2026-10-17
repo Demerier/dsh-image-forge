@@ -7,13 +7,17 @@ pnpm build
 pnpm test
 ```
 
-10 个文件 / **151 个用例**，全部不需要 GPU、venv 或 10.6 GiB 权重
-（ratio 12 / local-edit-budget 16 / surface 9 / api-e2e 8 / comfyui-e2e 9 / worker-lifecycle 21 / edit-e2e 9 / vram-gate 14 / settings 50 / package-contents 3）。
+10 个文件 / **153 个用例**，全部不需要 GPU、venv 或 10.6 GiB 权重
+（ratio 12 / local-edit-budget 16 / surface 9 / api-e2e 8 / comfyui-e2e 9 / worker-lifecycle 21 / edit-e2e 9 / vram-gate 14 / settings 52 / package-contents 3）。
 
-> 这 151 个用例目前在**本机全绿**（`worker-lifecycle` 21/21）。此前它曾有 2 个用例在
+> 这 152 个用例目前在**本机全绿**（`worker-lifecycle` 21/21）。此前它曾有 2 个用例在
 > `cleanup()` 的 `rmSync` 上报 `EPERM`，根因是 `python -m venv` 在 `TMP` 指向不存在的目录时
 > 会在 venv 里留下 ACL 为 `0o700` 的临时目录 —— 那是插件自身的一个真缺陷，已修掉，
 > 与本 README 描述的设置页改动无关。
+
+前端观感的**布局**可以用 `node test/preview-frontend.mjs` 生成 `test/client-preview.html`
+（真实 `CLIENT_CSS` + 与 `client.ts` 同构的 DOM），再用无头浏览器看窄栏/宽栏；它不是
+`pnpm test` 的一部分，也**不能替代**在真实 DSH web 客户端里过一遍设置页。
 
 - `test/settings.test.mjs`：设置分区的完整契约——注册形状（槽名 `settings.section`、`id`、
   `order`、`label`、组件、**不带 `key`**，以及 `inject` 返回的释放函数真的会解绑）、
@@ -26,7 +30,9 @@ pnpm test
   **全块禁止任何修复承诺**、且**被撤回或被证伪的数字（`8 倍` / `15 倍` / `7.75` / `0.98` / `37 s` /
   `口径存疑`）一旦重新出现就测试失败**（这条存在就是为了「别再犯那个错」）。
   另有「**advisory 不得含 markdown 标记**」的断言 —— 该分区把字符串当纯文本节点渲染，
-  `**` 与反引号会原样显示给用户。
+  `**` 与反引号会原样显示给用户；以及**客户端产物的展示层断言**：四个工具都进了
+  `tool.call.toolview`、样式注入与窄栏容器查询在 bundle 里、数字控件带单位后缀、
+  label 绑到控件、高级分组有标记。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置逻辑的独立 bundle，只给 `test/settings.test.mjs` 用，**不随包发布**——

@@ -241,8 +241,17 @@ test('the key can come from the environment, and it never appears in an error', 
 
 test('qwen_image_env keeps its five real actions (the v0.1 "not implemented" stub is gone)', async () => {
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-env-'))
+  // Own runtime dir: a machine that already has a venv under the default
+  // `~/.dsh-image-forge` must not make the dry-run "created nothing" check lie.
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'forge-env-rt-'))
   try {
-    const tools = register({ backend: 'api', apiKey: '', outputDir, localEndpoint: 'http://127.0.0.1:1' })
+    const tools = register({
+      backend: 'api',
+      apiKey: '',
+      outputDir,
+      runtimeDir,
+      localEndpoint: 'http://127.0.0.1:1',
+    })
     const status = await run(tools, 'qwen_image_env', { action: 'status' })
     console.log('env status (trimmed):', JSON.stringify({ host: status.host, gpu: status.gpu, disk: status.disk, backends: status.backends, output: status.output }, null, 2))
     assert.equal(status.action, 'status')
@@ -271,6 +280,7 @@ test('qwen_image_env keeps its five real actions (the v0.1 "not implemented" stu
     assert.ok(!existsSync(join(install.venv_dir)), 'a dry run must not create the venv')
   } finally {
     rmSync(outputDir, { recursive: true, force: true })
+    rmSync(runtimeDir, { recursive: true, force: true })
   }
 })
 
@@ -287,7 +297,28 @@ test('qwen_image_status reports the key state without echoing the key', async ()
     const serialized = JSON.stringify(status)
     assert.ok(!serialized.includes(sentinel), 'the key value must never appear in a status payload')
     assert.ok(!/Bearer\s+\S/.test(serialized), 'no authorization header value may appear')
+    // The DSH tool layer rejects a result that is not lossless JSON. A payload
+    // still carrying `undefined` properties fails that check in a real client
+    // (`value is not lossless JSON`) even though Node tests used to pass.
+    const holes = findUndefinedPaths(status)
+    assert.deepEqual(holes, [], `status payload must not carry undefined at ${JSON.stringify(holes)}`)
+    assert.deepEqual(JSON.parse(serialized), JSON.parse(JSON.stringify(JSON.parse(serialized))), 'status must round-trip through JSON')
   } finally {
     rmSync(outputDir, { recursive: true, force: true })
   }
 })
+
+/** Paths (dot notation) whose value is `undefined` — not lossless JSON. */
+function findUndefinedPaths(value, prefix = '') {
+  const holes = []
+  if (value === undefined) return [prefix || '<root>']
+  if (value === null || typeof value !== 'object') return holes
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => holes.push(...findUndefinedPaths(entry, `${prefix}[${index}]`)))
+    return holes
+  }
+  for (const [key, inner] of Object.entries(value)) {
+    holes.push(...findUndefinedPaths(inner, prefix ? `${prefix}.${key}` : key))
+  }
+  return holes
+}

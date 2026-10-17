@@ -58,5 +58,5 @@
   与 worker 自己写的 `worker-state.json`；`repair` **只停止本会话自己拉起的那个进程**，对历史记录里的 pid
   只报告并给出 `taskkill` 命令，不代替用户杀进程。代价：跨会话的僵死 worker 需要用户自己 `taskkill`（或直接再出图，
   插件会另选端口另起一个）。
-- 客户端 `tool.call.toolview` 卡片已注册，但未在真实 web 客户端里验证过；
-  图片显示的**主路径**始终是工具结果里的 Markdown 绝对路径。
+- 客户端 4 个工具都有 `tool.call.toolview` 卡片，设置页有布局样式（含窄栏容器查询）；
+  **仍未在真实 web 客户端里验证过**。图片显示的**主路径**始终是工具结果里的 Markdown 绝对路径。

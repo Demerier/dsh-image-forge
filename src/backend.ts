@@ -337,7 +337,7 @@ export async function probeApi(
   signal?.addEventListener('abort', onAbort, { once: true })
   try {
     if (settings.apiKey.length === 0) {
-      return { endpoint: url, keyPresent: false, reachable: undefined, note: 'no API key configured — set apiKey or a key environment variable to probe the endpoint' }
+      return { endpoint: url, keyPresent: false, reachable: null, note: 'no API key configured — set apiKey or a key environment variable to probe the endpoint' }
     }
     const response = await fetch(`${settings.baseUrl}/models`, {
       headers: { Accept: 'application/json', Authorization: `Bearer ${settings.apiKey}` },

@@ -43,10 +43,13 @@ import {
 } from '../testlib/config-resolve.js'
 import {
   BACKEND_PERF_ADVISORY,
+  HIDDEN_FIELD_KEYS,
   SECRET_MASK,
   SETTINGS_FIELDS,
   SETTINGS_FIELD_KEYS,
   SETTINGS_GROUPS,
+  SETTINGS_TABS,
+  VISIBLE_FIELD_KEYS,
   advisoryText,
   displayValue,
   fieldByKey,
@@ -58,6 +61,7 @@ import {
   resolveHint,
   RUNTIME_DIR_TOKEN,
   staleFieldKeys,
+  tabFields,
 } from '../testlib/settings-fields.js'
 
 /** The built client bundle, as text — the only view of it this sandbox can get. */
@@ -590,13 +594,20 @@ test('every field in the config schema has a control on the settings page', () =
   const missing = missingFieldKeys(declared)
   const stale = staleFieldKeys(declared)
   console.log('schema fields:', declared.length, JSON.stringify(declared))
-  console.log('page controls:', SETTINGS_FIELD_KEYS.length)
+  console.log('page controls (table):', SETTINGS_FIELD_KEYS.length)
+  console.log('visible on page:', VISIBLE_FIELD_KEYS.length, 'hidden:', HIDDEN_FIELD_KEYS.length, JSON.stringify(HIDDEN_FIELD_KEYS))
   console.log('missing from the page:', JSON.stringify(missing))
   console.log('stale on the page:', JSON.stringify(stale))
   assert.deepEqual(missing, [], 'these config fields have no control on the settings page')
   assert.deepEqual(stale, [], 'the settings page renders controls for fields the schema does not declare')
   assert.equal(SETTINGS_FIELD_KEYS.length, declared.length)
   assert.equal(declared.length, 33, 'the documented field count')
+  // Custom environment plumbing is schema-only: the page must not show it.
+  assert.ok(HIDDEN_FIELD_KEYS.includes('pythonPath'), 'pythonPath stays off the page')
+  assert.ok(HIDDEN_FIELD_KEYS.includes('torchWheels'), 'torchWheels stays off the page')
+  assert.ok(HIDDEN_FIELD_KEYS.includes('runtimeDir'), 'runtimeDir stays off the page')
+  assert.ok(VISIBLE_FIELD_KEYS.includes('minFreeVramMiB'), 'the VRAM floor stays on the page')
+  assert.ok(VISIBLE_FIELD_KEYS.includes('localReferenceBudget'), 'the reference budget stays on the page')
   // The newest additions are named so a regression that drops one is diagnosable
   // rather than just a count mismatch.
   for (const key of ['defaultSteps', 'comfyuiSteps', 'localSteps', 'allowLocalEditOverBudget', 'localReferenceBudget']) {
@@ -672,17 +683,45 @@ test('the config keys really are volatile references, and resolve back to plain 
   assert.equal(resolved.timeoutMs.get(), 180000)
 })
 
-test('the section groups every field exactly once and every group is non-empty', () => {
+test('the settings tabs cover every visible group exactly once', () => {
+  assert.ok(SETTINGS_TABS.length >= 3, 'the page must be multi-tab')
+  const seen = SETTINGS_TABS.flatMap((tab) => tabFields(tab).map(({ group }) => group.id))
+  const visibleGroups = groupedFields().map(({ group }) => group.id)
+  assert.deepEqual([...seen].sort(), [...visibleGroups].sort(), 'every visible group must live on exactly one tab')
+  assert.equal(new Set(seen).size, seen.length, 'a group must not sit on two tabs')
+  for (const tab of SETTINGS_TABS) {
+    assert.ok(tab.label.length > 0 && tab.hint.length > 0, `tab ${tab.id} needs a label and hint`)
+    assert.ok(tabFields(tab).length > 0, `tab ${tab.id} must not be empty`)
+  }
+  // The local tab is where the deploy card lives.
+  const localTab = SETTINGS_TABS.find((tab) => tab.id === 'local')
+  assert.ok(localTab, 'a local tab is required for the deploy card')
+  assert.ok(tabFields(localTab).some(({ group }) => group.id === 'local'))
+  console.log(
+    'tabs:',
+    JSON.stringify(SETTINGS_TABS.map((tab) => `${tab.label}(${tabFields(tab).map((e) => e.group.id).join('+')})`)),
+  )
+})
+
+test('the section groups every visible field exactly once and every group is non-empty', () => {
   const buckets = groupedFields()
   const seen = buckets.flatMap(({ fields }) => fields.map((field) => field.key))
-  assert.deepEqual([...seen].sort(), [...SETTINGS_FIELD_KEYS].sort())
+  // Hidden custom-env controls stay in the schema but never reach the page, so
+  // the buckets must cover exactly the visible set.
+  assert.deepEqual([...seen].sort(), [...VISIBLE_FIELD_KEYS].sort())
   assert.equal(new Set(seen).size, seen.length, 'a field must not appear in two groups')
   const groupIds = SETTINGS_GROUPS.map((group) => group.id)
   for (const { group, fields } of buckets) {
     assert.ok(groupIds.includes(group.id))
     assert.ok(fields.length > 0, `group ${group.id} is empty`)
     assert.ok(group.label.length > 0 && group.hint.length > 0)
+    assert.ok(
+      fields.every((field) => field.hidden !== true),
+      `group ${group.id} must not carry hidden fields`,
+    )
   }
+  // The whole python block is hidden: it must not appear as an empty heading.
+  assert.ok(!buckets.some(({ group }) => group.id === 'python'), 'the python group must be gone from the page')
   console.log('groups:', JSON.stringify(buckets.map(({ group, fields }) => `${group.label}=${fields.length}`)))
 })
 
@@ -1084,10 +1123,53 @@ test('the built client entry wires the section and keeps the keyed tool view', (
   assert.match(CLIENT_SOURCE, /dsh-image-forge/, 'the seat id must be in the bundle')
   assert.match(CLIENT_SOURCE, /registerSettingsSection/, 'the registration must be wired')
   assert.match(CLIENT_SOURCE, /tool\.call\.toolview/, 'the tool view slot must survive')
-  assert.match(CLIENT_SOURCE, /qwen_image_generate/, 'the keyed tool view key must survive')
+  // All four wire names must be seated, or the missing ones silently render nothing.
+  for (const key of ['qwen_image_generate', 'qwen_image_edit', 'qwen_image_status', 'qwen_image_env']) {
+    assert.ok(CLIENT_SOURCE.includes(key), `the keyed tool view ${key} must survive`)
+  }
   assert.match(CLIENT_SOURCE, /password/, 'a secret control must render as a password input')
   assert.match(CLIENT_SOURCE, /SECRET_MASK|••••/, 'the secret mask must be reachable from the bundle')
   console.log('lib/client.js bytes:', CLIENT_SOURCE.length)
+})
+
+test('the client ships the presentation CSS and the settings ergonomics', () => {
+  // Layout rules live in the lazy factory (the only injection point a plugin
+  // has) and are pinned here so a silent drop cannot ship as "unchanged".
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-client-styles/, 'the style tag id must be in the bundle')
+  assert.match(CLIENT_SOURCE, /injectClientStyles/, 'the style injection must be wired into apply')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-setting-unit/, 'numeric fields must render a unit suffix')
+  // Container query is the one that matters: a wide Host window with a narrow
+  // settings pane must still stack, which a viewport `@media` cannot see.
+  assert.match(CLIENT_SOURCE, /@container forge-settings/, 'the settings column must container-query its own width')
+  assert.match(CLIENT_SOURCE, /container-type: inline-size/, 'the settings root must be a size container')
+  assert.match(CLIENT_SOURCE, /max-width: 560px/, 'the narrow breakpoint must stay at 560px')
+  assert.match(CLIENT_SOURCE, /overflow-wrap: anywhere/, 'long path hints must wrap instead of clipping')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-images/, 'generate/edit cards must use the image grid')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-checklist/, 'the status card must use the health checklist')
+  assert.match(CLIENT_SOURCE, /data-advanced/, 'the advanced group must be marked for de-emphasis')
+  assert.match(CLIENT_SOURCE, /htmlFor: controlId/, 'labels must point at their controls')
+  // The Host hands the view a tool-result block, not `result.value`. Reading the
+  // wrong shape made every card fall back to empty-state text on a real client.
+  assert.match(CLIENT_SOURCE, /tool-result|block\?\.content/, 'the card must read the Host tool-result block')
+  assert.match(CLIENT_SOURCE, /JSON\.parse/, 'the block text must be parsed as JSON')
+  // One-click deploy: a host-side loopback bridge plus the settings button.
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-deploy/, 'the deploy card must be in the bundle')
+  assert.match(CLIENT_SOURCE, /一键部署/, 'the deploy button must be labelled in Chinese')
+  assert.match(CLIENT_SOURCE, /127\.0\.0\.1:8411/, 'the deploy bridge origin must be in the bundle')
+  assert.match(CLIENT_SOURCE, /beforeFields/, 'the deploy card must slot into the local group')
+  // Tabbed settings page: a strip of tabs, one active panel, denser field grid.
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-tabs/, 'the tab strip must be in the bundle')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-tab-active/, 'the active tab must be styled')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-settings-panel/, 'the active panel must be in the bundle')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-settings-fields-grid/, 'the dense field grid must be in the bundle')
+  assert.match(CLIENT_SOURCE, /role: ['"]tab['"]/, 'tabs must be exposed as tabs')
+  assert.match(CLIENT_SOURCE, /role: ['"]tabpanel['"]/, 'the panel must be exposed as a tabpanel')
+  assert.match(CLIENT_SOURCE, /SETTINGS_TABS|tabFields/, 'the tab model must drive the page')
+  // The advanced marker is data, not a one-off string in the React layer.
+  assert.ok(
+    SETTINGS_GROUPS.some((group) => group.id === 'python' && group.advanced === true),
+    'the python group must be the advanced one',
+  )
 })
 
 test('the browser half registers a lazy factory in the loader format', () => {

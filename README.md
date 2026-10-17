@@ -9,6 +9,15 @@ DeepSeek Harness 插件：**Qwen-Image 出图 / 参考图编辑**，并把官方
 
 ## 安装
 
+**从 npm：**
+
+`ash
+npm install dsh-image-forge
+# 或 dsh plugin --profile <profile> add github:Demerier/dsh-image-forge
+`
+
+**从本仓库源码：**
+
 **在本仓库目录内构建出 `lib/`，再装进某个 DSH profile。**
 
 ```powershell
@@ -38,6 +47,7 @@ dsh plugin --profile <profile> add <本目录绝对路径>
 | `localReferenceBudget` | `0` | 只对 `local` 编辑生效的参考图条件化预算；**`0` = 按画布推导** |
 
 完整 **32** 个字段（含默认值、边界、实测依据）见 [docs/configuration.md](docs/configuration.md)；步数解析优先级 **调用方显式 > 后端专属 `comfyuiSteps`/`localSteps` > `defaultSteps`**，结果里回显 `steps_used` / `steps_source`。
+**设置页只展示日常字段 + 本地「一键部署」**（建 venv / 装 torch / 下 10.63 GiB 权重）；解释器路径、镜像、端口等自定义环境项**不外露**，默认值即可，要改写 profile。
 Key 读取顺序：`apiKey` → `QWEN_IMAGE_API_KEY` → `DASHSCOPE_API_KEY` → `OPENAI_API_KEY`；key 只在内存里，**不写盘、不进日志**（报错里会被 `<redacted-key>` 顶掉）。
 
 ## 用法
@@ -151,18 +161,18 @@ qwen_image_edit(prompt = <成品改图指令>, images = ["D:\\pictures\\room.png
 - 真实设备上只验证过 **cu126** 这一档（`torch 2.9.1+cu126`）；cu128 / cu118 是同一段矩阵代码里的备选路径，**未在真机下载验证过**。
 - ⚠️ **8 GiB 卡上本地编辑有实测的硬墙**：1312×736 画布上 ComfyUI 8 步 ≈ 19–23 s，受管 worker 同样尺寸 6 步要 **219 s**（reserved 8666 MiB > 8188 MiB → WDDM 分页）。
 - **判断「某个 pid 还活着」在本机不可靠**：`repair` **只停止本会话自己拉起的那个进程**，历史记录里的 pid 只报告并给出 `taskkill` 命令。
-- 客户端 `tool.call.toolview` 卡片已注册，但**未在真实 web 客户端里验证过**；图片显示的**主路径**始终是工具结果里的 Markdown 绝对路径。
+- 客户端 4 个工具都有 `tool.call.toolview` 卡片（出图/改图带图网格，status/env 带摘要），设置页有完整布局样式（含窄栏容器查询）。**设置页与 status 卡片已在真实 web 客户端验过**（`docs/evidence/r7-real-client-verification.md`）；出图/改图卡片的图网格因本机无后端未在真机出图。图片显示的**主路径**始终是工具结果里的 Markdown 绝对路径。
 
 ## 测试
 
-**10 个文件 / 151 个用例，全部不需要 GPU、venv 或 10.6 GiB 权重。**
+**10 个文件 / 153 个用例，全部不需要 GPU、venv 或 10.6 GiB 权重。**
 
 ```powershell
 pnpm build
 pnpm test
 ```
 
-`ratio 12 / local-edit-budget 16 / surface 9 / api-e2e 8 / comfyui-e2e 9 / worker-lifecycle 21 / edit-e2e 9 / vram-gate 14 / settings 50 / package-contents 3`；真机端到端（`test/live-worker-e2e.mjs` / `test/live-edit-e2e.mjs`）不在 `pnpm test` 里，详见 [docs/testing.md](docs/testing.md)。
+`ratio 12 / local-edit-budget 16 / surface 9 / api-e2e 8 / comfyui-e2e 9 / worker-lifecycle 21 / edit-e2e 9 / vram-gate 14 / settings 52 / package-contents 3`；真机端到端（`test/live-worker-e2e.mjs` / `test/live-edit-e2e.mjs`）不在 `pnpm test` 里，详见 [docs/testing.md](docs/testing.md)。
 
 ## 许可
 

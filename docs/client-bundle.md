@@ -39,6 +39,10 @@
   ```
 
   执行 bundle **只注册 factory**；所有模块体副作用（含 CSS 注入）都在 factory 闭包里，等到物化时才跑。
+  本插件在 `apply()` 里调用 `injectClientStyles()`（`src/client-styles.ts`）：往 `document.head` 插一根
+  `id="dsh-image-forge-client-styles"` 的 `<style>`，幂等。样式跟设置页/工具卡片的 `dsh-image-forge-*`
+  类名绑定，布局用**容器查询**（`container-type: inline-size`）按设置栏自身宽度切换标签/控件双栏或堆叠——
+  宽 Host 窗口里的窄设置栏也会堆叠，视口 `@media` 看不见这种情况。
   React 来自 shell 预置的**冻结模块表**（`PLATFORM_MODULES`），因此走 factory 的 `require("react")`，
   **既不打包进来、也不写进 `dsh.client.external`**（它已在基线表里）。而且必须**单文件、零相对
   `require`** —— loader 只物化这一个 bundle，不能同步解析同级的 `client*.js`。

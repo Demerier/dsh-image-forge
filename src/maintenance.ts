@@ -112,7 +112,7 @@ export async function collectLocalRuntime(input: LocalRuntimeInput): Promise<Rec
       python: input.python,
       exists: interpreterExists,
       version: interpreter.ok ? interpreter.version : null,
-      note: interpreter.ok ? undefined : interpreter.note,
+      note: interpreter.ok ? null : interpreter.note,
       packages: packages?.versions ?? null,
       packages_ok: packages?.ok ?? null,
       packages_note: packages?.note ?? null,
@@ -299,7 +299,7 @@ export async function runRepair(options: RepairOptions): Promise<RepairReport> {
         name: 'weights:quantization flag',
         status: failed.length === 0 ? 'fixed' : 'unfixable',
         detail: JSON.stringify(outcome),
-        remedy: failed.length === 0 ? undefined : 'Check the model directory permissions.',
+        remedy: failed.length === 0 ? null : 'Check the model directory permissions.',
       })
     }
   } else {
@@ -332,7 +332,7 @@ export async function runRepair(options: RepairOptions): Promise<RepairReport> {
       name: 'venv:install',
       status: options.dryRun ? 'skipped' : install.ok ? 'fixed' : 'unfixable',
       detail: options.dryRun ? 'dry run: nothing was executed' : (install.steps.map((step) => `${step.name}=${step.status}`).join(', ')),
-      remedy: install.ok ? undefined : install.next,
+      remedy: install.ok ? null : install.next,
     })
   } else {
     const packages = await probePackages(options.python, { timeoutMs: 300_000, scratchDir: options.scratchDir })
@@ -356,7 +356,7 @@ export async function runRepair(options: RepairOptions): Promise<RepairReport> {
         name: 'venv:packages',
         status: install.ok ? 'fixed' : 'unfixable',
         detail: install.steps.map((step) => `${step.name}=${step.status}`).join(', '),
-        remedy: install.ok ? undefined : install.next,
+        remedy: install.ok ? null : install.next,
       })
     }
   }
@@ -394,7 +394,7 @@ export async function runRepair(options: RepairOptions): Promise<RepairReport> {
       detail: fixed
         ? `stopped the unresponsive worker pid ${pid}; the next generation starts a fresh one`
         : `the worker pid ${pid} does not answer HTTP and could not be stopped: ${String(stopped.reason ?? 'unknown')}`,
-      remedy: fixed ? undefined : `Stop pid ${pid} manually, then call \`qwen_image_generate\` again.`,
+      remedy: fixed ? null : `Stop pid ${pid} manually, then call \`qwen_image_generate\` again.`,
     })
   } else if (breadcrumb?.pid !== undefined) {
     // A pid from an earlier session: report it, never kill it. Without a working

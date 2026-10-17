@@ -285,7 +285,7 @@ async function requestBytes(url: string, timeoutMs: number, signal?: AbortSignal
       } catch {
         note = ''
       }
-      return { status: response.status, ok: false, bytes: new Uint8Array(), contentType: undefined, note }
+      return { status: response.status, ok: false, bytes: new Uint8Array(), contentType: null, note }
     }
     const bytes = new Uint8Array(await response.arrayBuffer())
     return {

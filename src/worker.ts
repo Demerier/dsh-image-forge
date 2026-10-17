@@ -374,8 +374,8 @@ async function defaultVramProbe(gate: VramGateSettings): Promise<VramProbe> {
     totalMiB: typeof gpus[0]?.vramTotalMiB === 'number' ? gpus[0].vramTotalMiB : null,
     processes: (processes.data?.processes ?? []) as GpuProcess[],
     comfyReachable: live >= 0,
-    comfyPid: live >= 0 ? listeners[live] : undefined,
-    comfyPort: live >= 0 ? candidates[live] : undefined,
+    comfyPid: live >= 0 ? listeners[live] : null,
+    comfyPort: live >= 0 ? candidates[live] : null,
   }
 }
 
@@ -1056,7 +1056,7 @@ export class WorkerRuntime {
       stopped: observedExit,
       pid,
       graceful,
-      reason: observedExit ? undefined : 'the process did not exit within the grace period',
+      reason: observedExit ? null : 'the process did not exit within the grace period',
     }
   }
 

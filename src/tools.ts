@@ -53,6 +53,7 @@ import {
   type LocalEditBudgetTier,
 } from './ratio.ts'
 import { RUNTIME_PACKAGES, TORCH_WHEEL_MATRIX, runInstall, venvPaths } from './venv.ts'
+import { startDeployServer } from './deploy-server.ts'
 import { inspectWeights, runFetchWeights } from './weights.ts'
 import { WorkerRuntime, type WorkerHandle } from './worker.ts'
 import type { Config } from './index.ts'
@@ -234,6 +235,24 @@ function validateCount(count: number | undefined): number {
     throw new Error(`count must be an integer between 1 and 4, got ${count}`)
   }
   return count
+}
+
+/**
+ * Coerce a tool payload into **lossless JSON**.
+ *
+ * The DSH tool layer rejects a result whose value does not round-trip through
+ * JSON, and an object that still carries `undefined` properties does not:
+ * `JSON.stringify` drops the key, so `parse(stringify(x))` is missing it. A
+ * real client run of `qwen_image_status` failed exactly that way once
+ * (`value is not lossless JSON`) — this helper is the mechanical guarantee
+ * that a tool never hands the layer such a value again. `undefined` becomes
+ * `null` at every depth; everything else is left alone.
+ *
+ * @param value - the payload `execute` wants to return.
+ * @returns the same shape with `undefined` replaced by `null`.
+ */
+function jsonSafe<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value, (_key, inner) => (inner === undefined ? null : inner))) as T
 }
 
 /** Build the Markdown block the model can paste into its reply verbatim. */
@@ -932,8 +951,12 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
   // One lifecycle owner per plugin instance: it starts the worker on first use,
   // reaps it after idleness, and rebuilds it when it disappears.
   const runtime = createRuntime(settings)
+  // Settings-page one-click deploy talks to this loopback bridge (the web
+  // client has no tool runner of its own).
+  const deploy = startDeployServer(settings)
   ctx.on?.('dispose', () => {
     void runtime.stop()
+    deploy.dispose()
   })
 
   ctx.tools.register(defineTool({
@@ -1063,7 +1086,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
       const written = await writeImages(settings.outputDir, prefix, size.width, size.height, images)
       const markdown = renderMarkdown(written)
 
-      return {
+      return jsonSafe({
         ok: true,
         backend: usedBackend,
         model: usedBackend === 'api' ? settings.apiModel : comfyUnet,
@@ -1096,7 +1119,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           `${size.exactRatio ? '' : `，实际 ${size.ratioDeviationPercent > 0 ? '+' : ''}${size.ratioDeviationPercent}%`}），` +
           `${backendLabel}，落盘 ${settings.outputDir}。`,
         elapsed_ms: Date.now() - startedAt,
-      }
+      })
     },
   }))
 
@@ -1239,7 +1262,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
       const followed = size.followed
       const followLabel = followed === null ? null : `image${followed.index}`
 
-      return {
+      return jsonSafe({
         ok: true,
         backend: usedBackend,
         model: comfyUnet,
@@ -1319,7 +1342,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           // result, not only sit in the returned JSON.
           (budgetGate?.warning == null ? '' : `\n${budgetGate.warning}`),
         elapsed_ms: Date.now() - startedAt,
-      }
+      })
     },
   }))
 
@@ -1396,7 +1419,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         )
         const advisory = status.vram_advisory as VramAdvisory | undefined
         const advisories = advisory?.suggestions ?? []
-        return {
+        return jsonSafe({
           action,
           generated_at: new Date().toISOString(),
           config: {
@@ -1455,7 +1478,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           },
           advisories,
           ...status,
-        }
+        })
       }
       if (action === 'install') {
         const report = await runInstall({
@@ -1469,28 +1492,30 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           commandTimeoutMs: 3_600_000,
           scratchDir: settings.scratchDir,
         })
-        return { ...report, packages_expected: RUNTIME_PACKAGES }
+        return jsonSafe({ ...report, packages_expected: RUNTIME_PACKAGES })
       }
       if (action === 'fetch-weights') {
-        return await runFetchWeights({
-          repo: settings.modelRepo,
-          mirror: settings.hfMirror,
-          revision: 'main',
-          dir: settings.modelsDir,
-          skipLmHead: args.skipLmHead ?? settings.skipLmHead,
-          dryRun,
-          force: args.force === true,
-          scratchDir: settings.scratchDir,
-          stallTimeoutMs: 120_000,
-          signal: exec.signal,
-        })
+        return jsonSafe(
+          await runFetchWeights({
+            repo: settings.modelRepo,
+            mirror: settings.hfMirror,
+            revision: 'main',
+            dir: settings.modelsDir,
+            skipLmHead: args.skipLmHead ?? settings.skipLmHead,
+            dryRun,
+            force: args.force === true,
+            scratchDir: settings.scratchDir,
+            stallTimeoutMs: 120_000,
+            signal: exec.signal,
+          }),
+        )
       }
       if (action === 'unload') {
         const before = await runtime.inspect(runtime.endpoint, 1500, exec.signal)
         const outcome = await runtime.unload()
         const after = await runtime.inspect(runtime.endpoint, 1500, exec.signal)
         const status = typeof outcome.http_status === 'number' ? outcome.http_status : null
-        return {
+        return jsonSafe({
           action,
           ...outcome,
           vram_before_MiB: before.state?.vram_allocated_MiB ?? null,
@@ -1503,24 +1528,26 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
                 : status !== null
                   ? `worker 的 /unload 应答了 HTTP ${status}；显存没有交回，原文见 body。`
                   : '没有可回收的 worker（它本来就没在跑，显存已经是空着的）。',
-        }
+        })
       }
-      return await runRepair({
-        runtime,
-        runtimeDir: settings.runtimeDir,
-        python: settings.pythonPath,
-        modelsDir: settings.modelsDir,
-        dataDir: settings.runtimeDir,
-        pipwrap: settings.pipwrapPath,
-        basePythonCandidates: settings.basePythonCandidates,
-        torchWheels: settings.torchWheels,
-        pipIndexUrl: settings.pipIndexUrl,
-        reuseBaseTorch: settings.reuseBaseTorch,
-        dryRun,
-        commandTimeoutMs: 3_600_000,
-        scratchDir: settings.scratchDir,
-        signal: exec.signal,
-      })
+      return jsonSafe(
+        await runRepair({
+          runtime,
+          runtimeDir: settings.runtimeDir,
+          python: settings.pythonPath,
+          modelsDir: settings.modelsDir,
+          dataDir: settings.runtimeDir,
+          pipwrap: settings.pipwrapPath,
+          basePythonCandidates: settings.basePythonCandidates,
+          torchWheels: settings.torchWheels,
+          pipIndexUrl: settings.pipIndexUrl,
+          reuseBaseTorch: settings.reuseBaseTorch,
+          dryRun,
+          commandTimeoutMs: 3_600_000,
+          scratchDir: settings.scratchDir,
+          signal: exec.signal,
+        }),
+      )
     },
   }))
 
@@ -1563,7 +1590,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         () => true,
         () => false,
       )
-      return {
+      return jsonSafe({
         checked_at: new Date().toISOString(),
         configured_backend: settings.backend,
         api: { baseUrl: settings.apiBaseUrl, model: settings.apiModel, style: settings.apiStyle, keySource: settings.apiKeySource ?? null, ...api },
@@ -1580,13 +1607,13 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           log_file: runtime.logFile,
           lifecycle_events: runtime.events.slice(0, 5),
           note: worker.reachable
-            ? undefined
+            ? null
             : `${worker.note ?? 'unreachable'} — worker 不在跑；下一次 \`qwen_image_generate\` 会自己把它拉起来`,
         },
         venv: { python: settings.pythonPath, exists: venvPresent },
         weights: { dir: settings.modelsDir, ready: weights.ready, missing_files: weights.missing_files, total_MiB: weights.total_MiB },
         output: { dir: settings.outputDir, writable: await ensureOutputDirWritable(settings.outputDir) },
-      }
+      })
     },
   }))
 }

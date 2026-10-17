@@ -16,6 +16,57 @@
 /** The coarse buckets the settings page shows, in display order. */
 export type SettingsGroupId = 'backend' | 'steps' | 'api' | 'local' | 'comfyui' | 'output' | 'python'
 
+/**
+ * One tab of the settings page.
+ *
+ * The page is a tabbed form rather than one long scroll: each tab owns a
+ * handful of groups so a single view stays dense and scannable instead of
+ * stacking every control into a tall column.
+ */
+export interface SettingsTab {
+  /** Stable id; also the tab button's key. */
+  readonly id: string
+  /** Tab label. */
+  readonly label: string
+  /** One-line blurb under the tab bar when the tab is active. */
+  readonly hint: string
+  /** Groups rendered inside this tab, in order. */
+  readonly groupIds: readonly SettingsGroupId[]
+}
+
+/**
+ * Tab strip for the settings page, in order.
+ *
+ * Hidden groups (`python`) are simply not referenced: a tab only lists what it
+ * actually shows.
+ */
+export const SETTINGS_TABS: readonly SettingsTab[] = [
+  {
+    id: 'generate',
+    label: '出图',
+    hint: '后端怎么选、画质步数、图落到哪里。',
+    groupIds: ['backend', 'steps', 'output'],
+  },
+  {
+    id: 'api',
+    label: '云端 API',
+    hint: '自带 key 的云端端点。',
+    groupIds: ['api'],
+  },
+  {
+    id: 'local',
+    label: '本地环境',
+    hint: '一键部署 venv / 权重，以及显存与本地编辑门闩。',
+    groupIds: ['local'],
+  },
+  {
+    id: 'comfyui',
+    label: 'ComfyUI',
+    hint: '复用你已经装好的 ComfyUI。',
+    groupIds: ['comfyui'],
+  },
+]
+
 /** One display group (a titled block of fields). */
 export interface SettingsGroup {
   /** Stable id; also the block's DOM key. */
@@ -24,6 +75,13 @@ export interface SettingsGroup {
   readonly label: string
   /** One line explaining what the whole block is for. */
   readonly hint: string
+  /**
+   * Visually de-emphasized block (advanced / rarely touched).
+   *
+   * Presentation only: the page dims the group slightly and flags it so the
+   * everyday controls above stay the first thing the eye lands on.
+   */
+  readonly advanced?: boolean
 }
 
 /** How a field is rendered and validated in the page. */
@@ -67,6 +125,15 @@ export interface SettingsField {
    * rather than a zero.
    */
   readonly nullable?: boolean
+  /**
+   * Keep the control off the settings page.
+   *
+   * Custom environment plumbing (interpreter paths, wheel tags, mirrors, worker
+   * ports…) stays in the schema so profiles and tests can still set it, but the
+   * page does not expose it: the one-click deploy button owns local setup, and
+   * the default values are the ones a user should get.
+   */
+  readonly hidden?: boolean
 }
 
 /**
@@ -150,6 +217,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
     id: 'python',
     label: 'Python、依赖与权重（高级）',
     hint: '一般不用改；留空 = 自动。',
+    advanced: true,
   },
 ]
 
@@ -241,6 +309,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '运行时目录',
     hint: '插件自有数据目录：venv、权重、worker 日志与断点。',
     kind: 'path',
+    hidden: true,
   },
   {
     key: 'modelsDir',
@@ -248,6 +317,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '权重目录',
     hint: '留空 = 跟随运行时目录：<运行时目录>\\models\\qwen-image-2.1-bnb4bit。',
     kind: 'path',
+    hidden: true,
   },
   {
     key: 'modelRepo',
@@ -255,6 +325,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '权重仓库',
     hint: 'nf4 权重来自哪个 Hugging Face 仓库。',
     kind: 'string',
+    hidden: true,
     placeholder: 'circulus/Qwen-Image-2.1-bnb-4bit',
   },
   {
@@ -263,6 +334,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '下载镜像',
     hint: '别填 huggingface.co：它的 /api/ 在本机会超时。',
     kind: 'string',
+    hidden: true,
     placeholder: 'https://hf-mirror.com',
   },
   {
@@ -271,6 +343,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'worker 地址',
     hint: '本地推理 worker 的根地址。',
     kind: 'string',
+    hidden: true,
     placeholder: 'http://127.0.0.1:8399',
   },
   {
@@ -279,6 +352,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'worker 候选端口',
     hint: '形如 8399-8410 或端口列表；localEndpoint 的端口优先。',
     kind: 'string',
+    hidden: true,
     placeholder: '8399-8410',
   },
   {
@@ -287,6 +361,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '冷启动超时',
     hint: 'worker 冷启动要加载约 10.6 GiB 权重，给足时间。',
     kind: 'number',
+    hidden: true,
     min: 1000,
     max: 3_600_000,
     unit: '毫秒',
@@ -297,6 +372,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '空闲卸载',
     hint: '空闲超过这么久就把显存还给系统；0 表示不卸载。',
     kind: 'number',
+    hidden: true,
     min: 0,
     max: 86_400_000,
     unit: '毫秒',
@@ -307,6 +383,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '由插件管理 worker 进程',
     hint: '关闭后插件只连不管，需要你自己把 worker 起起来。',
     kind: 'boolean',
+    hidden: true,
   },
   {
     key: 'minFreeVramMiB',
@@ -364,6 +441,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'ComfyUI 模型目录',
     hint: '只用来把「把文件放到 …」这类报错写具体；留空则报错保持通用。',
     kind: 'path',
+    hidden: true,
   },
   {
     key: 'outputDir',
@@ -388,6 +466,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '解释器路径',
     hint: '留空 = 跟随运行时目录：<运行时目录>\\venv\\Scripts\\python.exe。',
     kind: 'path',
+    hidden: true,
   },
   {
     key: 'workerScript',
@@ -395,6 +474,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'worker 脚本',
     hint: '留空使用插件自带的 resources/worker.py。',
     kind: 'path',
+    hidden: true,
   },
   {
     key: 'basePython',
@@ -402,6 +482,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '基础解释器',
     hint: '建 venv 用它；留空 = 试 python/python3/py。',
     kind: 'path',
+    hidden: true,
   },
   {
     key: 'torchWheels',
@@ -409,6 +490,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'CUDA wheel 标签',
     hint: '留空 = 依次试 cu128、cu126、cu118。',
     kind: 'string',
+    hidden: true,
     placeholder: 'cu128,cu126,cu118',
   },
   {
@@ -417,6 +499,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'pip 索引地址',
     hint: '留空 = https://pypi.org/simple。',
     kind: 'string',
+    hidden: true,
     placeholder: 'https://pypi.org/simple',
   },
   {
@@ -425,6 +508,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: '复用基础解释器里的 CUDA torch',
     hint: '开启后不再下载一份 torch。',
     kind: 'boolean',
+    hidden: true,
   },
   {
     key: 'skipLmHead',
@@ -432,11 +516,27 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'fetch-weights 跳过 lm_head.weight',
     hint: '默认值：丢掉用不到的那个张量，省下载量。',
     kind: 'boolean',
+    hidden: true,
   },
 ]
 
 /** Every key the page renders a control for. */
 export const SETTINGS_FIELD_KEYS: readonly string[] = SETTINGS_FIELDS.map((field) => field.key)
+
+/** Fields the page deliberately does not show (schema still has them). */
+export const HIDDEN_FIELD_KEYS: readonly string[] = SETTINGS_FIELDS.filter((field) => field.hidden === true).map(
+  (field) => field.key,
+)
+
+/** Fields the settings page actually renders. */
+export const VISIBLE_FIELD_KEYS: readonly string[] = SETTINGS_FIELDS.filter((field) => field.hidden !== true).map(
+  (field) => field.key,
+)
+
+/** Whether a control belongs on the page. */
+export function isFieldVisible(key: string): boolean {
+  return fieldByKey(key)?.hidden !== true
+}
 
 /** The replacement shown wherever a secret's plaintext would otherwise go. */
 export const SECRET_MASK = '••••••••'
@@ -474,15 +574,30 @@ export function fieldByKey(key: string): SettingsField | undefined {
 }
 
 /**
- * Bucket the fields under their groups, keeping page order.
+ * Bucket the **visible** fields under their groups, keeping page order.
  *
- * @returns one entry per {@link SETTINGS_GROUPS} entry, in order.
+ * Hidden controls (custom environment plumbing) are dropped here, and a group
+ * left with no visible fields — the whole `python` block — is dropped too, so
+ * the page never renders an empty heading.
+ *
+ * @returns one entry per group that still has visible fields.
  */
 export function groupedFields(): { group: SettingsGroup; fields: SettingsField[] }[] {
   return SETTINGS_GROUPS.map((group) => ({
     group,
-    fields: SETTINGS_FIELDS.filter((field) => field.group === group.id),
-  }))
+    fields: SETTINGS_FIELDS.filter((field) => field.group === group.id && field.hidden !== true),
+  })).filter((entry) => entry.fields.length > 0)
+}
+
+/**
+ * Visible groups and fields for one tab, in tab order.
+ *
+ * @param tab - the tab definition.
+ * @returns the same shape as {@link groupedFields}, restricted to the tab.
+ */
+export function tabFields(tab: SettingsTab): { group: SettingsGroup; fields: SettingsField[] }[] {
+  const wanted = new Set(tab.groupIds)
+  return groupedFields().filter(({ group }) => wanted.has(group.id))
 }
 
 /**
