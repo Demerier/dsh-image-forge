@@ -21,3 +21,6 @@ docs/plans/
 
 # Playwright CLI scratch (local QA only).
 .playwright-cli/
+
+# npm pack output
+*.tgz
