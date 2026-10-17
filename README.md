@@ -161,7 +161,7 @@ qwen_image_edit(prompt = <成品改图指令>, images = ["D:\\pictures\\room.png
 - 真实设备上只验证过 **cu126** 这一档（`torch 2.9.1+cu126`）；cu128 / cu118 是同一段矩阵代码里的备选路径，**未在真机下载验证过**。
 - ⚠️ **8 GiB 卡上本地编辑有实测的硬墙**：1312×736 画布上 ComfyUI 8 步 ≈ 19–23 s，受管 worker 同样尺寸 6 步要 **219 s**（reserved 8666 MiB > 8188 MiB → WDDM 分页）。
 - **判断「某个 pid 还活着」在本机不可靠**：`repair` **只停止本会话自己拉起的那个进程**，历史记录里的 pid 只报告并给出 `taskkill` 命令。
-- 客户端 4 个工具都有 `tool.call.toolview` 卡片（出图/改图带图网格，status/env 带摘要），设置页有完整布局样式（含窄栏容器查询）。**设置页与 status 卡片已在真实 web 客户端验过**（`docs/evidence/r7-real-client-verification.md`）；出图/改图卡片的图网格因本机无后端未在真机出图。图片显示的**主路径**始终是工具结果里的 Markdown 绝对路径。
+- 客户端 4 个工具都有 `tool.call.toolview` 卡片（出图/改图带图网格，status/env 带摘要），设置页有完整布局样式（含窄栏容器查询）。**设置页与 status 卡片已在真实 web 客户端验过**；出图/改图卡片的图网格因本机无后端未在真机出图。图片显示的**主路径**始终是工具结果里的 Markdown 绝对路径。
 
 ## 测试
 

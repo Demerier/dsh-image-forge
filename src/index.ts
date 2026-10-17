@@ -121,7 +121,7 @@ export interface Config {
    * 3.4 → 1.67 s per step (≈2×), and **512 is the only budget measured to finish
    * on a 1.5 MP canvas** (1248×1248: 109.5 s, peak reserved 6488 MiB) — the same
    * canvas at 896 measured 67 s/step, ≈28 min for 25 steps, with no error
-   * (`docs/evidence/r5-budget-canvas-matrix.md`). The fidelity half is a 1-image, 1-judge comparison: on the
+   * (本机实测). The fidelity half is a 1-image, 1-judge comparison: on the
    * same 1216×672 canvas 896 vs 512 was judged indistinguishable (n=1), and only
    * 512 has been run on a 1.5 MP canvas. Only `local` reads it; `comfyui` scales
    * references on its own and `api` has no edit path.

@@ -45,7 +45,7 @@ qwen_image_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
 > ⚠️ **896 这条可靠线只按预算分档，画布自身的代价不在内**：它的实测出处是 1216×672（0.82 MP，1.9 s/步）；
 > 同一预算搬到 1.5MP 画布（1248×1248）上实测 **67 s/步**、25 步外推 ≈28 min（**不报错**，但等于不可用）——
 > 那张画布上唯一实测跑得完的是 **512**（wall **109.5 s**、峰值 reserved **6488 MiB**、worker 存活）。
-> 依据与逐次原始记录：`evidence/r4b-local-edit-failures.md` §(a)/§(b)、`evidence/r5-budget-canvas-matrix.md`。
+> 依据：本机逐次实测记录（报告未随包发布）。
 要显式像素就用 `width`/`height`（必须 32 的倍数，否则报错并给出最近的合法值）——**显式值永远优先**。
 
 落盘命名：`<outputDir>/<prefix>_<W>x<H>_<n>.png`，`prefix` 默认 `qwen`，可用 `preset` 覆盖；

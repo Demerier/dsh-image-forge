@@ -16,7 +16,7 @@
  *    process was ever spawned" rather than "a function returned false".
  *
  * Every threshold is this card class's own measurement, not a general truth: the
- * evidence is `docs/evidence/r4b-local-edit-failures.md` §(a)/§(b), and the numbers are
+ * evidence is the local measurement matrix (§(a)/§(b)), and the numbers are
  * quoted in `src/ratio.ts` next to the constants.
  */
 import test, { after } from 'node:test'
@@ -335,7 +335,7 @@ test('an over-budget local edit is refused before any worker exists', async () =
     assert.match(error.message, /comfyui/)
     assert.match(error.message, /width\/height/)
     assert.match(error.message, /allowLocalEditOverBudget: true/)
-    assert.match(error.message, /docs\/evidence\/r4b-local-edit-failures\.md/)
+    assert.match(error.message, /出处：本机实测/)
     // Nothing was started: the refusal happens before `runtime.ensure`.
     assert.deepEqual(workerEvents(fx.runtimeDir), [], 'a refused edit must not spawn a worker')
   } finally {
@@ -559,7 +559,7 @@ async function editResult(prefix, extra, args = {}) {
 }
 
 test('a 1.5 MP canvas above budget 512 carries the canvas-side warning and still runs', async () => {
-  // The knob's advertised case, and the one `docs/evidence/r5-budget-canvas-matrix.md` falsified: keep 1248×1248
+  // The knob's advertised case, and the one the local matrix falsified: keep 1248×1248
   // (1.55 MP) and condition at 896. Budget-wise that is still the reliable band,
   // so the gate must let it through — with a warning, because the measurement on
   // that canvas is 67 s/step (≈28 min for 25 steps, no error).
@@ -583,7 +583,7 @@ test('a 1.5 MP canvas above budget 512 carries the canvas-side warning and still
   assert.match(warning, /6488/)
   assert.match(warning, /插值/)
   assert.match(warning, /513–895/, 'the unmeasured interval has to be stated, not implied')
-  assert.match(warning, /docs\/evidence\/r5-budget-canvas-matrix\.md/)
+  assert.match(warning, /出处：本机实测/)
   // The recommendation names the budget that was actually measured there.
   assert.match(warning, new RegExp(`\\b${LOCAL_EDIT_CANVAS_SAFE_BUDGET}\\b`))
   // Like the edge band's warning, it has to reach the human-readable line.
@@ -641,7 +641,7 @@ function composedSkillBody() {
 }
 
 test('no shipped text pairs a ≤896 ceiling with "the canvas can stay at 1.5 MP" again', () => {
-  // `docs/evidence/r5-budget-canvas-matrix.md` falsified the old copy: 896 was only ever measured on a
+  // The local matrix falsified the old copy: 896 was only ever measured on a
   // 0.82 MP canvas, and on a 1.5 MP one it means 67 s/step (≈28 min, no error).
   // Guard every surface that ships text: the shipped prose (the README plus
   // `docs/backends.md`, where the local backend's measurements moved when the

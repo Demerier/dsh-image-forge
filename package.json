@@ -47,8 +47,7 @@
     "README.md",
     "skill.md",
     "references",
-    "docs/*.md",
-    "docs/evidence"
+    "docs/*.md"
   ],
   "scripts": {
     "build": "tsdown && tsdown -c tsdown.client.config.ts",

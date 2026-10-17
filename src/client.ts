@@ -102,7 +102,7 @@ interface ToolContentItem {
  * of kind `tool-result` whose `content[].text` is the JSON that `execute()`
  * returned (after the tool layer validated it). Reading the wrong shape made
  * every card show its empty-state fallbacks in a real client while the Node
- * tests still passed — see `docs/evidence/` for the live capture.
+ * tests still passed — the live client confirmed it.
  */
 interface ToolResultBlock {
   readonly kind?: string

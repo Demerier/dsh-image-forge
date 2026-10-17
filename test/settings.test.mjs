@@ -642,7 +642,7 @@ test('the reference-budget control states its default, its effect and its unmeas
   assert.equal(field.min, 0)
   assert.match(field.hint, /0=按画布推导/)
   assert.match(field.hint, /降参考图分辨率/)
-  // The fidelity side is a 1-image, 1-judge comparison (`docs/evidence/r5-budget-canvas-matrix.md`): the page states
+  // The fidelity side is a 1-image, 1-judge comparison (the local matrix): the page states
   // that shape, and must not present it as a measurement or as blanket "unmeasured".
   assert.match(field.hint, /目视无差/)
   assert.match(field.hint, /n=1/)
@@ -883,7 +883,7 @@ test('the advisory and every hint stay inside their text budget', () => {
   // Raised twice, each time by exactly what the new control costs, so the slack the
   // earlier fields left is untouched: `allowLocalEditOverBudget` (the opt-out from a
   // measured hard failure) cost 34 characters, and `localReferenceBudget` (the knob
-  // that is what makes a 1.5 MP canvas runnable at all) cost 34 more. `docs/evidence/r5-budget-canvas-matrix.md` then
+  // that is what makes a 1.5 MP canvas runnable at all) cost 34 more. A later local run then
   // replaced that hint's blanket "unmeasured fidelity cost" with the shape of the
   // measurement it has (512 vs 896 on one canvas, n=1): +14 characters, and the
   // phrase does not fit in the 40-character hint budget in full — the argument lives

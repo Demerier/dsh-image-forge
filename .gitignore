@@ -24,3 +24,7 @@ docs/plans/
 
 # npm pack output
 *.tgz
+
+# Verification reports and screenshots are not vendored: the shipped prose keeps
+# the claims, the raw captures stay out of the repository (and its history).
+docs/evidence/

@@ -39,6 +39,6 @@ Plugin code is **MIT**. Commercial use of the weights requires a separate licenc
 ## Known limits
 
 - Cloud API has **no edit path** (references only go to `comfyui` / `local`)
-- Local edit on 8 GB cards is gated (see `docs/evidence/r4b-local-edit-failures.md`)
+- Local edit on 8 GB cards is gated (measured on an 8 GB card)
 - No inpaint/mask, upscale, or gallery UI
-- Real-client UI verified in DeepSeek Harness web 0.2.x (`docs/evidence/r7-real-client-verification.md`)
+- Real-client UI verified in DeepSeek Harness web 0.2.x
