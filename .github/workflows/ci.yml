@@ -37,6 +37,10 @@ jobs:
         run: pnpm test
 
       - name: Pack (dry)
+        # `--ignore-scripts`: `prepack` runs `pnpm run build`, and npm writes that
+        # script's banner onto the same stdout as the `--json` document: pack.json then
+        # starts with "> dsh-image-forge@0.1.0 prepack" and is not JSON. The Build step
+        # above already produced `lib/`, so the pack contents are the built ones anyway.
         run: |
-          npm pack --dry-run --json > pack.json
+          npm pack --dry-run --json --ignore-scripts > pack.json
           node -e "const p=require('./pack.json'); const e=p[0]; console.log('files', e.files.length, 'size', e.size, 'unpacked', e.unpackedSize); if (e.files.some(f=>/\.pyc$|__pycache__/.test(f.path))) { console.error('bytecode leaked'); process.exit(1) }"
