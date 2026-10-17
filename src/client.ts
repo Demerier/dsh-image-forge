@@ -370,7 +370,8 @@ function GroupBlock(props: {
  * The backend performance advisory block.
  *
  * Two lines, on purpose: the page states the actionable conclusion and the one
- * caveat, and the evidence behind them lives in the README. The strings render as
+ * caveat, and the evidence behind them lives in the shipped prose
+ * (`docs/configuration.md`, `docs/backends.md`). The strings render as
  * text nodes, so none of them may carry markdown markers (asserted in the tests),
  * and the block's size is held by a text-budget test.
  *

@@ -17,7 +17,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as plugin from '../lib/index.js'
@@ -656,7 +656,7 @@ test('the step controls state the tradeoff and mark the two overrides nullable',
     assert.equal(byKey[key].nullable, true, `${key} must be clearable back to unset`)
     assert.equal(byKey[key].min, 1)
   }
-  // The tradeoff has to be on the page, not only in the README: the slow-but-
+  // The tradeoff has to be on the page, not only in the shipped prose: the slow-but-
   // official option and the fast-but-unofficial one must both be spelled out.
   assert.match(byKey.localSteps.hint, /2\.7/)
   assert.match(byKey.localSteps.hint, /25/)
@@ -781,14 +781,32 @@ test('the resolved step count is what reaches each backend, and the result says 
 
 // ---------------------------------------------------------------------------
 // The backend performance advisory: two lines on the page, the evidence in the
-// README. Both halves are asserted, so neither can quietly become the other.
+// shipped prose (README + `docs/`). Both halves are asserted, so neither can
+// quietly become the other.
 // ---------------------------------------------------------------------------
 
 /** Every string the advisory renders. */
 const ADVISORY_TEXT = advisoryText(BACKEND_PERF_ADVISORY)
 
-/** The README, which is where the advisory's evidence now lives. */
-const README_SOURCE = readFileSync(fileURLToPath(new URL('../README.md', import.meta.url)), 'utf8')
+/**
+ * The shipped prose surface, which is where the advisory's evidence now lives.
+ *
+ * That surface used to be the README alone, which is why the binding below keeps
+ * its old name. The 734-line README was split into a quick-reference page plus
+ * `docs/*.md`, and the argument moved into those documents — so reading the
+ * README by itself would assert against a surface that no longer carries the
+ * evidence. `docs/` is *listed* rather than enumerated here: a new document is
+ * picked up without editing this test.
+ */
+const DOCS_DIR = fileURLToPath(new URL('../docs/', import.meta.url))
+const README_SOURCE = [
+  readFileSync(fileURLToPath(new URL('../README.md', import.meta.url)), 'utf8'),
+  ...readdirSync(DOCS_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+    .map((entry) => entry.name)
+    .sort()
+    .map((name) => readFileSync(join(DOCS_DIR, name), 'utf8')),
+].join('\n')
 
 test('the advisory states the conclusion and the numbers, in two lines', () => {
   console.log('--- advisory as rendered ---\n' + ADVISORY_TEXT + '\n--- end ---')
@@ -813,7 +831,8 @@ test('the advisory and every hint stay inside their text budget', () => {
   // The budget exists because the first live review of the page was that it
   // "exposes a great deal of explanatory text that does not belong in front of a
   // user". These numbers are the contract: the page gives the conclusion, the
-  // README gives the argument, and growing past these limits fails here.
+  // shipped prose (README + `docs/`) gives the argument, and growing past these
+  // limits fails here.
   const MAX_FIELD_HINT = 40
   // Paths are *information*, not prose: a hint that names where a file will
   // actually land cannot be squeezed into 40 characters without dropping the path,
@@ -829,7 +848,7 @@ test('the advisory and every hint stay inside their text budget', () => {
   // replaced that hint's blanket "unmeasured fidelity cost" with the shape of the
   // measurement it has (512 vs 896 on one canvas, n=1): +14 characters, and the
   // phrase does not fit in the 40-character hint budget in full — the argument lives
-  // in the README and the tool text.
+  // in the shipped prose and the tool text.
   const MAX_FIELD_TOTAL = 1264
   const MAX_GROUP_TOTAL = 150
 
@@ -903,21 +922,22 @@ test('the withdrawn and falsified figures never come back', () => {
   }
 })
 
-test('the advisory promises no fix, and the README keeps the honest verdict', () => {
+test('the advisory promises no fix, and the shipped prose keeps the honest verdict', () => {
   const noPromise = [/正在优化/, /即将修复/, /预计/, /会修好/, /保证/, /计划修复/, /将在[^，。]*修复/, /下一步优化/]
   for (const pattern of noPromise) {
     assert.ok(!pattern.test(ADVISORY_TEXT), `the advisory must not promise a fix: ${pattern}`)
   }
-  // The structural verdict has to survive in the README, since that is now the
-  // only place the reasoning is written down.
+  // The structural verdict has to survive in the shipped prose, since that is now
+  // the only place the reasoning is written down.
   assert.match(README_SOURCE, /结构性差距/)
   assert.match(README_SOURCE, /换推理栈/)
   assert.match(README_SOURCE, /超出本插件的范围/)
   assert.match(README_SOURCE, /不给出改善承诺/)
 })
 
-test('the moved evidence is in the README and no longer on the page', () => {
-  // Everything the page used to carry. It must be findable in the README...
+test('the moved evidence is in the shipped prose and no longer on the page', () => {
+  // Everything the page used to carry. It must be findable in the prose surface
+  // (the README plus `docs/*.md`)...
   const evidence = [
     '0.727',
     '2.014',
@@ -933,7 +953,7 @@ test('the moved evidence is in the README and no longer on the page', () => {
     '28.20',
   ]
   for (const needle of evidence) {
-    assert.ok(README_SOURCE.includes(needle), `the README lost the evidence: ${needle}`)
+    assert.ok(README_SOURCE.includes(needle), `the shipped prose lost the evidence: ${needle}`)
     assert.ok(!ADVISORY_TEXT.includes(needle), `the evidence is still on the page: ${needle}`)
   }
   // ...and the page must not be carrying the mechanism in a hint either.

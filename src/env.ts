@@ -245,8 +245,9 @@ export interface VramAdvisory {
      * That combination is its own failure mode rather than a missing probe: a
      * ComfyUI that has run a job keeps ~3.6 GiB of `cudaMallocAsync` allocator
      * cache inside its own process while `nvidia-smi --query-compute-apps` lists
-     * no compute process at all (README, §34), so the free number is right, the
-     * holder list is empty, and a hard start still dies during load.
+     * no compute process at all (the 显存陷阱 in `docs/configuration.md`, dev plan
+     * §34), so the free number is right, the holder list is empty, and a hard start
+     * still dies during load.
      */
     readonly no_visible_holder: boolean
   }
@@ -319,7 +320,8 @@ export function analyseVram(
       // lie the user acts on, so the two remedies that do work are named instead.
       suggestions.push(
         'nvidia-smi 一个计算进程都没报，但显存就是不够——别把这读成「没人占着」：ComfyUI 跑完会在它自己的进程里留下约 3.6 GiB 的 ' +
-          '`cudaMallocAsync` 分配器缓存，而 `nvidia-smi --query-compute-apps` 列不出占用进程（README「显存陷阱」一节）。' +
+          '`cudaMallocAsync` 分配器缓存，而 `nvidia-smi --query-compute-apps` 列不出占用进程' +
+          '（见 `docs/configuration.md`「一个会让人卡住的显存陷阱（8 GB 卡必读）」一节）。' +
           `先试 ${comfyFreeCommand(comfyPortNumber)}（ComfyUI 还在就有效）；它已经不在了就只剩等那些分配被释放。` +
           '另外隔十几秒再重跑：背靠背启动 python 会撞 Windows `OSError 1455 页面文件太小`（host commit 压力），那与 worker 无关。' +
           '8 GB 卡上 `freeComfyBeforeLocalStart: true` 一般是必需项，不是可选优化。',

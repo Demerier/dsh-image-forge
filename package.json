@@ -36,6 +36,7 @@
     "README.md",
     "skill.md",
     "references",
+    "docs/*.md",
     "docs/evidence"
   ],
   "scripts": {

@@ -1445,7 +1445,9 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
                   `（还差 ${advisory.start_gate.shortfallMiB ?? '?'} MiB）。` +
                   (advisory.start_gate.no_visible_holder
                     ? 'nvidia-smi 没报占用者也**不能读成没人占着**：ComfyUI 跑完会把约 3.6 GiB 的 `cudaMallocAsync` ' +
-                      '分配器缓存留在自己进程里、而它列不出来（README「显存陷阱」）。补救是 `POST /free` + 隔十几秒重跑。'
+                      '分配器缓存留在自己进程里、而它列不出来' +
+                      '（见 `docs/configuration.md`「一个会让人卡住的显存陷阱（8 GB 卡必读）」）。' +
+                      '补救是 `POST /free` + 隔十几秒重跑。'
                     : '') +
                   (settings.freeComfyBeforeLocalStart
                     ? '`freeComfyBeforeLocalStart` 已开启，插件会先请求 ComfyUI 释放再启动。'

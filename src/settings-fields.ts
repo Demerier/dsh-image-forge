@@ -535,8 +535,9 @@ export function redactForLog(key: string, value: unknown): string {
  * The one place the settings page states the backend performance conclusion.
  *
  * Deliberately **two lines**. The page's job is the actionable conclusion; the
- * measurements, the kernel profile and the ruled-out list belong in the README,
- * where they can be as long as the evidence requires. An earlier version carried
+ * measurements, the kernel profile and the ruled-out list belong in the shipped
+ * prose (`docs/configuration.md`, `docs/backends.md`), where they can be as long
+ * as the evidence requires. An earlier version carried
  * 2,561 characters of evidence here, and the user's first reaction to the live
  * page was that it "exposes a great deal of explanatory text that does not belong
  * in front of a user" — so the budget is now a test, not a convention.
@@ -556,16 +557,17 @@ export interface SettingsAdvisory {
  * The backend performance conclusion, as the page states it.
  *
  * Every number is measured on this machine. The tables behind them, the per-step
- * slopes, the kernel profile and the exclusions are in README.md (the 设置页
- * section), and test/settings.test.mjs pins both sides: that the page stays
- * within budget, and that the README still carries the evidence.
+ * slopes, the kernel profile and the exclusions are in `docs/configuration.md`
+ * (the 设置页 section), and test/settings.test.mjs pins both sides: that the page
+ * stays within budget, and that the shipped prose (the README plus `docs/*.md`)
+ * still carries the evidence.
  */
 export const BACKEND_PERF_ADVISORY: SettingsAdvisory = {
   id: 'backend-perf',
   title: '8 GB 显存上做参考图编辑，请优先用 comfyui 后端',
   paragraphs: [
     '实测 1312×736 / 6 步：comfyui ≈ 19–23 s，本机 worker ≈ 219 s（纯管线）。',
-    '文生图每步约 2.77×，但两侧量化档不同，不是纯后端差异；依据见 README。',
+    '文生图每步约 2.77×，但两侧量化档不同，不是纯后端差异；依据见 README 与 docs/configuration.md。',
   ],
   placedAfterGroup: 'backend',
 }

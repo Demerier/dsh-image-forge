@@ -633,12 +633,20 @@ function composedSkillBody() {
 test('no shipped text pairs a ≤896 ceiling with "the canvas can stay at 1.5 MP" again', () => {
   // `docs/evidence/r5-budget-canvas-matrix.md` falsified the old copy: 896 was only ever measured on a
   // 0.82 MP canvas, and on a 1.5 MP one it means 67 s/step (≈28 min, no error).
-  // Guard every surface that ships text: the README, the skill body (`skill.md` is
+  // Guard every surface that ships text: the shipped prose (the README plus
+  // `docs/backends.md`, where the local backend's measurements moved when the
+  // README was split), the skill body (`skill.md` is
   // read at runtime by `src/skill.ts`, so the *composed* string is the evidence),
   // and the built tool text (descriptions come from `lib/index.js`).
   const root = fileURLToPath(new URL('..', import.meta.url))
   const texts = {
-    'README.md': readFileSync(join(root, 'README.md'), 'utf8'),
+    // The key keeps its old name — the assertion below keys off it, so renaming
+    // would only move the churn. The entry itself is now the prose surface: the
+    // README carries 109.5 / 1216×672, `docs/backends.md` carries 67 s/步 and the
+    // interpolation caveat, and both are searched as one string.
+    'README.md': ['README.md', join('docs', 'backends.md')]
+      .map((file) => readFileSync(join(root, file), 'utf8'))
+      .join('\n'),
     'skill body (composed)': composedSkillBody(),
     'lib/index.js (tool text)': readFileSync(join(root, 'lib', 'index.js'), 'utf8'),
   }
