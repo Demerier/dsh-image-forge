@@ -142,9 +142,9 @@ export function explainWorkerExit(code: number | null, signal: string | null, ta
   let resolvedCode = code
   let status = resolvedCode === null ? undefined : WINDOWS_EXIT_STATUS[resolvedCode]
   if (status === undefined) {
-    const hexInTail = /0xC0[0-9A-Fa-f]{6}/i.exec(tail)?.[0]?.toUpperCase()
+    const hexInTail = /0xC0[0-9A-Fa-f]{6}/i.exec(tail)?.[0]?.toLowerCase()
     if (hexInTail !== undefined) {
-      const entry = Object.entries(WINDOWS_EXIT_STATUS).find(([, value]) => value.hex === hexInTail)
+      const entry = Object.entries(WINDOWS_EXIT_STATUS).find(([, value]) => value.hex.toLowerCase() === hexInTail)
       if (entry !== undefined) {
         resolvedCode = Number(entry[0])
         status = WINDOWS_EXIT_STATUS[resolvedCode]

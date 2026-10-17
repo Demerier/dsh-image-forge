@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { analyseVram, vramSuspicionWarning } from '../src/env.ts'
-import { WorkerRuntime } from '../src/worker.ts'
+import { WorkerRuntime, explainWorkerExit } from '../src/worker.ts'
 
 const FAKE_WORKER = fileURLToPath(new URL('./fixtures/fake-worker.mjs', import.meta.url))
 
@@ -398,6 +398,21 @@ test('a crash whose log already names CUDA is still read as an out-of-memory, no
   } finally {
     fx.cleanup()
   }
+})
+
+// Windows reports 0xC0000005 as the process status; POSIX keeps only the low 8
+// bits, so the very same crash arrives as `5`. The log is the only place the full
+// NTSTATUS survives, and this pins the recovery that keeps the crash report — and
+// the remedy it carries — identical on both platforms.
+test('a POSIX-truncated exit status recovers the NTSTATUS the log names', () => {
+  const recovered = explainWorkerExit(5, null, 'fake-worker: fatal exception code 3221225477 (0xC0000005 ACCESS_VIOLATION)')
+  assert.match(recovered.headline, /exit code 3221225477/, 'the log names the real status')
+  assert.match(recovered.headline, /0xC0000005/)
+  assert.match(recovered.headline, /原码 5/, 'the truncated status it replaced must be stated')
+  assert.match(recovered.hints.join('\n'), /最可能的原因：加载阶段的显存不够/)
+
+  const silent = explainWorkerExit(5, null, 'fake-worker: nothing here names a status')
+  assert.match(silent.headline, /^exit code 5$/, 'nothing may be invented when the log is silent')
 })
 
 // ---------------------------------------------------------------------------
