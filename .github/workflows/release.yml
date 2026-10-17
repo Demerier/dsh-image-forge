@@ -1,0 +1,101 @@
+name: Release
+
+# Tag-driven publish: push a `v*` tag (e.g. v0.1.0) to cut a GitHub Release and
+# publish the same tarball to npm. `workflow_dispatch` can re-run a tag that
+# already exists without moving it.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Pack, GitHub Release, npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Resolve version
+        id: meta
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          if [ "v$PKG_VERSION" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Pack
+        id: pack
+        run: |
+          npm pack
+          TARBALL="dsh-image-forge-${{ steps.meta.outputs.version }}.tgz"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$TARBALL" | tee "$TARBALL.sha256"
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: dsh-image-forge ${{ steps.meta.outputs.version }}
+          body: |
+            ## Install
+
+            ```bash
+            npm install dsh-image-forge
+            # or from source
+            pnpm install && pnpm build
+            dsh plugin --profile <profile> add <this directory>
+            ```
+
+            ## Notes
+
+            - Qwen-Image **weights are not bundled** (research license); run `qwen_image_env action:"fetch-weights"` or the settings-page one-click deploy.
+            - Plugin code is MIT. See `README.md` and `docs/license-and-limits.md`.
+          files: |
+            ${{ steps.pack.outputs.tarball }}
+            ${{ steps.pack.outputs.tarball }}.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
