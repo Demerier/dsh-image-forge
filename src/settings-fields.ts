@@ -153,6 +153,25 @@ export interface SettingsField {
 export const RUNTIME_DIR_TOKEN = '<运行时目录>'
 
 /**
+ * Placeholders for the part of a derived path that follows the runtime directory.
+ *
+ * Same reason as {@link RUNTIME_DIR_TOKEN} for the token, plus one more: the
+ * separator and the venv layout differ per platform (`venv\Scripts\python.exe`
+ * on Windows, `venv/bin/python` elsewhere), and this module cannot ask the host
+ * which one it is running on. Each token resolves to a sub-path **including its
+ * leading separator**, so a hint authored as
+ * `<运行时目录><默认权重子路径>` still renders as a single readable path.
+ *
+ * The two platforms' answers are pinned against the canonical derivation
+ * (`defaultModelsDir` / `venvPaths`) by `settings.test.mjs`, so this duplication
+ * cannot drift unnoticed.
+ */
+const DERIVED_SUBPATH_TOKENS: Readonly<Record<string, { readonly win: string; readonly posix: string }>> = {
+  '<默认权重子路径>': { win: '\\models\\qwen-image-2.1-bnb4bit', posix: '/models/qwen-image-2.1-bnb4bit' },
+  '<默认解释器子路径>': { win: '\\venv\\Scripts\\python.exe', posix: '/venv/bin/python' },
+}
+
+/**
  * Fill a hint's runtime-directory token from the live config.
  *
  * @param hint - the hint as authored, possibly containing {@link RUNTIME_DIR_TOKEN}.
@@ -162,10 +181,14 @@ export const RUNTIME_DIR_TOKEN = '<运行时目录>'
  *   than a wrong path.
  */
 export function resolveHint(hint: string, value: Record<string, unknown> | undefined): string {
-  if (!hint.includes(RUNTIME_DIR_TOKEN)) return hint
   const runtimeDir = value?.['runtimeDir']
   if (typeof runtimeDir !== 'string' || runtimeDir.length === 0) return hint
-  return hint.split(RUNTIME_DIR_TOKEN).join(runtimeDir)
+  const win = runtimeDir.includes('\\')
+  let resolved = hint.split(RUNTIME_DIR_TOKEN).join(runtimeDir)
+  for (const [token, paths] of Object.entries(DERIVED_SUBPATH_TOKENS)) {
+    resolved = resolved.split(token).join(win ? paths.win : paths.posix)
+  }
+  return resolved
 }
 
 /**
@@ -178,7 +201,7 @@ export function resolveHint(hint: string, value: Record<string, unknown> | undef
  * @returns true when it contains a path separator.
  */
 export function hintHasPath(hint: string): boolean {
-  return /[/\\]/.test(hint)
+  return /[/\\]/.test(hint) || Object.keys(DERIVED_SUBPATH_TOKENS).some((token) => hint.includes(token))
 }
 
 /** The blocks the page renders, in order. */
@@ -315,7 +338,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'modelsDir',
     group: 'local',
     label: '权重目录',
-    hint: '留空 = 跟随运行时目录：<运行时目录>\\models\\qwen-image-2.1-bnb4bit。',
+    hint: '留空 = 跟随运行时目录：<运行时目录><默认权重子路径>。',
     kind: 'path',
     hidden: true,
   },
@@ -464,7 +487,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'pythonPath',
     group: 'python',
     label: '解释器路径',
-    hint: '留空 = 跟随运行时目录：<运行时目录>\\venv\\Scripts\\python.exe。',
+    hint: '留空 = 跟随运行时目录：<运行时目录><默认解释器子路径>。',
     kind: 'path',
     hidden: true,
   },

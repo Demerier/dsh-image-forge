@@ -150,21 +150,29 @@ export function probeBasePython(): string {
  * Where a ComfyUI install keeps its `models` directory, most likely first.
  *
  * The two `D:\Comfy-Desktop\…` entries are the layout the ComfyUI Desktop
- * installer produces on this machine and were confirmed present; the rest are
- * the conventional per-user locations. Ordering only decides which one wins when
+ * installer produces on this machine and were confirmed present — Windows only;
+ * the rest are the conventional per-user locations, with the Linux/macOS clone
+ * and `/opt` spots added where those platforms actually put one. Ordering only decides which one wins when
  * several exist, and the value is shown on the settings page so a wrong pick is
  * visible and correctable.
  *
  * @returns candidate directories, whether or not they exist.
  */
 export function comfyModelsCandidates(): readonly string[] {
+  const win = process.platform === 'win32'
   const roaming = process.env.APPDATA ?? ''
   const local = process.env.LOCALAPPDATA ?? ''
   return [
-    'D:\\Comfy-Desktop\\ComfyUI-Shared\\models',
-    'D:\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\ComfyUI\\models',
-    ...(roaming === '' ? [] : [join(roaming, 'ComfyUI', 'models')]),
-    ...(local === ''
+    // The two `D:\Comfy-Desktop\…` entries are the layout the ComfyUI Desktop
+    // installer produces on this machine and were confirmed present. They are
+    // Windows-only, and on any other platform they are not even absolute paths.
+    ...(win
+      ? ['D:\\Comfy-Desktop\\ComfyUI-Shared\\models', 'D:\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\ComfyUI\\models']
+      : []),
+    // `APPDATA` / `LOCALAPPDATA` only exist on Windows; reading them elsewhere
+    // would invent a Windows-shaped path on a POSIX box.
+    ...(roaming === '' || !win ? [] : [join(roaming, 'ComfyUI', 'models')]),
+    ...(local === '' || !win
       ? []
       : [
           join(local, 'ComfyUI', 'models'),
@@ -172,6 +180,9 @@ export function comfyModelsCandidates(): readonly string[] {
         ]),
     join(homedir(), 'ComfyUI', 'models'),
     join(homedir(), 'Documents', 'ComfyUI', 'models'),
+    // The two locations a ComfyUI install lands in on Linux/macOS: a clone or the
+    // portable build under the home directory, and the system-wide /opt copy.
+    ...(win ? [] : [join(homedir(), 'comfy', 'ComfyUI', 'models'), '/opt/ComfyUI/models']),
   ]
 }
 
