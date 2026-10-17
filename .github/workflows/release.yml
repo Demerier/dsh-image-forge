@@ -15,7 +15,8 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: write # create the GitHub Release
+  id-token: write # OIDC token for `npm publish --provenance`
 
 concurrency:
   group: release-${{ github.ref }}
@@ -73,8 +74,21 @@ jobs:
       # Publish first. A token that cannot publish must not leave a GitHub Release
       # behind for a version npm never received — that is the one failure mode here
       # that cannot be undone by re-running the job.
+      - name: Check the npm token
+        # Without this, a missing / expired / read-only / wrong-account token only
+        # shows up as a bare 403 after the tarball has been built and uploaded.
+        run: |
+          if ! npm whoami --registry https://registry.npmjs.org; then
+            echo "::error::NPM_TOKEN was rejected by npm: missing, expired, read-only, or issued to another account."
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish to npm
-        run: npm publish --access public
+        # --provenance signs the tarball with this run's OIDC identity, so the npm
+        # page can show that exactly this commit built it (needs id-token: write).
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
