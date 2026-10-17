@@ -11,10 +11,10 @@ DeepSeek Harness 插件：**Qwen-Image 出图 / 参考图编辑**，并把官方
 
 **从 npm：**
 
-`ash
+```bash
 npm install dsh-image-forge
 # 或 dsh plugin --profile <profile> add github:Demerier/dsh-image-forge
-`
+```
 
 **从本仓库源码：**
 
