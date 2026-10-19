@@ -28,6 +28,9 @@ docs/plans/
 # WorkBuddy workspace data (memory / session state): machine-local, never committed.
 .workbuddy/
 
+# Mimocode scheduled-task state (locks, pids, machine-local): never committed.
+.mimocode/
+
 # Verification reports and screenshots are not vendored: the shipped prose keeps
 # the claims, the raw captures stay out of the repository (and its history).
 docs/evidence/
