@@ -28,7 +28,7 @@
 | `pythonPath` | 空 | worker 解释器；空 = `<runtimeDir>/venv` 里的那个 |
 | `workerScript` | 空 | worker 脚本；空 = 随包的 `resources/worker.py`（调试/测试时可换） |
 | `basePython` | 空 | `install` 用来建 venv 的基础解释器；空 = 依次试 `python` / `python3` / `py` |
-| `torchWheels` | 空 | 空 = 设备矩阵 `cu128,cu126,cu118` 逐级降级 |
+| `torchWheels` | 空 | 空 = 设备矩阵 `cu128,cu126,cu118` 逐级降级（**建议留空走默认**，各档不做真机验证） |
 | `pipIndexUrl` | 空 | 非 torch 包的索引地址（内网镜像）；空 = 默认 PyPI |
 | `reuseBaseTorch` | `true` | 基础解释器里已有 CUDA torch 就以 `--system-site-packages` 复用，**不重复下载 torch** |
 | `minFreeVramMiB` | `5500` | **启动前门禁**的阈值，也是 `status` 的预警线：空闲显存低于它，插件**拒绝拉起本地 worker**（点名占用者 + 给出 `POST /free` 命令），而不是硬起。`0` = 关掉这道门禁。⚠️ 它守的是**加载那一次约 4.5 GiB 的分配**，**不是**编辑画布尺寸——编辑的画布上限由[本地编辑尺寸门](backends.md#本地编辑尺寸门只在-local-后端生效)管（见[后端](backends.md)），那道门的失败形态也不是显存不足 |
