@@ -1,7 +1,7 @@
 {
   "name": "dsh-image-forge",
-  "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: Qwen-Image 文生图 / 参考图编辑，把官方提示词契约的 wh_ratio 做成一等参数；后端 local（本插件自带受管运行时）/ comfyui / api，默认 auto",
+  "version": "0.2.0",
+  "description": "DeepSeek Harness plugin: Qwen-Image 文生图 / 参考图编辑，把官方提示词契约的 wh_ratio 做成一等参数；后端 api（云端 key）/ comfyui（本机 ComfyUI），默认 auto；成果按画板归档。",
   "license": "MIT",
   "author": "Demerier",
   "homepage": "https://github.com/Demerier/dsh-image-forge#readme",
@@ -42,20 +42,24 @@
   "files": [
     "lib",
     "src",
-    "resources/*.py",
     "cordis.yml",
     "README.md",
     "skill.md",
     "references",
-    "docs/*.md"
+    "docs/*.md",
+    "LICENSE",
+    "THIRD-PARTY",
+    "docs/images"
   ],
   "scripts": {
     "build": "tsdown && tsdown -c tsdown.client.config.ts",
-    "test": "node test/ratio.test.mjs && node test/local-edit-budget.test.mjs && node test/surface.test.mjs && node test/api-e2e.test.mjs && node test/comfyui-e2e.test.mjs && node test/worker-lifecycle.test.mjs && node test/edit-e2e.test.mjs && node test/vram-gate.test.mjs && node test/settings.test.mjs && node test/package-contents.test.mjs",
-    "test:live": "node test/live-worker-e2e.mjs",
-    "test:live:edit": "node test/live-edit-e2e.mjs both",
+    "test": "node test/ratio.test.mjs && node test/surface.test.mjs && node test/api-e2e.test.mjs && node test/comfyui-e2e.test.mjs && node test/edit-e2e.test.mjs && node test/settings.test.mjs && node test/studio.test.mjs && node test/studio-canvas.test.mjs && node test/boards.test.mjs && node test/package-contents.test.mjs && node test/studio-file-route.test.mjs",
+    "test:live": "node test/live-generate-e2e.mjs",
+    "test:live:edit": "node test/live-edit-e2e.mjs",
     "prepack": "pnpm run build",
-    "prepublishOnly": "pnpm test"
+    "prepublishOnly": "pnpm test",
+    "blind:turbo": "node test/blind-turbo.mjs",
+    "blind:page": "node test/blind-regen.mjs && node test/blind-score-check.mjs"
   },
   "dsh": {
     "bundle": {
@@ -80,6 +84,12 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-skill": "^0.1.0-rc.6 || ^0.2.0-rc.1",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6 || ^0.2.0-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/dsh-llm": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
   }
 }
