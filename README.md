@@ -207,3 +207,4 @@ ComfyUI 后端与工作流占位符协议（`{{prompt}}` / `{{seed}}` / `{{image
 | [docs/license-and-limits.md](docs/license-and-limits.md) | 分发和商用前的注意事项 |
 | [docs/testing.md](docs/testing.md) | 开发：怎么跑测试 |
 | [docs/client-bundle.md](docs/client-bundle.md) | 开发：改客户端和设置页 UI |
+| [docs/release-notes-0.2.0.md](docs/release-notes-0.2.0.md) | 0.2.0 改了什么，以及从 0.1.0 升上来要注意什么 |
