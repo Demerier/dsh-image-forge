@@ -14,7 +14,7 @@
  */
 
 /** The coarse buckets the settings page shows, in display order. */
-export type SettingsGroupId = 'backend' | 'steps' | 'api' | 'local' | 'comfyui' | 'output' | 'python'
+export type SettingsGroupId = 'backend' | 'steps' | 'api' | 'comfyui' | 'output'
 
 /**
  * One tab of the settings page.
@@ -37,8 +37,7 @@ export interface SettingsTab {
 /**
  * Tab strip for the settings page, in order.
  *
- * Hidden groups (`python`) are simply not referenced: a tab only lists what it
- * actually shows.
+ * A group that is not referenced by any tab is simply not rendered.
  */
 export const SETTINGS_TABS: readonly SettingsTab[] = [
   {
@@ -54,15 +53,9 @@ export const SETTINGS_TABS: readonly SettingsTab[] = [
     groupIds: ['api'],
   },
   {
-    id: 'local',
-    label: '本地环境',
-    hint: '一键部署 venv / 权重，以及显存与本地编辑门闩。',
-    groupIds: ['local'],
-  },
-  {
     id: 'comfyui',
     label: 'ComfyUI',
-    hint: '复用你已经装好的 ComfyUI。',
+    hint: '复用你自己装好的 ComfyUI（本地推荐部署见 docs/comfyui-deployment.md）。',
     groupIds: ['comfyui'],
   },
 ]
@@ -128,67 +121,11 @@ export interface SettingsField {
   /**
    * Keep the control off the settings page.
    *
-   * Custom environment plumbing (interpreter paths, wheel tags, mirrors, worker
-   * ports…) stays in the schema so profiles and tests can still set it, but the
-   * page does not expose it: the one-click deploy button owns local setup, and
-   * the default values are the ones a user should get.
+   * Nothing uses it today (the page shows every remaining field), but the
+   * mechanism is cheap and the alternative is deleting a knob the next
+   * advanced setting would need back.
    */
   readonly hidden?: boolean
-}
-
-/**
- * Placeholder for the runtime directory inside a hint.
- *
- * Two fields (`modelsDir`, `pythonPath`) resolve *relative to* `runtimeDir`, and
- * their values are deliberately left empty so they keep following it. The page
- * still has to show the user where things will land, and it must show the
- * **current** runtime directory rather than a baked one — so the hint carries
- * this token and {@link resolveHint} substitutes the live value at render time.
- *
- * The indirection exists because this module is bundled for the browser: it
- * cannot call `node:os` / `node:path` to compute a home directory, and a frozen
- * absolute path written into the source would go stale the moment the user moves
- * `runtimeDir`.
- */
-export const RUNTIME_DIR_TOKEN = '<运行时目录>'
-
-/**
- * Placeholders for the part of a derived path that follows the runtime directory.
- *
- * Same reason as {@link RUNTIME_DIR_TOKEN} for the token, plus one more: the
- * separator and the venv layout differ per platform (`venv\Scripts\python.exe`
- * on Windows, `venv/bin/python` elsewhere), and this module cannot ask the host
- * which one it is running on. Each token resolves to a sub-path **including its
- * leading separator**, so a hint authored as
- * `<运行时目录><默认权重子路径>` still renders as a single readable path.
- *
- * The two platforms' answers are pinned against the canonical derivation
- * (`defaultModelsDir` / `venvPaths`) by `settings.test.mjs`, so this duplication
- * cannot drift unnoticed.
- */
-const DERIVED_SUBPATH_TOKENS: Readonly<Record<string, { readonly win: string; readonly posix: string }>> = {
-  '<默认权重子路径>': { win: '\\models\\qwen-image-2.1-bnb4bit', posix: '/models/qwen-image-2.1-bnb4bit' },
-  '<默认解释器子路径>': { win: '\\venv\\Scripts\\python.exe', posix: '/venv/bin/python' },
-}
-
-/**
- * Fill a hint's runtime-directory token from the live config.
- *
- * @param hint - the hint as authored, possibly containing {@link RUNTIME_DIR_TOKEN}.
- * @param value - the config values currently shown, read for `runtimeDir`.
- * @returns the hint with the token replaced, or the hint unchanged when the
- *   snapshot carries no usable `runtimeDir` yet — an unresolved token is better
- *   than a wrong path.
- */
-export function resolveHint(hint: string, value: Record<string, unknown> | undefined): string {
-  const runtimeDir = value?.['runtimeDir']
-  if (typeof runtimeDir !== 'string' || runtimeDir.length === 0) return hint
-  const win = runtimeDir.includes('\\')
-  let resolved = hint.split(RUNTIME_DIR_TOKEN).join(runtimeDir)
-  for (const [token, paths] of Object.entries(DERIVED_SUBPATH_TOKENS)) {
-    resolved = resolved.split(token).join(win ? paths.win : paths.posix)
-  }
-  return resolved
 }
 
 /**
@@ -201,7 +138,7 @@ export function resolveHint(hint: string, value: Record<string, unknown> | undef
  * @returns true when it contains a path separator.
  */
 export function hintHasPath(hint: string): boolean {
-  return /[/\\]/.test(hint) || Object.keys(DERIVED_SUBPATH_TOKENS).some((token) => hint.includes(token))
+  return /[/\\]/.test(hint)
 }
 
 /** The blocks the page renders, in order. */
@@ -209,12 +146,12 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   {
     id: 'backend',
     label: '后端选择',
-    hint: '一次出图交给谁执行。',
+    hint: '一次出图交给谁执行：云端的 key，还是本机的 ComfyUI。',
   },
   {
     id: 'steps',
     label: '步数（画质与耗时）',
-    hint: '两个后端的步数口径不同。',
+    hint: 'base 25 步；turbo 蒸馏版 8 步。',
   },
   {
     id: 'api',
@@ -222,25 +159,14 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
     hint: '云端端点与密钥。',
   },
   {
-    id: 'local',
-    label: '本地运行时',
-    hint: '本机 worker：目录、端口、显存。',
-  },
-  {
     id: 'comfyui',
     label: 'ComfyUI',
-    hint: '已装好的 ComfyUI 也能当后端。',
+    hint: '地址、端口与权重目录。',
   },
   {
     id: 'output',
     label: '输出与超时',
     hint: '图片落到哪里，等多久。',
-  },
-  {
-    id: 'python',
-    label: 'Python、依赖与权重（高级）',
-    hint: '一般不用改；留空 = 自动。',
-    advanced: true,
   },
 ]
 
@@ -250,12 +176,11 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'backend',
     group: 'backend',
     label: '后端',
-    hint: 'auto：有 key 就云端，否则 ComfyUI、worker。',
+    hint: 'auto：有 key 走云端，否则走 ComfyUI。改图只有 ComfyUI。',
     kind: 'enum',
     choices: [
       { value: 'auto', label: 'auto（自动选择）' },
       { value: 'api', label: 'api（云端 API）' },
-      { value: 'local', label: 'local（本机 worker）' },
       { value: 'comfyui', label: 'comfyui（本机 ComfyUI）' },
     ],
   },
@@ -263,7 +188,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'defaultSteps',
     group: 'steps',
     label: '默认步数',
-    hint: '两边都没指定时用它。25 = 官方 ComfyUI 模板口径。',
+    hint: 'base 的默认：25，官方模板口径。',
     kind: 'number',
     min: 1,
     max: 200,
@@ -273,7 +198,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'comfyuiSteps',
     group: 'steps',
     label: 'ComfyUI 专用步数',
-    hint: '留空 = 用默认步数。官方模板就是 25，一般不用改。',
+    hint: '留空 = 用默认步数。',
     kind: 'number',
     min: 1,
     max: 200,
@@ -281,13 +206,24 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     nullable: true,
   },
   {
-    key: 'localSteps',
+    key: 'comfyModel',
     group: 'steps',
-    label: '本机 worker 专用步数',
-    hint: '留空 = 用默认步数。8 = 快但不是官方口径；25 约慢 2.7 倍。',
+    label: 'ComfyUI 权重',
+    hint: 'turbo：8 步，快 2.7×；没装 turbo 权重自动退回 base。',
+    kind: 'enum',
+    choices: [
+      { value: 'base', label: 'base（25 步，官方全量）' },
+      { value: 'turbo', label: 'turbo（8 步，蒸馏版）' },
+    ],
+  },
+  {
+    key: 'turboSteps',
+    group: 'steps',
+    label: 'turbo 专用步数',
+    hint: '留空 = 8。蒸馏按 8 步调，加减不一定更好。',
     kind: 'number',
     min: 1,
-    max: 200,
+    max: 50,
     unit: '步',
     nullable: true,
   },
@@ -303,7 +239,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'apiKey',
     group: 'api',
     label: 'API Key',
-    hint: '只写不读：已保存的密钥不会回显。本机环境变量优先于这里。',
+    hint: '只写不读：已保存的密钥不会回显。本机环境变量优先。',
     kind: 'secret',
     placeholder: '留空表示不修改已保存的密钥',
   },
@@ -327,122 +263,6 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     ],
   },
   {
-    key: 'runtimeDir',
-    group: 'local',
-    label: '运行时目录',
-    hint: '插件自有数据目录：venv、权重、worker 日志与断点。',
-    kind: 'path',
-    hidden: true,
-  },
-  {
-    key: 'modelsDir',
-    group: 'local',
-    label: '权重目录',
-    hint: '留空 = 跟随运行时目录：<运行时目录><默认权重子路径>。',
-    kind: 'path',
-    hidden: true,
-  },
-  {
-    key: 'modelRepo',
-    group: 'local',
-    label: '权重仓库',
-    hint: 'nf4 权重来自哪个 Hugging Face 仓库。',
-    kind: 'string',
-    hidden: true,
-    placeholder: 'circulus/Qwen-Image-2.1-bnb-4bit',
-  },
-  {
-    key: 'hfMirror',
-    group: 'local',
-    label: '下载镜像',
-    hint: '别填 huggingface.co：它的 /api/ 在本机会超时。',
-    kind: 'string',
-    hidden: true,
-    placeholder: 'https://hf-mirror.com',
-  },
-  {
-    key: 'localEndpoint',
-    group: 'local',
-    label: 'worker 地址',
-    hint: '本地推理 worker 的根地址。',
-    kind: 'string',
-    hidden: true,
-    placeholder: 'http://127.0.0.1:8399',
-  },
-  {
-    key: 'workerPorts',
-    group: 'local',
-    label: 'worker 候选端口',
-    hint: '形如 8399-8410 或端口列表；localEndpoint 的端口优先。',
-    kind: 'string',
-    hidden: true,
-    placeholder: '8399-8410',
-  },
-  {
-    key: 'workerStartTimeoutMs',
-    group: 'local',
-    label: '冷启动超时',
-    hint: 'worker 冷启动要加载约 10.6 GiB 权重，给足时间。',
-    kind: 'number',
-    hidden: true,
-    min: 1000,
-    max: 3_600_000,
-    unit: '毫秒',
-  },
-  {
-    key: 'idleUnloadMs',
-    group: 'local',
-    label: '空闲卸载',
-    hint: '空闲超过这么久就把显存还给系统；0 表示不卸载。',
-    kind: 'number',
-    hidden: true,
-    min: 0,
-    max: 86_400_000,
-    unit: '毫秒',
-  },
-  {
-    key: 'manageWorker',
-    group: 'local',
-    label: '由插件管理 worker 进程',
-    hint: '关闭后插件只连不管，需要你自己把 worker 起起来。',
-    kind: 'boolean',
-    hidden: true,
-  },
-  {
-    key: 'minFreeVramMiB',
-    group: 'local',
-    label: '显存下限',
-    hint: '低于它不再拉起 worker（加载期门禁，不是编辑尺寸门）。',
-    kind: 'number',
-    min: 0,
-    max: 262_144,
-    unit: 'MiB',
-  },
-  {
-    key: 'freeComfyBeforeLocalStart',
-    group: 'local',
-    label: '起本地 worker 前先卸载 ComfyUI 模型',
-    hint: '8GB 卡上通常是必需项；开启后先卸载 ComfyUI 模型。',
-    kind: 'boolean',
-  },
-  {
-    key: 'allowLocalEditOverBudget',
-    group: 'local',
-    label: '允许超预算本地编辑',
-    hint: '默认拒绝超尺寸门的本地编辑；开启=放行并自负风险。',
-    kind: 'boolean',
-  },
-  {
-    key: 'localReferenceBudget',
-    group: 'local',
-    label: '参考图条件化预算',
-    hint: '0=按画布推导；调低=降参考图分辨率；896/512 同画布目视无差（n=1）。',
-    kind: 'number',
-    min: 0,
-    max: 4096,
-    unit: '像素/边',
-  },
-  {
     key: 'comfyEndpoint',
     group: 'comfyui',
     label: 'ComfyUI 地址',
@@ -462,9 +282,8 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'comfyModelsDir',
     group: 'comfyui',
     label: 'ComfyUI 模型目录',
-    hint: '只用来把「把文件放到 …」这类报错写具体；留空则报错保持通用。',
+    hint: '桌面版在「设置 → 模型路径」里；用来把「放哪里」写进报错。',
     kind: 'path',
-    hidden: true,
   },
   {
     key: 'outputDir',
@@ -482,64 +301,6 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     min: 1000,
     max: 3_600_000,
     unit: '毫秒',
-  },
-  {
-    key: 'pythonPath',
-    group: 'python',
-    label: '解释器路径',
-    hint: '留空 = 跟随运行时目录：<运行时目录><默认解释器子路径>。',
-    kind: 'path',
-    hidden: true,
-  },
-  {
-    key: 'workerScript',
-    group: 'python',
-    label: 'worker 脚本',
-    hint: '留空使用插件自带的 resources/worker.py。',
-    kind: 'path',
-    hidden: true,
-  },
-  {
-    key: 'basePython',
-    group: 'python',
-    label: '基础解释器',
-    hint: '建 venv 用它；留空 = 试 python/python3/py。',
-    kind: 'path',
-    hidden: true,
-  },
-  {
-    key: 'torchWheels',
-    group: 'python',
-    label: 'CUDA wheel 标签',
-    hint: '留空 = 依次试 cu128、cu126、cu118。',
-    kind: 'string',
-    hidden: true,
-    placeholder: 'cu128,cu126,cu118',
-  },
-  {
-    key: 'pipIndexUrl',
-    group: 'python',
-    label: 'pip 索引地址',
-    hint: '留空 = https://pypi.org/simple。',
-    kind: 'string',
-    hidden: true,
-    placeholder: 'https://pypi.org/simple',
-  },
-  {
-    key: 'reuseBaseTorch',
-    group: 'python',
-    label: '复用基础解释器里的 CUDA torch',
-    hint: '开启后不再下载一份 torch。',
-    kind: 'boolean',
-    hidden: true,
-  },
-  {
-    key: 'skipLmHead',
-    group: 'python',
-    label: 'fetch-weights 跳过 lm_head.weight',
-    hint: '默认值：丢掉用不到的那个张量，省下载量。',
-    kind: 'boolean',
-    hidden: true,
   },
 ]
 
@@ -599,9 +360,8 @@ export function fieldByKey(key: string): SettingsField | undefined {
 /**
  * Bucket the **visible** fields under their groups, keeping page order.
  *
- * Hidden controls (custom environment plumbing) are dropped here, and a group
- * left with no visible fields — the whole `python` block — is dropped too, so
- * the page never renders an empty heading.
+ * Hidden controls are dropped here, and a group left with no visible fields is
+ * dropped too, so the page never renders an empty heading.
  *
  * @returns one entry per group that still has visible fields.
  */
@@ -701,13 +461,13 @@ export interface SettingsAdvisory {
  * still carries the evidence.
  */
 export const BACKEND_PERF_ADVISORY: SettingsAdvisory = {
-  id: 'backend-perf',
-  title: '8 GB 显存上做参考图编辑，请优先用 comfyui 后端',
+  id: 'turbo-vs-base',
+  title: '默认跑 turbo（8 步）：快 2.7×，写实 / 中文文字 / 古典构图这三类切 base',
   paragraphs: [
-    '实测 1312×736 / 6 步：comfyui ≈ 19–23 s，本机 worker ≈ 219 s（纯管线）。',
-    '文生图每步约 2.77×，但两侧量化档不同，不是纯后端差异；依据见 README 与 docs/configuration.md。',
+    '盲测 5 题（同 prompt 同 seed）：base 3 : 2 turbo；单张 27–29 s → turbo 9–11 s。',
+    'turbo 赢在高对比氛围（夜市、动物）；输在材质细节、中文小字与印章、古典构图。',
   ],
-  placedAfterGroup: 'backend',
+  placedAfterGroup: 'steps',
 }
 
 /**

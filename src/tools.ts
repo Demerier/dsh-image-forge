@@ -9,8 +9,6 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
-import { fileURLToPath } from 'node:url'
-import { join } from 'node:path'
 import {
   API_KEY_ENV_VARS,
   generateViaApi,
@@ -22,60 +20,35 @@ import {
 } from './backend.ts'
 import {
   DEFAULT_COMFY_PORTS,
+  comfySystemStats,
   discoverComfyUi,
   generateViaComfyUi,
   generateViaComfyUiEdit,
+  generateViaComfyUiTurbo,
+  generateViaComfyUiTurboEdit,
   loadComfyModels,
   probeComfyUi,
+  turboUnetOf,
+  TURBO_STEPS,
   type ComfyModels,
   type ComfyOptions,
 } from './comfyui.ts'
-import { collectEnvStatus, vramSuspicionWarning, type VramAdvisory } from './env.ts'
-import { collectLocalRuntime, runRepair } from './maintenance.ts'
-import { LocalUnreachableError, generateViaLocal, type LocalGeneration } from './local.ts'
-import { parsePorts } from './procx.ts'
-import { sanitizePrefix, writeImages } from './output.ts'
+import { sanitizePrefix, writeImages, type WrittenImage } from './output.ts'
+import { makeItemId, recordItems } from './boards.ts'
 import { MAX_REFERENCES, loadReferenceImages, probeImageSize, resolveRatioFollow, type ReferenceImage } from './refs.ts'
 import {
-  LOCAL_EDIT_BUDGET_EDGE,
-  LOCAL_EDIT_BUDGET_RELIABLE,
-  LOCAL_EDIT_CANVAS_SAFE_BUDGET,
-  LOCAL_EDIT_CANVAS_WARN_AREA,
   MAX_SIDE,
   MIN_SIDE,
   SIZE_MULTIPLE,
   WH_RATIOS,
-  localEditBudgetTier,
   nearestRatio,
   resolveDefaultSize,
-  resolveReferenceBudget,
   validateSize,
-  type LocalEditBudgetTier,
 } from './ratio.ts'
-import { RUNTIME_PACKAGES, TORCH_WHEEL_MATRIX, runInstall, venvPaths } from './venv.ts'
-import { startDeployServer } from './deploy-server.ts'
-import { inspectWeights, runFetchWeights } from './weights.ts'
-import { WorkerRuntime, type WorkerHandle } from './worker.ts'
 import type { Config } from './index.ts'
 
-/**
- * Resolve a file shipped beside the built entry (`lib/index.js` → `<pkg>/…`).
- *
- * @param relative - package-relative path, e.g. `resources/worker.py`.
- * @returns the absolute path, whether or not the file exists.
- */
-export function resourcePath(relative: string): string {
-  return fileURLToPath(new URL(`../${relative}`, import.meta.url))
-}
-
-/** Ports tried when the config does not say otherwise. */
-const DEFAULT_WORKER_PORTS = ['8399-8410'] as const
-
-/** Actions `qwen_image_env` understands. */
-const ENV_ACTIONS = ['status', 'install', 'fetch-weights', 'repair', 'unload'] as const
-
 /** Backends a caller may force; `auto` picks by key availability. */
-const BACKENDS = ['auto', 'api', 'local', 'comfyui'] as const
+const BACKENDS = ['auto', 'api', 'comfyui'] as const
 
 /** Everything `qwen_image_generate` accepts, as one schema reused by validation. */
 const GENERATE_PARAMETERS: ParameterSchemaSpec = {
@@ -105,8 +78,8 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   steps: {
     type: 'integer',
     description:
-      '采样步数；省略则按配置解析：后端专属（`comfyuiSteps` / `localSteps`）→ 默认 `defaultSteps`（默认 25）。' +
-      '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型/后端的建议值时再传。',
+      '采样步数；省略则按配置解析：`comfyuiSteps` → 默认 `defaultSteps`（默认 25）；`comfyModel: "turbo"` 时是 `turboSteps` → 8。' +
+      '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
   seed: {
     type: 'integer',
@@ -124,13 +97,20 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
     type: 'string',
     enum: BACKENDS,
     description:
-      '强制后端：auto（默认，有 API key 走 api，否则先试本机 ComfyUI，再退到本地 worker）/ ' +
-      'api（云 API，需要 key）/ comfyui（复用本机已装好的 ComfyUI + Qwen-Image 权重，零下载、零转换）/ ' +
-      'local（本机 worker 的 HTTP 契约）。',
+      '强制后端：auto（默认，有 API key 走 api，否则走本机 ComfyUI）/ ' +
+      'api（云 API，需要 key）/ comfyui（复用本机已装好的 ComfyUI + Qwen-Image 权重，零下载、零转换）。' +
+      '本插件不再自带任何本地运行时：要么给 key，要么把 ComfyUI 起起来（部署见 docs/comfyui-deployment.md）。',
   },
   preset: {
     type: 'string',
     description: '落盘文件名前缀标签，例如 "poster"；只影响命名（<outputDir>/<前缀>_<W>x<H>_<n>.png），不影响生成参数。省略时为 "qwen"。',
+  },
+  board: {
+    type: 'string',
+    description:
+      '画板 id 或名字——画板是成果的存储与显示单位（一个题材/一个项目一个画板），工作台的画布和素材页都按它组织。' +
+      '**省略就新建一个画板**（用提示词首行命名），结果里的 board.id 就是它；同一组图继续出图时把那个 id 传回来，' +
+      '成果才会落在同一个画板里，而不是又开一个。',
   },
 }
 
@@ -169,20 +149,11 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
     description:
       `画布固定比例（官方 7 档）：${WH_RATIOS.join(' / ')}。与 ratio_follow **互斥**；` +
       '本插件按 ~1.5MP 预算换算成 32 对齐的像素尺寸。省略且没给 ratio_follow 时，默认跟随第一张参考图（不是 1:1）。' +
-      `注意：这七档换算出来的画布在 **local** 后端上全部超过编辑尺寸门（见 width 与工具说明）——` +
-      '本机实测 4:3 / 3:4 档就已经崩，要用 local 就得显式给更小的 width/height，' +
-      '或把配置 `localReferenceBudget` 调低（画布不动，降的是参考图条件化分辨率；1.5MP 画布上只有 512 实测跑得完）。',
+      '七档画布在 ComfyUI 改图工作流上都能跑；参考图会先缩放到与画布同量级再进条件化（官方模板的要求）。',
   },
   width: {
     type: 'integer',
-    description: `显式覆盖宽度（像素）。必须与 height 成对给出，且为 ${SIZE_MULTIPLE} 的倍数、位于 ${MIN_SIDE}–${MAX_SIDE}；给了就以 width/height 为准（此时 ratio_follow / wh_ratio 被覆盖）。` +
-      `**local 后端有硬尺寸门**：插件按本机实测的 _reference_budget 分档——≤ ${LOCAL_EDIT_BUDGET_RELIABLE} 可靠放行、` +
-      `${LOCAL_EDIT_BUDGET_RELIABLE}–${LOCAL_EDIT_BUDGET_EDGE} 放行但返回警告、> ${LOCAL_EDIT_BUDGET_EDGE} 默认直接拒绝（要跑得显式开配置 allowLocalEditOverBudget）。` +
-      `档位判的是**生效的**预算：配置了 \`localReferenceBudget\` 就按它判（所以 512 + 1248×1248 画布是放行的），` +
-      '没配置才按画布推导——它只降参考图条件化分辨率（换速度与可跑性；保真度：同画布 896 vs 512 目视看不出差别，n=1、1 位评判者），不改出图尺寸。' +
-      `⚠️ 生效预算 > ${LOCAL_EDIT_CANVAS_SAFE_BUDGET} **且**画布面积 > 1.0 MP 时另有一条**画布侧警告**（放行、只给建议）：` +
-      `1.5MP 画布上 896 实测 67 s/步（≈28 min / 25 步，不报错但等于不可用），只有 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET} 跑得完。` +
-      '所以「编辑在 local 上跑不动」时先看是不是画布太大，而不是先怀疑显存。',
+    description: `显式覆盖宽度（像素）。必须与 height 成对给出，且为 ${SIZE_MULTIPLE} 的倍数、位于 ${MIN_SIDE}–${MAX_SIDE}；给了就以 width/height 为准（此时 ratio_follow / wh_ratio 被覆盖）。`,
   },
   height: {
     type: 'integer',
@@ -191,8 +162,8 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
   steps: {
     type: 'integer',
     description:
-      '采样步数；省略则按配置解析：后端专属（`comfyuiSteps` / `localSteps`）→ 默认 `defaultSteps`（默认 25）。' +
-      '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型/后端的建议值时再传。',
+      '采样步数；省略则按配置解析：`comfyuiSteps` → 默认 `defaultSteps`（默认 25）；`comfyModel: "turbo"` 时是 `turboSteps` → 8。' +
+      '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
   seed: {
     type: 'integer',
@@ -210,14 +181,19 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
     type: 'string',
     enum: BACKENDS,
     description:
-      '强制后端：auto（默认。**编辑场景跳过 api**——云后端没有编辑通道，先试本机 ComfyUI，再退到本地 worker）/ ' +
-      "api（编辑不支持，会明确报错而不是丢掉参考图）/ comfyui（复用本机 ComfyUI + 官方 Qwen-Image 2.1 改图工作流）/ " +
-      'local（本机 worker 的 HTTP 契约，请求体多一个 images 字段）。' +
-      '**comfyui 不受编辑尺寸门约束**，所以它是超出尺寸门时最省事的出路；尺寸门只在请求真要落到 local 时才生效。',
+      '强制后端：auto（默认。**编辑场景跳过 api**——云后端没有编辑通道）/ ' +
+      'api（编辑不支持，会明确报错而不是丢掉参考图）/ comfyui（复用本机 ComfyUI + 官方 Qwen-Image 2.1 改图工作流）。' +
+      '改图只有 comfyui 一条路，所以它没起来时错误会直接说缺什么。',
   },
   preset: {
     type: 'string',
     description: '落盘文件名前缀标签，例如 "retouch"；只影响命名（<outputDir>/<前缀>_<W>x<H>_<n>.png）。省略时为 "edit"。',
+  },
+  board: {
+    type: 'string',
+    description:
+      '画板 id 或名字。**省略就新建一个画板**；改图通常应落在参考图所在的那个画板里——' +
+      '如果你知道上一次出图返回的 board.id，就把它传进来，新图和它的来源才会在同一块画布上连起来。',
   },
 }
 
@@ -258,6 +234,88 @@ function jsonSafe<T>(value: T): T {
 /** Build the Markdown block the model can paste into its reply verbatim. */
 export function renderMarkdown(images: readonly { markdownPath: string }[]): string {
   return images.map((image) => `![generated image](${image.markdownPath})`).join('\n')
+}
+
+/** What a run recorded, in the shape the tool payload exposes. */
+interface BoardRecording {
+  board: { id: string; name: string; created: boolean; item_ids: string[] } | null
+  note: string | null
+  ids: string[]
+}
+
+/** First line of a failure, so the board note stays a note. */
+function reasonOf(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  return text.split(/\r?\n/, 1)[0] ?? text
+}
+
+/** Session id the host gave this call, when it gave one. */
+function sessionOf(exec: { agent?: { id?: unknown } }): string | undefined {
+  const id = exec.agent?.id
+  return typeof id === 'string' && id.length > 0 ? id : undefined
+}
+
+/**
+ * Record one run's images on a board.
+ *
+ * Deliberately non-fatal: the PNGs are already on disk, and a metadata failure
+ * must not turn a successful draw into a tool error. The note travels back in
+ * the payload so the failure is visible rather than silent.
+ *
+ * `requested` absent means **a new board** — the conversation path never
+ * guesses at the panel's open board, because the model is the only one who
+ * knows whether this draw continues the previous subject or starts a new one.
+ *
+ * @param outputDir - where the images and the board library live.
+ * @param requested - board id/name from the caller, or `undefined`.
+ * @param written - files already on disk.
+ * @param meta - provenance stored on every item.
+ * @returns ids in output order, the board summary, and any failure note.
+ */
+async function recordRun(
+  outputDir: string,
+  requested: string | undefined,
+  written: readonly WrittenImage[],
+  meta: {
+    prompt: string
+    width: number
+    height: number
+    ratio: string
+    steps: number
+    seed: number | undefined
+    mode: 'generate' | 'edit'
+    backend: 'api' | 'comfyui'
+    sessionId: string | undefined
+  },
+): Promise<BoardRecording> {
+  const ids = written.map(() => makeItemId())
+  try {
+    const recorded = await recordItems(outputDir, requested, written.map((image, index) => ({
+      id: ids[index],
+      path: image.path,
+      markdownPath: image.markdownPath,
+      width: meta.width,
+      height: meta.height,
+      bytes: image.bytes,
+      mediaType: image.mime,
+      prompt: meta.prompt,
+      ratio: meta.ratio,
+      steps: meta.steps,
+      seed: meta.seed ?? null,
+      mode: meta.mode,
+      backend: meta.backend,
+      parents: [],
+      sessionId: meta.sessionId ?? null,
+    })), { prompt: meta.prompt, sessionId: meta.sessionId ?? null })
+    recorded.items.forEach((item, index) => { ids[index] = item.id })
+    return {
+      board: { id: recorded.board.id, name: recorded.board.name, created: recorded.created, item_ids: ids },
+      note: null,
+      ids,
+    }
+  } catch (error) {
+    return { board: null, note: reasonOf(error), ids }
+  }
 }
 
 /** Resolved canvas plus how it was chosen, for the result payload. */
@@ -397,70 +455,19 @@ export interface ForgeSettings {
   readonly apiModel: string
   readonly apiStyle: 'openai' | 'dashscope'
   readonly apiKeySource: string | undefined
-  readonly localEndpoint: string
   readonly comfyEndpoint: string
   readonly comfyPorts: readonly number[]
   readonly comfyModelsDir: string
   readonly outputDir: string
   readonly timeoutMs: number
-  /** Plugin-owned data directory: venv, weights, logs, breadcrumbs. */
-  readonly runtimeDir: string
-  /** Where the nf4 weights live. */
-  readonly modelsDir: string
-  /** Mirror repo the weights come from. */
-  readonly modelRepo: string
-  /** Mirror host (never huggingface.co: its `/api/` times out on this box). */
-  readonly hfMirror: string
-  /** Candidate worker ports; the `localEndpoint` port is always tried first. */
-  readonly workerPorts: readonly number[]
-  /** How long a cold worker start may take. */
-  readonly workerStartTimeoutMs: number
-  /** Idle time after which the worker hands its VRAM back (0 = never). */
-  readonly idleUnloadMs: number
-  /** Whether the plugin may start the worker itself. */
-  readonly manageWorker: boolean
-  /** Interpreter that runs the worker (the venv's python unless overridden). */
-  readonly pythonPath: string
-  /** Candidates tried by `action:"install"` when creating the venv. */
-  readonly basePythonCandidates: readonly string[]
-  /** CUDA wheel tags tried in order by `action:"install"`. */
-  readonly torchWheels: readonly string[]
-  /** Index URL for the non-torch packages (a mirror, when configured). */
-  readonly pipIndexUrl: string
-  /** Reuse a CUDA torch found in the base interpreter. */
-  readonly reuseBaseTorch: boolean
-  /** Free-VRAM floor that turns `status` into a warning, and gates the worker start. */
-  readonly minFreeVramMiB: number
-  /**
-   * Explicit opt-in: let the pre-start gate ask ComfyUI to unload first.
-   * Default false — the plugin does not unload another program's models on its own.
-   */
-  readonly freeComfyBeforeLocalStart: boolean
-  /**
-   * Explicit opt-in: run a local edit whose conditioning budget is above the
-   * measured ceiling instead of refusing it. Default false.
-   */
-  readonly allowLocalEditOverBudget: boolean
-  /**
-   * Explicit reference-conditioning budget for the local edit path, in pixels per
-   * side. `0` (the default) derives it from the canvas in both places that care:
-   * the worker and the size gate.
-   */
-  readonly localReferenceBudget: number
-  /** Default for `fetch-weights`: drop the unused `lm_head.weight`. */
-  readonly skipLmHead: boolean
   /** Sampler steps used when neither the caller nor a backend override picks one. */
   readonly defaultSteps: number
   /** ComfyUI step override; undefined falls through to `defaultSteps`. */
   readonly comfyuiSteps: number | undefined
-  /** Local worker step override; undefined falls through to `defaultSteps`. */
-  readonly localSteps: number | undefined
-  /** Shipped `resources/pipwrap.py` (the sandbox's 0o700 pip workaround). */
-  readonly pipwrapPath: string
-  /** Shipped `resources/worker.py`. */
-  readonly workerScript: string
-  /** Throwaway logs for one-off commands. */
-  readonly scratchDir: string
+  /** Which checkpoint family to ask for; a turbo unet must be installed to matter. */
+  readonly comfyModel: 'base' | 'turbo'
+  /** Turbo step override; `undefined` means the distilled default (8). */
+  readonly turboSteps: number | undefined
 }
 
 /**
@@ -492,21 +499,15 @@ function comfyOptions(settings: ForgeSettings, timeoutMs = settings.timeoutMs): 
   }
 }
 
-/** Resolve everything the tool bodies need from the plugin config. */
+/**
+ * Resolve everything the tool bodies need from the plugin config.
+ *
+ * @param config - the resolved plugin config.
+ * @returns the subset the tools read, with the API key already resolved from
+ *   config-or-environment.
+ */
 export function resolveSettings(config: Config): ForgeSettings {
   const key = resolveApiKey(config.apiKey)
-  const runtimeDir = config.runtimeDir
-  const venv = venvPaths(runtimeDir)
-  const basePythonCandidates =
-    config.basePython.trim().length > 0
-      ? [config.basePython.trim()]
-      : process.platform === 'win32'
-        ? ['python', 'python3', 'py']
-        : ['python3', 'python']
-  const torchWheels = config.torchWheels
-    .split(/[,\s]+/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
   return {
     backend: config.backend,
     apiBaseUrl: config.apiBaseUrl.replace(/\/+$/, ''),
@@ -514,36 +515,15 @@ export function resolveSettings(config: Config): ForgeSettings {
     apiKeySource: key.source,
     apiModel: config.apiModel,
     apiStyle: config.apiStyle,
-    localEndpoint: config.localEndpoint.replace(/\/+$/, ''),
     comfyEndpoint: config.comfyEndpoint.replace(/\/+$/, ''),
     comfyPorts: parseComfyPorts(config.comfyPorts),
     comfyModelsDir: config.comfyModelsDir,
     outputDir: config.outputDir,
     timeoutMs: config.timeoutMs,
-    runtimeDir,
-    modelsDir: config.modelsDir.trim().length > 0 ? config.modelsDir : join(runtimeDir, 'models', 'qwen-image-2.1-bnb4bit'),
-    modelRepo: config.modelRepo,
-    hfMirror: config.hfMirror.replace(/\/+$/, ''),
-    workerPorts: parsePorts(config.workerPorts.length > 0 ? config.workerPorts : DEFAULT_WORKER_PORTS.join(','), [8399, 8400, 8401, 8402]),
-    workerStartTimeoutMs: config.workerStartTimeoutMs,
-    idleUnloadMs: config.idleUnloadMs,
-    manageWorker: config.manageWorker,
-    pythonPath: config.pythonPath.trim().length > 0 ? config.pythonPath : venv.python,
-    basePythonCandidates,
-    torchWheels: torchWheels.length > 0 ? torchWheels : [...TORCH_WHEEL_MATRIX],
-    pipIndexUrl: config.pipIndexUrl.trim(),
-    reuseBaseTorch: config.reuseBaseTorch,
-    minFreeVramMiB: config.minFreeVramMiB,
-    freeComfyBeforeLocalStart: config.freeComfyBeforeLocalStart,
-    allowLocalEditOverBudget: config.allowLocalEditOverBudget,
-    localReferenceBudget: config.localReferenceBudget,
-    skipLmHead: config.skipLmHead,
     defaultSteps: config.defaultSteps,
     comfyuiSteps: config.comfyuiSteps,
-    localSteps: config.localSteps,
-    pipwrapPath: resourcePath('resources/pipwrap.py'),
-    workerScript: config.workerScript.trim().length > 0 ? config.workerScript : resourcePath('resources/worker.py'),
-    scratchDir: join(runtimeDir, 'logs'),
+    comfyModel: config.comfyModel,
+    turboSteps: config.turboSteps,
   }
 }
 
@@ -559,16 +539,11 @@ export interface StepsResolution {
 }
 
 /**
- * Resolve the sampler steps one call should use against one backend.
+ * Resolve the sampler steps one call should use.
  *
- * Priority: the caller's explicit `steps` > the backend's own override
- * (`comfyuiSteps` / `localSteps`) > `defaultSteps`. The two backends historically
- * disagreed — ComfyUI ran the official template's 25 while the worker fell back
- * to 8 — so under `backend:"auto"` a fallback silently changed the picture.
- *
- * Resolving **per backend, at the point of dispatch** is the load-bearing part:
- * when ComfyUI is not running and the call falls through to the worker, the
- * worker's own override applies, rather than ComfyUI's count being carried over.
+ * Priority: the caller's explicit `steps` > the ComfyUI override
+ * (`comfyuiSteps`) > `defaultSteps`. The cloud backend has no override because
+ * its sampler defaults are the provider's business, not ours.
  *
  * @param explicit - the caller's `steps`, when it supplied one.
  * @param backend - the backend about to run.
@@ -577,367 +552,72 @@ export interface StepsResolution {
  */
 export function resolveSteps(
   explicit: number | undefined,
-  backend: 'api' | 'comfyui' | 'local',
+  backend: 'api' | 'comfyui',
   settings: ForgeSettings,
 ): StepsResolution {
   if (explicit !== undefined) return { steps: explicit, source: 'explicit' }
-  const override = backend === 'comfyui' ? settings.comfyuiSteps : backend === 'local' ? settings.localSteps : undefined
+  const override = backend === 'comfyui' ? settings.comfyuiSteps : undefined
   if (typeof override === 'number' && Number.isFinite(override) && override >= 1) {
     return { steps: Math.round(override), source: 'backend' }
   }
   return { steps: settings.defaultSteps, source: 'default' }
 }
 
-/** Build the worker-lifecycle manager for one plugin instance. */
-function createRuntime(settings: ForgeSettings): WorkerRuntime {
-  return new WorkerRuntime({
-    endpoint: settings.localEndpoint,
-    interpreter: settings.pythonPath,
-    script: settings.workerScript,
-    modelsDir: settings.modelsDir,
-    dataDir: settings.runtimeDir,
-    ports: settings.workerPorts,
-    startTimeoutMs: settings.workerStartTimeoutMs,
-    idleUnloadMs: settings.idleUnloadMs,
-    manage: settings.manageWorker,
-    // The gate refuses to spawn a worker the card cannot hold. It reuses
-    // `minFreeVramMiB` (0 disables it) so there is one "how much do I need free"
-    // knob, and it only ever asks ComfyUI to let go when the user opted in.
-    vramGate: {
-      requiredMiB: settings.minFreeVramMiB,
-      // The whole list is handed over, not just its first entry: the gate finds the port
-      // that actually has a listener, so its `curl …/free` remedy line and the opt-in
-      // `POST /free` cannot end up aimed at a closed port the user never used.
-      comfyPort: settings.comfyPorts[0] ?? 8188,
-      comfyPorts: settings.comfyPorts,
-      freeComfyFirst: settings.freeComfyBeforeLocalStart,
-      scratchDir: settings.scratchDir,
-    },
-  })
-}
-
 /**
- * Worker facts as they belong in a generation result.
+ * Steps for the turbo checkpoint: its own override, else the distilled default.
  *
- * @param handle - how the worker was obtained.
- * @param restarted - the request was retried against a rebuilt worker.
- * @param stages - the worker's own stage timings, when it reported any.
- * @returns the report embedded as `local_worker`.
+ * Deliberately does **not** fall through to `defaultSteps` or `comfyuiSteps`:
+ * those are tuned for the base checkpoint (25), and handing 25 steps to a
+ * checkpoint distilled for 8 makes the picture worse, not better. An explicit
+ * `steps` from the caller still wins, because that is how the turbo contract
+ * gets checked on a real card.
+ *
+ * @param explicit - the caller's `steps`, when it supplied one.
+ * @param settings - the resolved plugin settings.
+ * @returns the count and where it came from.
  */
-function describeWorkerRun(handle: WorkerHandle, restarted: boolean, stages: Record<string, number> = {}): Record<string, unknown> {
-  return {
-    endpoint: handle.endpoint,
-    port: handle.port,
-    pid: handle.pid,
-    started_by_plugin: handle.started,
-    adopted: handle.adopted,
-    managed: handle.managed,
-    ours: handle.ours,
-    start_ms: handle.startMs,
-    restarted_after_disconnect: restarted,
-    ready: handle.state?.ready ?? null,
-    load_seconds: handle.state?.load_seconds ?? null,
-    // Where the wall clock went, in the worker's own measurement. Only the shipped
-    // worker reports this; a foreign one leaves it null rather than guessing.
-    stages_s: Object.keys(stages).length === 0 ? null : stages,
+export function resolveTurboSteps(explicit: number | undefined, settings: ForgeSettings): StepsResolution {
+  if (explicit !== undefined) return { steps: explicit, source: 'explicit' }
+  if (typeof settings.turboSteps === 'number' && Number.isFinite(settings.turboSteps) && settings.turboSteps >= 1) {
+    return { steps: Math.round(settings.turboSteps), source: 'backend' }
   }
+  return { steps: TURBO_STEPS, source: 'default' }
 }
 
-/**
- * The pre-start VRAM gate's own account of what it saw and did.
- *
- * Reported rather than logged because one branch of it has a side effect: with
- * `freeComfyBeforeLocalStart` on, the plugin asks ComfyUI to unload, and the user
- * is entitled to see that it happened and what came back.
- *
- * @param runtime - the lifecycle manager the call went through.
- * @returns the gate report, or null when the gate never ran.
- */
-function describeVramGate(runtime: WorkerRuntime): Record<string, unknown> | null {
-  const report = runtime.vramGate
-  if (report === null || !report.ran) return null
-  return {
-    free_MiB: report.freeMiB,
-    total_MiB: report.totalMiB,
-    required_MiB: report.requiredMiB,
-    shortfall_MiB: report.shortfallMiB,
-    allowed: report.allowed,
-    holders: report.holders.map((holder) => ({
-      pid: holder.pid,
-      name: holder.name,
-      used_MiB: holder.usedMiB,
-      comfyui: holder.comfyui,
-    })),
-    freed_comfy: report.freedComfy === null ? null : {
-      requested: true,
-      url: report.freedComfy.url,
-      http_status: report.freedComfy.httpStatus,
-      ok: report.freedComfy.ok,
-      body: report.freedComfy.body,
-      note: report.freedComfy.note ?? null,
-    },
-    // "Allowed" is not "the card was empty": a resident ComfyUI leaves the floor
-    // met and still kills the load. The gate says so rather than staying silent.
-    warning: report.warning,
-    note:
-      report.freedComfy === null
-        ? '插件没有动任何别的程序；`freeComfyBeforeLocalStart` 为 false（默认）时它只会报错并给出命令。'
-        : `已按 freeComfyBeforeLocalStart 请求 ComfyUI 释放显存（POST ${report.freedComfy.url} → HTTP ${report.freedComfy.httpStatus}）。`,
-  }
-}
-
-/**
- * Generate through the plugin-owned worker.
- *
- * A transport failure means the worker vanished (it was a child job of a session
- * that ended, or it crashed): the runtime rebuilds it and the request is retried
- * once. Anything else — a load failure, an HTTP error body — is surfaced as is,
- * because retrying would only repeat it.
- *
- * @param runtime - the lifecycle manager.
- * @param request - prompt plus the aligned canvas.
- * @param signal - caller cancellation.
- * @returns the images, the worker's stage timings, and how the worker was obtained.
- */
-async function generateWithWorker(
-  runtime: WorkerRuntime,
-  request: Parameters<typeof generateViaLocal>[1],
-  signal: AbortSignal,
-): Promise<{ images: GeneratedImage[]; stages: Record<string, number>; handle: WorkerHandle; restarted: boolean }> {
-  const handle = await runtime.ensure(signal)
-  const finish = (generation: LocalGeneration, used: WorkerHandle, restarted: boolean) => {
-    runtime.noteActivity()
-    runtime.armIdleUnload()
-    return { images: generation.images, stages: generation.stages, handle: used, restarted }
-  }
-  try {
-    return finish(await generateViaLocal(handle.endpoint, request, signal), handle, false)
-  } catch (error) {
-    if (!(error instanceof LocalUnreachableError) || signal.aborted) throw error
-    await runtime.invalidate(`unreachable during /generate: ${error.message.slice(0, 160)}`)
-    const retry = await runtime.ensure(signal)
-    return finish(await generateViaLocal(retry.endpoint, request, signal), retry, true)
-  }
-}
-
-/** The "no key, no ComfyUI, no worker" error, naming every remedy in order. */
-function noBackendError(localReason: string, comfyReason?: string): Error {
+/** The "no backend could run this generation" error, naming both remedies. */
+function noBackendError(comfyReason: string | undefined, keyPresent: boolean): Error {
+  const cloud = keyPresent
+    ? 'a key is configured, but this call did not route to it — check the `backend` argument.'
+    : `no API key found — set \`apiKey\` in the plugin config, or one of ${API_KEY_ENV_VARS.join(' / ')}. ` +
+      'The key is read at call time and never written to disk.'
   return new Error(
     'qwen_image_generate: no backend is available.\n' +
-      '  • cloud: no API key found — set `apiKey` in the plugin config, or one of ' +
-      `${API_KEY_ENV_VARS.join(' / ')}. The key is read at call time and never written to disk.\n` +
-      (comfyReason === undefined ? '' : `  • comfyui: ${comfyReason}\n`) +
-      `  • local: ${localReason}`,
+      `  • cloud: ${cloud}\n` +
+      `  • comfyui: ${comfyReason ?? 'not tried.'}\n` +
+      '  本机部署（ComfyUI 桌面版 + 三个权重，含下载地址）见 docs/comfyui-deployment.md。',
   )
 }
 
 /**
- * The edit path's "neither local backend is available" error.
+ * The edit path's "no backend" error.
  *
- * Editing has no cloud fallback, so this must not tell the caller to go set an
- * API key: with a key configured the message says outright that the key is not
- * the problem.
+ * Editing has no cloud fallback, so the message must not suggest setting a key:
+ * with a key configured it says outright that the key is not the problem.
  *
  * @param comfyReason - why ComfyUI could not serve the edit.
- * @param localReason - why the managed worker could not serve the edit.
  * @param keyPresent - whether a cloud key is configured (to rule it out).
  * @returns the error to throw.
  */
-function noEditBackendError(comfyReason: string, localReason: string, keyPresent: boolean): Error {
+function noEditBackendError(comfyReason: string, keyPresent: boolean): Error {
   return new Error(
-    'qwen_image_edit: neither local backend could run the edit.\n' +
+    'qwen_image_edit: 改图只能在本机 ComfyUI 上跑，而它现在不可用。\n' +
       `  • comfyui: ${comfyReason}\n` +
-      `  • local: ${localReason}\n` +
       (keyPresent
-        ? '  • cloud: an API key is configured, but the cloud backend has no edit path — it cannot take reference images at all.\n'
+        ? '  • cloud: 你配了 API key，但云后端没有编辑通道——它根本收不了参考图，所以这条路上 key 帮不上忙。\n'
         : '') +
-      '  改图是本机功能：起好本机 ComfyUI（带 Qwen-Image 权重）或让插件的本地 worker 能跑起来（`qwen_image_env` 的 status 看缺什么）。',
+      '  起好 ComfyUI（带 Qwen-Image 2.1 权重）再试；部署步骤见 docs/comfyui-deployment.md，' +
+      '也可以用 `qwen_image_status` 看它缺什么。',
   )
-}
-
-/** The size gate's verdict for one local edit request. */
-export interface LocalEditBudgetGate {
-  /** The **effective** budget: the configured one, or the canvas-derived one. */
-  readonly budget: number
-  /** Where {@link budget} came from — an explicit `localReferenceBudget`, or the canvas. */
-  readonly budgetSource: 'config' | 'canvas'
-  /** What the canvas alone derives; reported even when the config overrode it. */
-  readonly canvasBudget: number
-  /** Which measured band that budget falls into. */
-  readonly tier: LocalEditBudgetTier
-  /** False only when the budget is over the edge line and the override is off. */
-  readonly allowed: boolean
-  /** True when the override is what let an over-budget call through. */
-  readonly overridden: boolean
-  /** What the caller must be told, or null in the reliable band. */
-  readonly warning: string | null
-}
-
-/**
- * The **canvas-side** half of the gate's advice: a warning, never a refusal.
- *
- * The bands band the conditioning budget alone, because that is what the failure
- * boundary tracks. The *speed* boundary does not: the local matrix measured budget
- * 896 at 1.9 s/step on a 0.82 MP canvas and at **67 s/step** on a 1.55 MP one —
- * the same budget, ≈28 min for 25 steps instead of ≈1. All of it without an
- * error, so nothing else in the stack would have told the caller.
- *
- * So a canvas over {@link LOCAL_EDIT_CANVAS_WARN_AREA} whose *effective* budget is
- * over the one budget ever measured to finish there
- * ({@link LOCAL_EDIT_CANVAS_SAFE_BUDGET}) gets a warning naming both endpoints.
- *
- * Only the bands that **let the request through** compose this text: its last
- * move is "this is advice, not a refusal", which cannot be said inside a refusal.
- *
- * @param width - requested canvas width, in pixels.
- * @param height - requested canvas height, in pixels.
- * @param budget - the effective (post-override) conditioning budget.
- * @returns the warning text, or `null` when either threshold is not crossed.
- */
-function canvasSideWarning(width: number, height: number, budget: number): string | null {
-  const area = width * height
-  if (budget <= LOCAL_EDIT_CANVAS_SAFE_BUDGET || area <= LOCAL_EDIT_CANVAS_WARN_AREA) return null
-  const megapixels = (area / 1_000_000).toFixed(2)
-  return (
-    `本地编辑尺寸门·画布侧警告：这张画布 ${width}×${height}（${megapixels} MP）大于 1.0 MP，` +
-    `而生效预算 ${budget} 大于 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET}——两者同时成立时实测**慢到不可用**（不是拒绝，本档仍然放行）。\n` +
-    `  本机实测：0.82 MP（1216×672）+ 预算 896 → 1.9 s/步；1.55 MP（1248×1248）+ 同一条 896 → **67 s/步**、` +
-    `25 步外推 ≈28 min（不报错，被运行器墙钟杀掉）；1.55 MP + ${LOCAL_EDIT_CANVAS_SAFE_BUDGET} → wall 109.5 s、峰值 reserved 6488 MiB、worker 存活。\n` +
-    `  1.0 MP 这条线落在两个实测端点之间，是**插值**（未测）；1.5MP 画布上量过的只有 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET}（跑完）与 896（跑不完）两点，` +
-    `${LOCAL_EDIT_CANVAS_SAFE_BUDGET + 1}–${LOCAL_EDIT_BUDGET_RELIABLE - 1} 这段没量过。\n` +
-    `  建议：把配置 \`localReferenceBudget\` 设成 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET}（出图尺寸不变，只是参考图条件化分辨率变低），` +
-    `或改用 backend:"comfyui"。出处：本机实测。`
-  )
-}
-
-/**
- * Decide whether a **local** edit may run at the canvas it asked for.
- *
- * The three bands come from the conditioning budget, not from the canvas area: the
- * failure boundary tracks `_reference_budget` (§(b) shows two differently shaped
- * canvases with the same budget failing the same way). Every number below is this
- * card class's own measurement, and the refusal is worded so it cannot be mistaken
- * for the pre-start VRAM gate's advice.
- *
- * The budget banded here is the one the worker will really use: an explicit
- * `localReferenceBudget` overrides the canvas derivation on both sides, so a
- * `512` config lets a 1248×1248 canvas through as a 512 edit. Banding the canvas
- * value instead would make the knob unable to do the one thing it exists for.
- *
- * @param width - requested canvas width, in pixels.
- * @param height - requested canvas height, in pixels.
- * @param allowOverBudget - the explicit opt-in (`allowLocalEditOverBudget`).
- * @param configuredBudget - `localReferenceBudget`; `0` means "derive from the canvas".
- * @returns the verdict, plus the text the caller must see whenever it is not the
- *   clean reliable band.
- * @throws When `configuredBudget` is neither `0` nor a 32-aligned budget in range.
- */
-export function localEditBudgetGate(
-  width: number,
-  height: number,
-  allowOverBudget: boolean,
-  configuredBudget = 0,
-): LocalEditBudgetGate {
-  const { budget, source, canvasBudget } = resolveReferenceBudget(width, height, configuredBudget)
-  const tier = localEditBudgetTier(budget)
-  // The canvas half is decided once and appended to whichever band lets the
-  // request through, so `warning` is never silently dropped and never split.
-  const canvasWarning = canvasSideWarning(width, height, budget)
-  const withCanvas = (text: string) => (canvasWarning === null ? text : `${text}\n${canvasWarning}`)
-  const where =
-    `画布 ${width}×${height} → 参考图条件化预算 _reference_budget = ${budget}` +
-    (source === 'config'
-      ? `（来自配置 localReferenceBudget；这张画布本身会推出 ${canvasBudget}）`
-      : '（按画布推导；可用配置 localReferenceBudget 覆盖）')
-  if (tier === 'reliable') {
-    // The canvas warning is the only reason this band is not always silent: the
-    // budget is fine, the canvas it will be paid on is not.
-    return { budget, budgetSource: source, canvasBudget, tier, allowed: true, overridden: false, warning: canvasWarning }
-  }
-  if (tier === 'edge') {
-    return {
-      budget,
-      budgetSource: source,
-      canvasBudget,
-      tier,
-      allowed: true,
-      overridden: false,
-      warning: withCanvas(
-        `本地编辑尺寸门警告：${where}，落在「贴边通过」档（> 可靠线 ${LOCAL_EDIT_BUDGET_RELIABLE}，≤ ${LOCAL_EDIT_BUDGET_EDGE}）。\n` +
-          `  本机实测（RTX 4070 Laptop 8188 MiB）这一档确实通过了，但峰值 reserved 8492 MiB 已经超过显卡总量 8188 MiB，` +
-          `靠 WDDM 共享内存撑住，去噪 21.19 s ≈ 928 档的 2 倍——能过，但可能显著变慢，也可能失败。\n` +
-          `  要可靠就把 _reference_budget 降到 ≤ ${LOCAL_EDIT_BUDGET_RELIABLE}（例如 1216×672——896 那条线正是在这张 0.82 MP 画布上量的），` +
-          `或改用 backend:"comfyui"。出处：本机实测。`,
-      ),
-    }
-  }
-  const over =
-    `本地编辑尺寸门：拒绝这次 local 编辑（${where} > 上限 ${LOCAL_EDIT_BUDGET_EDGE}）。\n` +
-    '  为什么拦：本机实测这条路径上的失败**不是**一条干净的「显存不足」——' +
-    'budget 992–1024 在 **GPU 去噪段** CUDA OOM（申请 180/182 MiB，而仍有 910–1030 MiB reserved-but-unallocated 的碎片签名）；' +
-    'budget ≥ 1216 更发生在 GPU 还没开始干活的 **CPU 文本编码段**，形态是**访问违例 / access violation**，' +
-    '有时直接带走 worker 进程（连接被重置，日志停在 `ready:`）。\n' +
-    '  所以别照着「空闲显存不足 → 先给 ComfyUI 发 POST /free」那条补救提示折腾：这条线由参考图条件化 token 数决定，与空闲显存无关。\n' +
-    '  四条出路：① 改用 comfyui 后端（`backend:"comfyui"`，或 `auto` 且本机 ComfyUI 可用——8 GB 卡上编辑本来就优先走它）；' +
-    `② 显式给更小的 width/height（可靠档 _reference_budget ≤ ${LOCAL_EDIT_BUDGET_RELIABLE}，例如 1216×672）；` +
-    `③ 把配置 \`localReferenceBudget\` 调到 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET}——但要知道 **896 这条「可靠线」只按预算分档、不含画布本身的代价**：` +
-    `它的实测出处是 1216×672（0.82 MP：峰值 reserved 7458 MiB、1.9 s/步），同一预算搬到 1.5MP 画布（1248×1248）上是 ` +
-    `**67 s/步**、25 步外推 ≈28 min（不报错，但等于不可用）——那张画布上唯一实测跑得完的是 ${LOCAL_EDIT_CANVAS_SAFE_BUDGET}` +
-    `（wall 109.5 s、峰值 reserved 6488 MiB、worker 存活），${LOCAL_EDIT_CANVAS_SAFE_BUDGET + 1}–${LOCAL_EDIT_BUDGET_RELIABLE - 1} 这段没量过；` +
-    '降的是参考图条件化分辨率，换速度与可跑性——保真度：同画布（1216×672）896 vs 512 目视看不出差别（n=1、1 位评判者），1.5MP 画布上只测了 512；' +
-    '④ 接受风险、显式放行：配置 `allowLocalEditOverBudget: true`（默认 false）。\n' +
-    '  出处：本机实测。'
-  if (!allowOverBudget) return { budget, budgetSource: source, canvasBudget, tier, allowed: false, overridden: false, warning: over }
-  return {
-    budget,
-    budgetSource: source,
-    canvasBudget,
-    tier,
-    allowed: true,
-    overridden: true,
-    warning: withCanvas(
-      `本地编辑尺寸门：allowLocalEditOverBudget 为 true，按用户显式授权放行（${where}）。\n` +
-        '  预期风险（本机实测）：992–1024 在 GPU 去噪段 CUDA OOM；≥1216 在 CPU 文本编码段访问违例，worker 进程可能直接消失。' +
-        '出处：本机实测。',
-    ),
-  }
-}
-
-/**
- * Run one **local** edit, after the size gate has had its say.
- *
- * The gate lives here rather than at the top of the tool body because `comfyui` is
- * one of the three ways out the refusal names: a request that ComfyUI is going to
- * serve must never be refused by this gate. Only the two paths that really reach the
- * worker pass through here, and they do so **before** `runtime.ensure`, so a refused
- * call never spawns a process.
- *
- * The gate's verdict is also what the request body carries: an explicit
- * `localReferenceBudget` is forwarded as `reference_budget` so the worker
- * conditions at the budget the gate just banded. With no override the field is
- * **absent**, and the worker derives the budget exactly as it always has.
- *
- * @param runtime - the one lifecycle owner.
- * @param body - the resolved local `/generate` body (references included, steps
- *   already decided — the gate never re-derives it).
- * @param size - the canvas the gate budgets against.
- * @param settings - resolved config, for the opt-in flag and the budget override.
- * @param signal - aborts the request on tool cancellation.
- * @returns the worker run plus the gate verdict, for the result payload.
- * @throws When the budget is over the line and the override is off.
- */
-async function editWithWorker(
-  runtime: WorkerRuntime,
-  body: Parameters<typeof generateViaLocal>[1],
-  size: { width: number; height: number },
-  settings: ForgeSettings,
-  signal: AbortSignal,
-): Promise<{ run: Awaited<ReturnType<typeof generateWithWorker>>; gate: LocalEditBudgetGate }> {
-  const configured = settings.localReferenceBudget
-  const gate = localEditBudgetGate(size.width, size.height, settings.allowLocalEditOverBudget, configured)
-  if (!gate.allowed) throw new Error(gate.warning ?? `local edit refused: budget ${gate.budget}`)
-  const request = gate.budgetSource === 'config' ? { ...body, referenceBudget: gate.budget } : body
-  return { run: await generateWithWorker(runtime, request, signal), gate }
 }
 
 /**
@@ -948,16 +628,6 @@ async function editWithWorker(
  */
 export function registerImageForgeTools(ctx: Context, config: Config): void {
   const settings = resolveSettings(config)
-  // One lifecycle owner per plugin instance: it starts the worker on first use,
-  // reaps it after idleness, and rebuilds it when it disappears.
-  const runtime = createRuntime(settings)
-  // Settings-page one-click deploy talks to this loopback bridge (the web
-  // client has no tool runner of its own).
-  const deploy = startDeployServer(settings)
-  ctx.on?.('dispose', () => {
-    void runtime.stop()
-    deploy.dispose()
-  })
 
   ctx.tools.register(defineTool({
     name: 'qwen_image_generate',
@@ -983,9 +653,9 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         return blocks
       },
     },
-    // `timeoutMs` is the per-generation budget, but a cold worker start has its
-    // own (longer) budget: the tool call must not die while the model loads.
-    timeoutMs: Math.max(settings.timeoutMs, settings.workerStartTimeoutMs + 60_000),
+    // The per-generation budget covers ComfyUI's queue and sampling. Nothing is
+    // cold-started by this plugin any more, so there is no second budget to add.
+    timeoutMs: settings.timeoutMs,
     // One generation is a heavy, rate-limited call; never overlap siblings.
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -1007,11 +677,10 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
       }
       const startedAt = Date.now()
 
-      let usedBackend: 'api' | 'local' | 'comfyui'
+      let usedBackend: 'api' | 'comfyui'
       let backendLabel: string
       let comfyUnet: string | null = null
       let comfyRun: Record<string, unknown> | null = null
-      let workerRun: Record<string, unknown> | null = null
       let images: GeneratedImage[]
       // Set by whichever branch actually ran, so the result can report the count
       // that was really used and where it came from (a fallback counts as a
@@ -1034,33 +703,38 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         images = await generateViaApi(apiSettings, { ...request, steps: usedSteps.steps }, exec.signal)
         usedBackend = 'api'
         backendLabel = `后端 api / ${settings.apiModel}`
-      } else if (requestedBackend === 'local') {
-        usedSteps = resolveSteps(steps, 'local', settings)
-        const run = await generateWithWorker(runtime, { ...request, steps: usedSteps.steps }, exec.signal)
-        images = run.images
-        workerRun = describeWorkerRun(run.handle, run.restarted, run.stages)
-        usedBackend = 'local'
-        backendLabel = run.handle.started
-          ? `后端 local（插件自启 worker pid ${run.handle.pid ?? '?'}，启动 ${run.handle.startMs} ms）`
-          : '后端 local'
       } else {
-        // `comfyui`, or `auto` without a key: the local ComfyUI first (it is the
-        // only backend that needs no key and no worker), the worker second.
+        // `comfyui`, or `auto` without a key: the local ComfyUI — the only
+        // backend that needs no key and no runtime of ours.
         const options = comfyOptions(settings)
         try {
           const target = await discoverComfyUi(options, exec.signal)
           const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
           const comfyStartedAt = Date.now()
-          usedSteps = resolveSteps(steps, 'comfyui', settings)
-          images = await generateViaComfyUi(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+          // Which checkpoint family to run. `turbo` is a *request*, not a
+          // guarantee: it needs a turbo unet to be installed, and when only the
+          // base weights are present the run falls back rather than failing —
+          // the alternative is a config typo turning into "no images at all".
+          const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
+          const turboSkipped = settings.comfyModel === 'turbo' && !turbo
+          usedSteps = turbo
+            ? resolveTurboSteps(steps, settings)
+            : resolveSteps(steps, 'comfyui', settings)
+          images = turbo
+            ? await generateViaComfyUiTurbo(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+            : await generateViaComfyUi(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
           usedBackend = 'comfyui'
           comfyUnet = models.unet
-          backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}`
+          backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
           comfyRun = {
             endpoint: target.endpoint,
             port: target.port,
             probed: target.probed,
             models,
+            comfyModel: turbo ? 'turbo' : 'base',
+            ...(turboSkipped
+              ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' }
+              : {}),
             // The workflow has no alpha handling, so this backend ignores the
             // flag rather than pretending it honoured it.
             transparent_requested: request.transparent,
@@ -1068,23 +742,27 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           }
         } catch (error) {
           const comfyReason = error instanceof Error ? error.message : String(error)
+          // An explicit `comfyui` request keeps the original error: it already
+          // names the missing weight or the closed port.
           if (requestedBackend === 'comfyui') throw error
-          try {
-            usedSteps = resolveSteps(steps, 'local', settings)
-            const run = await generateWithWorker(runtime, { ...request, steps: usedSteps.steps }, exec.signal)
-            images = run.images
-            workerRun = describeWorkerRun(run.handle, run.restarted, run.stages)
-            usedBackend = 'local'
-            backendLabel = '后端 local'
-          } catch (localError) {
-            throw noBackendError(localError instanceof Error ? localError.message : String(localError), comfyReason)
-          }
+          throw noBackendError(comfyReason, settings.apiKey.length > 0)
         }
       }
 
       const prefix = sanitizePrefix(args.preset)
       const written = await writeImages(settings.outputDir, prefix, size.width, size.height, images)
       const markdown = renderMarkdown(written)
+      const recording = await recordRun(settings.outputDir, args.board, written, {
+        prompt,
+        width: size.width,
+        height: size.height,
+        ratio: size.whRatio,
+        steps: usedSteps?.steps ?? steps ?? 0,
+        seed: request.seed,
+        mode: 'generate',
+        backend: usedBackend,
+        sessionId: sessionOf(exec),
+      })
 
       return jsonSafe({
         ok: true,
@@ -1111,13 +789,16 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           mime: sniffImageMime(images[image.index - 1]?.bytes ?? new Uint8Array()) ?? image.mime,
         })),
         comfyui: comfyRun,
-        local_worker: workerRun,
-        vram_gate: describeVramGate(runtime),
+        board: recording.board,
+        board_note: recording.note,
         markdown,
         summary:
           `出图完成：${written.length} 张，${size.width}×${size.height}（wh_ratio ${size.whRatio}` +
           `${size.exactRatio ? '' : `，实际 ${size.ratioDeviationPercent > 0 ? '+' : ''}${size.ratioDeviationPercent}%`}），` +
-          `${backendLabel}，落盘 ${settings.outputDir}。`,
+          `${backendLabel}，落盘 ${settings.outputDir}。` +
+          (recording.board === null
+            ? '画板未记录（见 board_note）。'
+            : `画板「${recording.board.name}」${recording.board.created ? '（新建）' : ''}，id \`${recording.board.id}\`。`),
         elapsed_ms: Date.now() - startedAt,
       })
     },
@@ -1130,12 +811,9 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
       `\`images\` 收 1–${MAX_REFERENCES} 张参考图（绝对路径或 data:image/…;base64,…，按顺序对应提示词里的 \`<image1>\`…\`<imageN>\`），` +
       '`ratio_follow` 让画布**跟随某张参考图的宽高比**（写 `image1`…`image10`，或直接把 `images` 里的那一项再写一遍）；' +
       '它与 `wh_ratio` **互斥**（官方契约里一个非空另一个必须为空），两个都不给时**默认跟随第一张参考图**。' +
-      '编辑只在本机后端跑：`comfyui`（官方 Qwen-Image 2.1 改图工作流，参考图先上传进 ComfyUI）或 `local`（受管 worker，/generate 多一个 images 字段）；' +
+      '编辑只在本机 ComfyUI 上跑：官方 Qwen-Image 2.1 改图工作流，参考图先上传进 ComfyUI 的 input/ 目录。' +
       '云 API 没有编辑通道，强行指定时会明确报错，绝不静默丢掉参考图。' +
-      `**local 有硬尺寸门**：按**生效的**参考图条件化预算 _reference_budget 分档（配置了 \`localReferenceBudget\` 就用它，否则按画布推导）——≤ ${LOCAL_EDIT_BUDGET_RELIABLE} 放行、` +
-      `${LOCAL_EDIT_BUDGET_RELIABLE}–${LOCAL_EDIT_BUDGET_EDGE} 放行并在结果里带警告、> ${LOCAL_EDIT_BUDGET_EDGE} 默认拒绝（失败形态是访问违例/进程消失，不是「显存不足」；` +
-      '出路是 comfyui、更小的 width/height、把 `localReferenceBudget` 调到 512（**1.5MP 画布上唯一实测跑得完的档**：wall 109.5 s、峰值 reserved 6488 MiB、worker 存活；896 在同一张 1248×1248 上是 67 s/步、25 步外推 ≈28 min——不报错，但等于不可用；896 那条可靠线的实测出处是 1216×672 画布，一档只看预算、不含画布代价。保真度：同画布 896 vs 512 目视看不出差别，n=1、1 位评判者）；' +
-      '或配置 `allowLocalEditOverBudget: true`）。`comfyui` 不受这道门约束。' +
+      '部署（ComfyUI 桌面版 + 三个权重）见 docs/comfyui-deployment.md。' +
       '结果落盘到 outputDir 并把绝对路径写进正文 Markdown。',
     parameters: EDIT_PARAMETERS,
     output: {
@@ -1154,8 +832,8 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         return blocks
       },
     },
-    // Same reasoning as `qwen_image_generate`: a cold worker start has its own budget.
-    timeoutMs: Math.max(settings.timeoutMs, settings.workerStartTimeoutMs + 60_000),
+    // Same reasoning as `qwen_image_generate`.
+    timeoutMs: settings.timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const prompt = args.prompt.trim()
@@ -1186,33 +864,19 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
       }
       const startedAt = Date.now()
 
-      let usedBackend: 'local' | 'comfyui'
+      let usedBackend: 'comfyui'
       let backendLabel: string
       let comfyUnet: string | null = null
       let comfyRun: Record<string, unknown> | null = null
-      let workerRun: Record<string, unknown> | null = null
       let images: GeneratedImage[]
       let usedSteps: StepsResolution | undefined
-      // Set only when the worker is the backend that ran: the gate is about the
-      // local conditioning budget, so a ComfyUI run has nothing to report here.
-      let budgetGate: LocalEditBudgetGate | null = null
       if (requestedBackend === 'api') {
         throw new Error(
           'qwen_image_edit: backend "api" 没有编辑通道，参考图不会被丢给一个用不了它们的后端。' +
             '云 API 的编辑是另一种请求形态（multipart POST /images/edits，或 DashScope 的原生异步任务接口），本插件没有实现它。\n' +
-            '  能编辑的两个后端都是本机的，不需要 key：backend "comfyui"（复用本机已装好的 ComfyUI + Qwen-Image 权重）' +
-            '或 "local"（插件自己拉起 worker）。',
+            '  改图只有一条路：backend "comfyui"（复用本机已装好的 ComfyUI + Qwen-Image 权重），' +
+            '部署步骤见 docs/comfyui-deployment.md。',
         )
-      } else if (requestedBackend === 'local') {
-        usedSteps = resolveSteps(steps, 'local', settings)
-        const gated = await editWithWorker(runtime, { ...request, steps: usedSteps.steps }, size, settings, exec.signal)
-        budgetGate = gated.gate
-        images = gated.run.images
-        workerRun = describeWorkerRun(gated.run.handle, gated.run.restarted, gated.run.stages)
-        usedBackend = 'local'
-        backendLabel = gated.run.handle.started
-          ? `后端 local（插件自启 worker pid ${gated.run.handle.pid ?? '?'}，启动 ${gated.run.handle.startMs} ms）`
-          : '后端 local'
       } else {
         // `comfyui`, or `auto`: editing is local-only, so `auto` never tries the
         // cloud endpoint even when a key is configured.
@@ -1221,16 +885,26 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
           const target = await discoverComfyUi(options, exec.signal)
           const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
           const comfyStartedAt = Date.now()
-          usedSteps = resolveSteps(steps, 'comfyui', settings)
-          images = await generateViaComfyUiEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+          const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
+          const turboSkipped = settings.comfyModel === 'turbo' && !turbo
+          usedSteps = turbo
+            ? resolveTurboSteps(steps, settings)
+            : resolveSteps(steps, 'comfyui', settings)
+          images = turbo
+            ? await generateViaComfyUiTurboEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+            : await generateViaComfyUiEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
           usedBackend = 'comfyui'
           comfyUnet = models.unet
-          backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}`
+          backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
           comfyRun = {
             endpoint: target.endpoint,
             port: target.port,
             probed: target.probed,
             models,
+            comfyModel: turbo ? 'turbo' : 'base',
+            ...(turboSkipped
+              ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' }
+              : {}),
             references_uploaded: references.map((reference) => reference.label),
             transparent_requested: request.transparent,
             elapsed_ms: Date.now() - comfyStartedAt,
@@ -1238,27 +912,24 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         } catch (error) {
           const comfyReason = error instanceof Error ? error.message : String(error)
           if (requestedBackend === 'comfyui') throw error
-          try {
-            usedSteps = resolveSteps(steps, 'local', settings)
-            const gated = await editWithWorker(runtime, { ...request, steps: usedSteps.steps }, size, settings, exec.signal)
-            budgetGate = gated.gate
-            images = gated.run.images
-            workerRun = describeWorkerRun(gated.run.handle, gated.run.restarted, gated.run.stages)
-            usedBackend = 'local'
-            backendLabel = '后端 local'
-          } catch (localError) {
-            throw noEditBackendError(
-              comfyReason,
-              localError instanceof Error ? localError.message : String(localError),
-              settings.apiKey.length > 0,
-            )
-          }
+          throw noEditBackendError(comfyReason, settings.apiKey.length > 0)
         }
       }
 
       const prefix = sanitizePrefix(args.preset, 'edit')
       const written = await writeImages(settings.outputDir, prefix, size.width, size.height, images)
       const markdown = renderMarkdown(written)
+      const recording = await recordRun(settings.outputDir, args.board, written, {
+        prompt,
+        width: size.width,
+        height: size.height,
+        ratio: size.whRatio,
+        steps: usedSteps?.steps ?? steps ?? 0,
+        seed: request.seed,
+        mode: 'edit',
+        backend: usedBackend,
+        sessionId: sessionOf(exec),
+      })
       const followed = size.followed
       const followLabel = followed === null ? null : `image${followed.index}`
 
@@ -1308,28 +979,8 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         }),
         api_skipped: requestedBackend === 'auto' && settings.apiKey.length > 0 ? 'no edit path on the cloud backend' : null,
         comfyui: comfyRun,
-        local_worker: workerRun,
-        // Only the local backend has a conditioning budget to gate, so a ComfyUI run
-        // reports null here rather than a threshold it was never measured against.
-        local_edit_budget:
-          budgetGate === null
-            ? null
-            : {
-                budget: budgetGate.budget,
-                // Which budget the gate banded, and what the canvas alone would have
-                // derived: a configured override changes the first and not the second,
-                // and only reporting both makes that visible.
-                budget_source: budgetGate.budgetSource,
-                canvas_budget: budgetGate.canvasBudget,
-                configured_budget: settings.localReferenceBudget,
-                tier: budgetGate.tier,
-                reliable_max: LOCAL_EDIT_BUDGET_RELIABLE,
-                edge_max: LOCAL_EDIT_BUDGET_EDGE,
-                allowed: budgetGate.allowed,
-                overridden: budgetGate.overridden,
-                warning: budgetGate.warning,
-              },
-        vram_gate: describeVramGate(runtime),
+        board: recording.board,
+        board_note: recording.note,
         markdown,
         summary:
           `改图完成：${written.length} 张，${size.width}×${size.height}（` +
@@ -1338,224 +989,19 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
             : `ratio_follow ${followLabel}${size.followedByDefault ? '（默认跟随第一张参考图）' : ''} ← ${followed?.width}×${followed?.height}`) +
           `${size.exactRatio ? '' : `，实际 ${size.ratioDeviationPercent > 0 ? '+' : ''}${size.ratioDeviationPercent}%`}），` +
           `${references.length} 张参考图，${backendLabel}，落盘 ${settings.outputDir}。` +
-          // The warning is the point of the edge band: it has to travel with the
-          // result, not only sit in the returned JSON.
-          (budgetGate?.warning == null ? '' : `\n${budgetGate.warning}`),
+          (recording.board === null
+            ? '画板未记录（见 board_note）。'
+            : `画板「${recording.board.name}」${recording.board.created ? '（新建）' : ''}，id \`${recording.board.id}\`。`),
         elapsed_ms: Date.now() - startedAt,
       })
     },
   }))
 
   ctx.tools.register(defineTool({
-    name: 'qwen_image_env',
-    description:
-      '本机环境体检与**本地运行时管理**（这个插件自己拥有 venv / 权重 / worker 的生命周期）。\n' +
-      '`status`（默认）：GPU 名与驱动、**显存余量（低于阈值就预警，并指名是谁占着——本机实测 ComfyUI 常驻约 2.9 GiB，' +
-      '给出它的 POST /free 命令；一个占用者都报不出来时也会说明那多半是分配器缓存、而不是「没人占着」）**、宿主内存、磁盘、输出目录、云 API 与 worker 端点，以及 venv/权重/worker 是否就绪。\n' +
-      '`install`：建 venv + 装 CUDA 版 torch（cu128 → cu126 → cu118 逐级降级；**已经装了 CUDA torch 就复用，不重装**）；' +
-      '先跑 `dryRun:true` 可以只看计划。\n' +
-      '`fetch-weights`：从 hf-mirror.com 下载 10.63 GiB 的 nf4 权重（**不用 huggingface.co，它的 /api/ 会超时**）：' +
-      '下载前查磁盘、断点续传、逐文件 sha256 校验、可选剔除不被管线读取的 lm_head.weight。\n' +
-      '`unload`：调 worker 的 POST /unload 把显存还回去（进程留着，下一张图会重新加载）。\n' +
-      '`repair`：能修就修（缺包补装、量化开关没开就补写、worker 卡死就杀掉），不能修就**明确报因 + 给下一步**，绝不假装成功。',
-    parameters: {
-      action: {
-        type: 'string',
-        enum: ENV_ACTIONS,
-        description: '要执行的动作；默认 status。',
-      },
-      dryRun: {
-        type: 'boolean',
-        description: '只报告计划、不改机器（install / fetch-weights / repair 都支持）。',
-      },
-      force: {
-        type: 'boolean',
-        description: 'fetch-weights：磁盘空间检查不通过时仍然尝试下载。',
-      },
-      skipLmHead: {
-        type: 'boolean',
-        description:
-          'fetch-weights：下完后从 text_encoder/model.safetensors 里剔除 lm_head.weight（约 1187 MiB，管线取 hidden_states[-1]，从不使用它）。' +
-          '默认取插件配置；**未在本机验证过**，剔除前会校验重写结果，校验不过就保留原文件。',
-      },
-    },
-    output: {
-      schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-    },
-    // installs and downloads are long; the internal command budgets are the real limit.
-    timeoutMs: 3_600_000,
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const action = args.action ?? 'status'
-      const dryRun = args.dryRun === true
-      if (action === 'status') {
-        const comfyui = await probeComfyUi(comfyOptions(settings, Math.min(settings.timeoutMs, 10_000)), exec.signal)
-        const localRuntime = await collectLocalRuntime({
-          runtime,
-          runtimeDir: settings.runtimeDir,
-          python: settings.pythonPath,
-          modelsDir: settings.modelsDir,
-          dataDir: settings.runtimeDir,
-          probeTimeoutMs: Math.min(settings.timeoutMs, 15_000),
-          scratchDir: settings.scratchDir,
-          signal: exec.signal,
-        })
-        const status = await collectEnvStatus(
-          {
-            apiBaseUrl: settings.apiBaseUrl,
-            apiKeyPresent: settings.apiKey.length > 0,
-            apiKeySource: settings.apiKeySource,
-            localEndpoint: settings.localEndpoint,
-            comfyui,
-            outputDir: settings.outputDir,
-            outputDirWritable: await ensureOutputDirWritable(settings.outputDir),
-            probeTimeoutMs: Math.min(settings.timeoutMs, 10_000),
-            minFreeVramMiB: settings.minFreeVramMiB,
-            scratchDir: settings.scratchDir,
-            localRuntime,
-          },
-          exec.signal,
-        )
-        const advisory = status.vram_advisory as VramAdvisory | undefined
-        const advisories = advisory?.suggestions ?? []
-        return jsonSafe({
-          action,
-          generated_at: new Date().toISOString(),
-          config: {
-            backend: settings.backend,
-            apiModel: settings.apiModel,
-            apiStyle: settings.apiStyle,
-            outputDir: settings.outputDir,
-            localEndpoint: settings.localEndpoint,
-            comfyEndpoint: settings.comfyEndpoint,
-            comfyPorts: settings.comfyPorts,
-            timeoutMs: settings.timeoutMs,
-            runtimeDir: settings.runtimeDir,
-            modelsDir: settings.modelsDir,
-            hfMirror: settings.hfMirror,
-            workerPorts: settings.workerPorts,
-            idleUnloadMs: settings.idleUnloadMs,
-            manageWorker: settings.manageWorker,
-            minFreeVramMiB: settings.minFreeVramMiB,
-            freeComfyBeforeLocalStart: settings.freeComfyBeforeLocalStart,
-            allowLocalEditOverBudget: settings.allowLocalEditOverBudget,
-            localReferenceBudget: settings.localReferenceBudget,
-          },
-          // The same verdict the local worker's pre-start gate makes, so `status`
-          // answers "would a generate call even be allowed to start the worker?".
-          worker_start_gate: advisory === undefined ? null : {
-            would_refuse_start: !advisory.start_gate.allowed,
-            free_MiB: advisory.freeMiB,
-            required_MiB: advisory.requiredMiB,
-            shortfall_MiB: advisory.start_gate.shortfallMiB,
-            holders: advisory.holders,
-            remedy: advisory.start_gate.remedy,
-            auto_free_enabled: settings.freeComfyBeforeLocalStart,
-            // The same two shapes the pre-start gate distinguishes: a named holder
-            // (free it with one request) versus no holder at all but no room either
-            // (the allocator-cache form — `/free` still helps, and a retry a few
-            // seconds later clears the OSError 1455 spawn failure).
-            no_visible_holder: advisory.start_gate.no_visible_holder,
-            suspicion: vramSuspicionWarning(advisory, settings.comfyPorts[0] ?? 8188),
-            note:
-              advisory.start_gate.allowed
-                ? `空闲 ${advisory.freeMiB ?? '?'} MiB ≥ 阈值 ${advisory.requiredMiB} MiB：本地 worker 允许启动。` +
-                  (advisory.holders.length > 0
-                    ? `但当时有 ${advisory.holders.length} 个进程占着显存，见 suspicion（8 GB 卡上这部分余量会在加载时被吃掉）。`
-                    : '')
-                : `空闲 ${advisory.freeMiB ?? '?'} MiB < 阈值 ${advisory.requiredMiB} MiB：本地 worker 会被拒绝启动` +
-                  `（还差 ${advisory.start_gate.shortfallMiB ?? '?'} MiB）。` +
-                  (advisory.start_gate.no_visible_holder
-                    ? 'nvidia-smi 没报占用者也**不能读成没人占着**：ComfyUI 跑完会把约 3.6 GiB 的 `cudaMallocAsync` ' +
-                      '分配器缓存留在自己进程里、而它列不出来' +
-                      '（见 `docs/configuration.md`「一个会让人卡住的显存陷阱（8 GB 卡必读）」）。' +
-                      '补救是 `POST /free` + 隔十几秒重跑。'
-                    : '') +
-                  (settings.freeComfyBeforeLocalStart
-                    ? '`freeComfyBeforeLocalStart` 已开启，插件会先请求 ComfyUI 释放再启动。'
-                    : '默认不会替你去动 ComfyUI；执行 remedy 里那条命令，或把 `freeComfyBeforeLocalStart` 设为 true。'),
-          },
-          advisories,
-          ...status,
-        })
-      }
-      if (action === 'install') {
-        const report = await runInstall({
-          runtimeDir: settings.runtimeDir,
-          pipwrap: settings.pipwrapPath,
-          basePythonCandidates: settings.basePythonCandidates,
-          torchWheels: settings.torchWheels,
-          pipIndexUrl: settings.pipIndexUrl,
-          reuseBaseTorch: settings.reuseBaseTorch,
-          dryRun,
-          commandTimeoutMs: 3_600_000,
-          scratchDir: settings.scratchDir,
-        })
-        return jsonSafe({ ...report, packages_expected: RUNTIME_PACKAGES })
-      }
-      if (action === 'fetch-weights') {
-        return jsonSafe(
-          await runFetchWeights({
-            repo: settings.modelRepo,
-            mirror: settings.hfMirror,
-            revision: 'main',
-            dir: settings.modelsDir,
-            skipLmHead: args.skipLmHead ?? settings.skipLmHead,
-            dryRun,
-            force: args.force === true,
-            scratchDir: settings.scratchDir,
-            stallTimeoutMs: 120_000,
-            signal: exec.signal,
-          }),
-        )
-      }
-      if (action === 'unload') {
-        const before = await runtime.inspect(runtime.endpoint, 1500, exec.signal)
-        const outcome = await runtime.unload()
-        const after = await runtime.inspect(runtime.endpoint, 1500, exec.signal)
-        const status = typeof outcome.http_status === 'number' ? outcome.http_status : null
-        return jsonSafe({
-          action,
-          ...outcome,
-          vram_before_MiB: before.state?.vram_allocated_MiB ?? null,
-          vram_after_MiB: after.state?.vram_allocated_MiB ?? null,
-          note:
-            outcome.ok === true
-              ? '显存已交回；worker 进程仍在，下一张图会触发重新加载（约 10 s 起）。'
-              : status === 404
-                ? '这个 worker 实现了冻结契约但没有 /unload 端点（多半是别人起的旧 worker）：本插件只能放弃回收，或者用 `manageWorker:true` 让它换成随包 worker。'
-                : status !== null
-                  ? `worker 的 /unload 应答了 HTTP ${status}；显存没有交回，原文见 body。`
-                  : '没有可回收的 worker（它本来就没在跑，显存已经是空着的）。',
-        })
-      }
-      return jsonSafe(
-        await runRepair({
-          runtime,
-          runtimeDir: settings.runtimeDir,
-          python: settings.pythonPath,
-          modelsDir: settings.modelsDir,
-          dataDir: settings.runtimeDir,
-          pipwrap: settings.pipwrapPath,
-          basePythonCandidates: settings.basePythonCandidates,
-          torchWheels: settings.torchWheels,
-          pipIndexUrl: settings.pipIndexUrl,
-          reuseBaseTorch: settings.reuseBaseTorch,
-          dryRun,
-          commandTimeoutMs: 3_600_000,
-          scratchDir: settings.scratchDir,
-          signal: exec.signal,
-        }),
-      )
-    },
-  }))
-
-  ctx.tools.register(defineTool({
     name: 'qwen_image_status',
     description:
-      '后端健康探测：云 API 端点是否可达、key 是否被接受（401/403 会点名）、**本机 ComfyUI 是否在跑**' +
-      '（含探测过哪几个端口、三个 Qwen-Image 权重能不能被它的加载器枚举到），以及本地 worker 是否在跑。' +
+      '后端健康探测：云 API 端点是否可达、key 是否被接受（401/403 会点名），**本机 ComfyUI 是否在跑**' +
+      '（含探测过哪几个端口、三个 Qwen-Image 权重能不能被它的加载器枚举到、显卡型号与显存余量），以及输出目录能不能写。' +
       '不产生任何图片、不写盘、不改配置；**不会回显 key**。排障时先跑它。',
     parameters: {
       timeoutMs: {
@@ -1571,73 +1017,48 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const budget = Math.min(args.timeoutMs ?? settings.timeoutMs, 30_000)
-      const [api, localWritable, comfyui] = await Promise.all([
+      const [api, comfyui] = await Promise.all([
         probeApi(
           { baseUrl: settings.apiBaseUrl, apiKey: settings.apiKey, model: settings.apiModel, style: settings.apiStyle },
           budget,
           exec.signal,
         ),
-        generateViaLocalProbe(settings.localEndpoint, exec.signal),
+        // Passive on purpose: a status call must report, never start anything.
         probeComfyUi(comfyOptions(settings, budget), exec.signal),
       ])
-      // Passive on purpose: a status call must report, never start or stop anything.
-      const [worker, weights] = await Promise.all([
-        runtime.inspect(runtime.endpoint, Math.min(budget, 3000), exec.signal),
-        inspectWeights(settings.modelsDir),
-      ])
-      const { stat } = await import('node:fs/promises')
-      const venvPresent = await stat(settings.pythonPath).then(
-        () => true,
-        () => false,
-      )
+      const endpoint = typeof comfyui.endpoint === 'string' ? comfyui.endpoint : undefined
+      // VRAM comes from ComfyUI itself rather than from `nvidia-smi`: the card
+      // that matters is the one ComfyUI loaded its weights onto, and it reports
+      // that number without this plugin spawning a process.
+      const stats = endpoint === undefined
+        ? null
+        : await comfySystemStats(endpoint, Math.min(budget, 5000), exec.signal)
+      const reachable = comfyui.reachable === true
       return jsonSafe({
         checked_at: new Date().toISOString(),
         configured_backend: settings.backend,
-        api: { baseUrl: settings.apiBaseUrl, model: settings.apiModel, style: settings.apiStyle, keySource: settings.apiKeySource ?? null, ...api },
-        comfyui: { modelsDir: settings.comfyModelsDir.length > 0 ? settings.comfyModelsDir : null, ...comfyui },
-        local: localWritable,
-        worker: {
-          endpoint: worker.endpoint,
-          port: runtime.port,
-          reachable: worker.reachable,
-          ready: worker.ready,
-          ours: worker.ours,
-          pid: worker.state?.pid ?? null,
-          load_error: worker.state?.load_error ?? null,
-          log_file: runtime.logFile,
-          lifecycle_events: runtime.events.slice(0, 5),
-          note: worker.reachable
-            ? null
-            : `${worker.note ?? 'unreachable'} — worker 不在跑；下一次 \`qwen_image_generate\` 会自己把它拉起来`,
+        api: {
+          baseUrl: settings.apiBaseUrl,
+          model: settings.apiModel,
+          style: settings.apiStyle,
+          keySource: settings.apiKeySource ?? null,
+          ...api,
         },
-        venv: { python: settings.pythonPath, exists: venvPresent },
-        weights: { dir: settings.modelsDir, ready: weights.ready, missing_files: weights.missing_files, total_MiB: weights.total_MiB },
+        comfyui: {
+          modelsDir: settings.comfyModelsDir.length > 0 ? settings.comfyModelsDir : null,
+          ...comfyui,
+          version: stats?.version ?? null,
+          devices: stats?.devices ?? null,
+          stats_note: stats?.note ?? null,
+        },
         output: { dir: settings.outputDir, writable: await ensureOutputDirWritable(settings.outputDir) },
+        next_steps: reachable
+          ? null
+          : 'ComfyUI 没在跑。按 docs/comfyui-deployment.md 装桌面版、把三个权重放进它能看到的位置，然后重跑本工具；' +
+            '云 API 只负责出图，改图必须有 ComfyUI。',
       })
     },
   }))
-}
-
-/** Probe the local worker's health endpoint, reporting rather than throwing. */
-async function generateViaLocalProbe(endpoint: string, signal: AbortSignal): Promise<Record<string, unknown>> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(new Error('timeout')), 1500)
-  const onAbort = () => controller.abort(signal.reason)
-  signal.addEventListener('abort', onAbort, { once: true })
-  try {
-    const response = await fetch(`${endpoint}/health`, { signal: controller.signal })
-    return { endpoint, reachable: true, status: response.status, running: response.ok }
-  } catch (error) {
-    return {
-      endpoint,
-      reachable: false,
-      running: false,
-      note: `${error instanceof Error ? error.message : String(error)} — 本地 worker 不在跑，或 localEndpoint 配错了`,
-    }
-  } finally {
-    clearTimeout(timer)
-    signal.removeEventListener('abort', onAbort)
-  }
 }
 
 /** Create the output directory if needed and report whether it accepts writes. */

@@ -6,7 +6,7 @@
  * lands on disk under the required name. Also pins the failure modes — no key,
  * no worker, upstream error — as readable messages rather than crashes.
  */
-import test, { after } from 'node:test'
+import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -49,18 +49,6 @@ async function startFakeEndpoint() {
   }
 }
 
-/**
- * Ephemeral runtime for the whole file.
- *
- * The machine's real `~/.dsh-image-forge` may already have a venv — without
- * this, a "no backend" generate would try to spawn that worker and hang.
- */
-const HERMETIC_RUNTIME = mkdtempSync(join(tmpdir(), 'forge-rt-'))
-
-after(() => {
-  rmSync(HERMETIC_RUNTIME, { recursive: true, force: true })
-})
-
 /** Register the plugin against a stub context and hand back the tool map. */
 function register(config) {
   const tools = new Map()
@@ -68,7 +56,9 @@ function register(config) {
     tools: { register: (definition) => tools.set(definition.name, definition) },
     skills: { register: () => undefined },
   }
-  plugin.apply(ctx, { ...plugin.Config({}), runtimeDir: HERMETIC_RUNTIME, ...config })
+  // `comfyPorts: '1'` by default: this file is about the cloud path, and a machine
+  // that happens to have ComfyUI up must not turn a timeout test into a slow one.
+  plugin.apply(ctx, { ...plugin.Config({}), comfyPorts: '1', ...config })
   return tools
 }
 
@@ -89,7 +79,6 @@ test('an image is requested with the wh_ratio-derived size, parsed, and written'
       apiModel: 'qwen-image',
       outputDir,
       timeoutMs: 20_000,
-      localEndpoint: 'http://127.0.0.1:1',
     })
 
     const result = await run(tools, 'qwen_image_generate', {
@@ -149,7 +138,6 @@ test('a second identical call keeps numbering instead of overwriting', async () 
       apiKey: 'k',
       apiModel: 'qwen-image',
       outputDir,
-      localEndpoint: 'http://127.0.0.1:1',
     })
     const args = { prompt: 'A square icon of a brass compass on cream paper.', wh_ratio: '1:1' }
     const first = await run(tools, 'qwen_image_generate', args)
@@ -169,7 +157,7 @@ test('an explicit width/height overrides wh_ratio and must be 32-aligned', async
   const endpoint = await startFakeEndpoint()
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-explicit-'))
   try {
-    const tools = register({ backend: 'api', apiBaseUrl: endpoint.baseUrl, apiKey: 'k', apiModel: 'qwen-image', outputDir, localEndpoint: 'http://127.0.0.1:1' })
+    const tools = register({ backend: 'api', apiBaseUrl: endpoint.baseUrl, apiKey: 'k', apiModel: 'qwen-image', outputDir })
     const result = await run(tools, 'qwen_image_generate', { prompt: 'A banner.', wh_ratio: '16:9', width: 1024, height: 512 })
     assert.equal(JSON.parse(endpoint.seen[0].body).size, '1024x512')
     assert.equal(result.size_source, 'explicit-size')
@@ -190,7 +178,7 @@ test('without any key the failure names every remedy instead of crashing', async
     // `auto` now also tries a local ComfyUI. Pin its port list to a closed port so
     // this stays a test about "nothing is available" whether or not the machine
     // running the tests happens to have ComfyUI up.
-    const tools = register({ backend: 'auto', apiKey: '', outputDir, localEndpoint: 'http://127.0.0.1:1', comfyPorts: '1' })
+    const tools = register({ backend: 'auto', apiKey: '', outputDir, comfyPorts: '1' })
     const error = await run(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' }).then(
       () => undefined,
       (caught) => caught,
@@ -200,7 +188,12 @@ test('without any key the failure names every remedy instead of crashing', async
     assert.match(error.message, /no backend is available/)
     assert.match(error.message, /QWEN_IMAGE_API_KEY \/ DASHSCOPE_API_KEY \/ OPENAI_API_KEY/)
     assert.match(error.message, /comfyui:/)
-    assert.match(error.message, /local:/)
+    // The plugin owns no local runtime, so a user with neither a key nor a running
+    // ComfyUI has exactly one remedy left — and the message has to name the
+    // document that walks them through it instead of describing a `local` tier
+    // that no longer exists.
+    assert.match(error.message, /docs\/comfyui-deployment\.md/)
+    assert.ok(!/local:/.test(error.message), 'the removed local backend is still offered as a remedy')
   } finally {
     rmSync(outputDir, { recursive: true, force: true })
   }
@@ -251,48 +244,48 @@ test('the key can come from the environment, and it never appears in an error', 
   }
 })
 
-test('qwen_image_env keeps its five real actions (the v0.1 "not implemented" stub is gone)', async () => {
-  const outputDir = mkdtempSync(join(tmpdir(), 'forge-env-'))
-  // Own runtime dir: a machine that already has a venv under the default
-  // `~/.dsh-image-forge` must not make the dry-run "created nothing" check lie.
-  const runtimeDir = mkdtempSync(join(tmpdir(), 'forge-env-rt-'))
+test('qwen_image_status reports both backends, and says what is missing when neither works', async () => {
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-status-none-'))
   try {
-    const tools = register({
-      backend: 'api',
-      apiKey: '',
-      outputDir,
-      runtimeDir,
-      localEndpoint: 'http://127.0.0.1:1',
-    })
-    const status = await run(tools, 'qwen_image_env', { action: 'status' })
-    console.log('env status (trimmed):', JSON.stringify({ host: status.host, gpu: status.gpu, disk: status.disk, backends: status.backends, output: status.output }, null, 2))
-    assert.equal(status.action, 'status')
-    // Every probe is a wrapper: `{ ok, data? , note? }`.
-    assert.equal(status.host.ok, true)
-    assert.ok(status.host.data.memoryTotalMiB > 0)
-    assert.ok(status.host.data.cpuCount > 0)
-    assert.equal(status.disk.ok, true)
-    assert.equal(status.backends.api.keyPresent, false)
+    // No key, and a closed ComfyUI port: the state a fresh install is actually in.
+    const tools = register({ backend: 'auto', apiKey: '', outputDir, comfyPorts: '1' })
+    const status = await run(tools, 'qwen_image_status', { timeoutMs: 3000 })
+    console.log('status with neither backend:', JSON.stringify(status, null, 2))
+
+    assert.equal(status.configured_backend, 'auto')
+    assert.match(status.checked_at, /^\d{4}-\d{2}-\d{2}T/)
+
+    // Cloud half: no key is a *stated* state, not a missing field.
+    assert.equal(status.api.keyPresent, false)
+    assert.equal(status.api.keySource, null)
+    assert.match(status.api.note, /no API key configured/)
+
+    // ComfyUI half: unreachable, with the ports it tried so the user can compare
+    // them against what their instance actually listens on.
+    assert.equal(status.comfyui.reachable, false)
+    assert.deepEqual(status.comfyui.candidatePorts, [1])
+    assert.match(status.comfyui.note, /127\.0\.0\.1:1/)
+    // Nothing to report a version or a device from, and `null` rather than a
+    // missing key — the tool layer rejects `undefined`.
+    assert.equal(status.comfyui.version, null)
+    assert.equal(status.comfyui.devices, null)
+
+    // The output directory is created on demand, so a fresh path must still pass.
+    assert.equal(status.output.dir, outputDir)
     assert.equal(status.output.writable, true)
-    // A GPU probe that cannot run (no nvidia-smi, or a sandbox that blocks
-    // spawning it) must report a note instead of failing the whole report.
-    assert.ok(status.gpu.ok === true || typeof status.gpu.note === 'string', 'gpu probe must be ok or explain itself')
-    // The plugin-owned runtime is reported next to the endpoints, and its
-    // free-VRAM advice is a real branch rather than a fixed string.
-    assert.ok(status.local_runtime !== null, 'status must describe the local runtime')
-    assert.ok(typeof status.local_runtime.weights.ready === 'boolean')
-    assert.ok(Array.isArray(status.vram_advisory.suggestions))
-    // `install` with dryRun is the hermetic half of "these actions are real": it
-    // plans and probes, and it must not create anything under runtimeDir.
-    const install = await run(tools, 'qwen_image_env', { action: 'install', dryRun: true })
-    console.log('install dry-run:', JSON.stringify(install, null, 2))
-    assert.equal(install.action, 'install')
-    assert.equal(install.dry_run, true)
-    assert.ok(Array.isArray(install.steps) && install.steps.length > 0)
-    assert.ok(!existsSync(join(install.venv_dir)), 'a dry run must not create the venv')
+    assert.ok(existsSync(outputDir), 'the status check may create the output directory')
+
+    // One remedy left, and the message names the document that explains it.
+    assert.match(status.next_steps, /docs\/comfyui-deployment\.md/)
+    assert.match(status.next_steps, /改图必须有 ComfyUI/)
+
+    // Nothing about the retired runtime may surface here.
+    const serialized = JSON.stringify(status)
+    for (const retired of ['local_runtime', 'vram_advisory', 'venv', 'weights.ready']) {
+      assert.ok(!serialized.includes(retired), `the status payload still carries ${retired}`)
+    }
   } finally {
     rmSync(outputDir, { recursive: true, force: true })
-    rmSync(runtimeDir, { recursive: true, force: true })
   }
 })
 
@@ -300,12 +293,13 @@ test('qwen_image_status reports the key state without echoing the key', async ()
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-status-'))
   const sentinel = 'sentinel-key-must-not-be-echoed'
   try {
-    const tools = register({ backend: 'api', apiKey: sentinel, outputDir, localEndpoint: 'http://127.0.0.1:1' })
+    const tools = register({ backend: 'api', apiKey: sentinel, outputDir })
     const status = await run(tools, 'qwen_image_status', { timeoutMs: 3000 })
     console.log('status payload:', JSON.stringify(status, null, 2))
     assert.equal(status.api.keyPresent, true)
     assert.equal(status.api.keySource, 'config')
-    assert.equal(status.local.running, false)
+    // ComfyUI is pinned to a closed port so this stays a test about the key.
+    assert.equal(status.comfyui.reachable, false)
     const serialized = JSON.stringify(status)
     assert.ok(!serialized.includes(sentinel), 'the key value must never appear in a status payload')
     assert.ok(!/Bearer\s+\S/.test(serialized), 'no authorization header value may appear')

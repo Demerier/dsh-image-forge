@@ -1,12 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import {
-  defaultOutputDir,
-  defaultRuntimeDir,
-  defaultWorkerScript,
-  probeBasePython,
-  probeComfyModelsDir,
-} from './config-defaults.ts'
+import { defaultOutputDir, probeComfyModelsDir } from './config-defaults.ts'
 import {
   resolveConfigFields,
   schemaDefaults,
@@ -14,6 +8,8 @@ import {
   type ConfigRecord,
 } from './config-resolve.ts'
 import { registerImageForgeSkill } from './skill.ts'
+import { registerStudioRoutes } from './studio-routes.ts'
+import { studioSettingsOf } from './studio-service.ts'
 import { registerImageForgeTools } from './tools.ts'
 
 /** Registration name inside the cordis context. */
@@ -24,8 +20,14 @@ export const inject = ['tools', 'skills']
 
 /** Plugin configuration as written in the DSH profile. */
 export interface Config {
-  /** Backend policy: `auto` prefers the cloud API when a key exists, else the local ComfyUI, else the worker. */
-  backend: 'auto' | 'api' | 'local' | 'comfyui'
+  /**
+   * Backend policy.
+   *
+   * `auto` (the default) takes the cloud API when a key exists and otherwise
+   * talks to the local ComfyUI. There is no third option any more: the plugin
+   * owns no runtime of its own, so "local" always means *your* ComfyUI.
+   */
+  backend: 'auto' | 'api' | 'comfyui'
   /** Cloud endpoint origin, e.g. `https://dashscope.aliyuncs.com/compatible-mode/v1`. */
   apiBaseUrl: string
   /**
@@ -41,8 +43,6 @@ export interface Config {
   outputDir: string
   /** Cooperative per-call budget for one generation, in milliseconds. */
   timeoutMs: number
-  /** Origin of the local inference worker, e.g. `http://127.0.0.1:8399`. */
-  localEndpoint: string
   /**
    * ComfyUI origin, e.g. `http://127.0.0.1:8188`. Empty means "probe
    * `comfyPorts` on 127.0.0.1"; a non-loopback value is refused at call time,
@@ -52,88 +52,14 @@ export interface Config {
   /** Candidate ComfyUI ports tried when `comfyEndpoint` is empty. */
   comfyPorts: string
   /**
-   * Where ComfyUI keeps its models, used only to phrase "put the file in …"
-   * errors. Empty keeps the message generic instead of guessing a path.
+   * Where ComfyUI keeps its models. Probed at activation so the "put the file
+   * in …" errors can name a real directory; a wrong guess is visible and
+   * correctable on the settings page.
    */
   comfyModelsDir: string
-  /** Plugin-owned data directory: the venv, the weights, worker logs, breadcrumbs. */
-  runtimeDir: string
-  /** Weight directory. Empty resolves to `<runtimeDir>/models/qwen-image-2.1-bnb4bit`. */
-  modelsDir: string
-  /** Hugging Face repo the nf4 weights come from. */
-  modelRepo: string
-  /**
-   * Mirror host for downloads. Never point this at `huggingface.co`: its root
-   * answers but `/api/` times out on this box, so the download stalls.
-   */
-  hfMirror: string
-  /** Candidate worker ports: `8399-8410`, or a list. The `localEndpoint` port is tried first. */
-  workerPorts: string
-  /** How long a cold worker start (loading 10.6 GiB of weights) may take. */
-  workerStartTimeoutMs: number
-  /** Idle milliseconds after which the worker hands its VRAM back; 0 disables it. */
-  idleUnloadMs: number
-  /** Let the plugin start/restart the worker process itself. */
-  manageWorker: boolean
-  /** Interpreter that runs the worker; empty uses `<runtimeDir>/venv`. */
-  pythonPath: string
-  /** Worker script; empty uses the shipped `resources/worker.py`. */
-  workerScript: string
-  /** Base interpreter `action:"install"` builds the venv from; empty tries `python`/`python3`/`py`. */
-  basePython: string
-  /** CUDA wheel tags tried in order by `action:"install"`; empty uses `cu128,cu126,cu118`. */
-  torchWheels: string
-  /** Index URL for the non-torch packages (an internal mirror, when configured). */
-  pipIndexUrl: string
-  /** Reuse a CUDA torch already installed in the base interpreter instead of downloading one. */
-  reuseBaseTorch: boolean
-  /** Free-VRAM floor below which `status` warns that a 2K generation will not fit. */
-  minFreeVramMiB: number
-  /**
-   * Explicit opt-in: ask ComfyUI to unload its models (`POST /free`) when the
-   * pre-start VRAM gate finds no room for the local worker.
-   *
-   * Default **false** — unloading another program's models is a side effect the
-   * plugin does not take on its own; the default path reports the command instead.
-   */
-  freeComfyBeforeLocalStart: boolean
-  /**
-   * Explicit opt-in: let a **local** edit run with a reference-conditioning budget
-   * above the reliable ceiling the size gate enforces.
-   *
-   * Default **false** — over `960` the local edit path has measured hard failures
-   * on the card class this plugin targets (access violation in the CPU text-encode
-   * stage, sometimes taking the worker process with it), so the gate refuses by
-   * default and this flag is how a caller says "I know". Only the local backend
-   * reads it: `comfyui` is never gated and `api` has no edit path at all.
-   */
-  allowLocalEditOverBudget: boolean
-  /**
-   * Reference-conditioning budget for the **local** edit path, in pixels per side:
-   * the side length the worker resizes every reference image (and the condition
-   * latents) to. **`0` — the default — derives it from the canvas**, which is what
-   * the worker does on its own and what every earlier release did.
-   *
-   * A positive value is sent to the worker as `reference_budget` and is what the
-   * size gate bands against, so `512` makes a 1248×1248 canvas (derived budget
-   * 1248, today refused) run as a 512 edit. The trade is **speed and runnability
-   * for reference fidelity**: §19 measured 992 → 512 as encode 37.7 → 16.5 s and
-   * 3.4 → 1.67 s per step (≈2×), and **512 is the only budget measured to finish
-   * on a 1.5 MP canvas** (1248×1248: 109.5 s, peak reserved 6488 MiB) — the same
-   * canvas at 896 measured 67 s/step, ≈28 min for 25 steps, with no error
-   * (本机实测). The fidelity half is a 1-image, 1-judge comparison: on the
-   * same 1216×672 canvas 896 vs 512 was judged indistinguishable (n=1), and only
-   * 512 has been run on a 1.5 MP canvas. Only `local` reads it; `comfyui` scales
-   * references on its own and `api` has no edit path.
-   */
-  localReferenceBudget: number
-  /** Default for `fetch-weights`: drop the unused `lm_head.weight` tensor. */
-  skipLmHead: boolean
   /**
    * Sampler steps used when neither the caller nor a backend-specific override
-   * picks one. Default **25**, the official ComfyUI 2.1 template's count — not
-   * the 40 of the diffusers pipeline, and not the 8 the worker used to fall back
-   * to.
+   * picks one. Default **25**, the official ComfyUI 2.1 template's count.
    *
    * Measured: 25 → 50 does **not** add detail (lapvar 1019 → 970, hf_frac
    * 0.0317 → 0.0279), so more steps is not the lever for sharpness — canvas size
@@ -143,17 +69,29 @@ export interface Config {
   /**
    * ComfyUI steps; `undefined` (the default) means "use `defaultSteps`".
    *
-   * One of the three resolution inputs, because the two backends historically
-   * disagreed — so switching backend silently changed the picture.
+   * Kept separate from `defaultSteps` because the two checkpoint families have
+   * different working points: base wants 25, and this is where a user who
+   * disagrees with that can say so without touching the family default.
    */
   comfyuiSteps: number | undefined
   /**
-   * Local worker steps; `undefined` (the default) means "use `defaultSteps`".
+   * Which checkpoint family the ComfyUI path asks for.
    *
-   * The worker's own fallback is 25, but the plugin always sends a resolved
-   * count explicitly, so this is what actually decides a local render.
+   * `base` (the default) is the 25-step Qwen-Image 2.1 checkpoint. `turbo` is
+   * the distilled one: 8 steps on its own fixed sigma schedule, which is the
+   * whole reason it exists — a local card that cannot do 25 steps comfortably
+   * can do 8. It is only usable when a turbo unet is actually installed;
+   * otherwise the pipeline falls back to `base` and says so in its result.
    */
-  localSteps: number | undefined
+  comfyModel: 'base' | 'turbo'
+  /**
+   * Steps for the turbo checkpoint; `undefined` means {@link TURBO_STEPS} (8).
+   *
+   * Exposed because the turbo contract is "8 steps **with this schedule**", and
+   * the only honest way to check that claim on a given card is to run a couple
+   * of neighbouring values and look at the pictures.
+   */
+  turboSteps: number | undefined
 }
 
 /**
@@ -182,51 +120,25 @@ export type ConfigFields = { [K in keyof Config]?: ConfigField<Config[K]> }
  * downstream sees it.
  */
 export const Config = Schema.object({
-  backend: Schema.union(['auto', 'api', 'local', 'comfyui']).default('auto').volatile(),
+  backend: Schema.union(['auto', 'api', 'comfyui']).default('auto').volatile(),
   apiBaseUrl: Schema.string().default('https://dashscope.aliyuncs.com/compatible-mode/v1').volatile(),
   apiKey: Schema.string().default('').volatile(),
   apiModel: Schema.string().default('qwen-image').volatile(),
   apiStyle: Schema.union(['openai', 'dashscope']).default('openai').volatile(),
   outputDir: Schema.string().default(defaultOutputDir()).volatile(),
   timeoutMs: Schema.number().default(180_000).volatile(),
-  localEndpoint: Schema.string().default('http://127.0.0.1:8399').volatile(),
   comfyEndpoint: Schema.string().default('').volatile(),
   comfyPorts: Schema.string().default('8000,8188,8189,8190,8191,8192').volatile(),
   comfyModelsDir: Schema.string().default(probeComfyModelsDir()).volatile(),
-  runtimeDir: Schema.string().default(defaultRuntimeDir()).volatile(),
-  // Deliberately empty: both derive from `runtimeDir` at resolve time, so a real
-  // default would freeze them to the *default* runtime directory and silently
-  // point at the wrong weight dir / venv the moment the user moves `runtimeDir`
-  // — which is an operation we actively want (point it at a populated directory
-  // and skip a 13 GiB download). Empty means "follow the current runtimeDir"; the
-  // page shows the derived path in the hint, substituted with the live value, so
-  // it is visible without being able to go stale.
-  modelsDir: Schema.string().default('').volatile(),
-  modelRepo: Schema.string().default('circulus/Qwen-Image-2.1-bnb-4bit').volatile(),
-  hfMirror: Schema.string().default('https://hf-mirror.com').volatile(),
-  workerPorts: Schema.string().default('8399-8410').volatile(),
-  workerStartTimeoutMs: Schema.number().default(300_000).volatile(),
-  idleUnloadMs: Schema.number().default(600_000).volatile(),
-  manageWorker: Schema.boolean().default(true).volatile(),
-  pythonPath: Schema.string().default('').volatile(),
-  workerScript: Schema.string().default(defaultWorkerScript()).volatile(),
-  basePython: Schema.string().default(probeBasePython()).volatile(),
-  torchWheels: Schema.string().default('').volatile(),
-  pipIndexUrl: Schema.string().default('').volatile(),
-  reuseBaseTorch: Schema.boolean().default(true).volatile(),
-  minFreeVramMiB: Schema.number().default(5500).volatile(),
-  freeComfyBeforeLocalStart: Schema.boolean().default(false).volatile(),
-  allowLocalEditOverBudget: Schema.boolean().default(false).volatile(),
-  localReferenceBudget: Schema.number().default(0).volatile(),
-  skipLmHead: Schema.boolean().default(false).volatile(),
-  // The step counts. `defaultSteps` is the shared fallback; the two per-backend
-  // fields are deliberately optional (no `.default()`), so an unset override
-  // resolves to `undefined` and the resolver falls through to `defaultSteps`.
-  // They are still declared keys: `schemaDefaults` keeps every key, so the
-  // settings page's field-coverage guard sees them.
+  // The step counts. `defaultSteps` is the shared fallback; `comfyuiSteps` and
+  // `turboSteps` are deliberately optional (no `.default()`), so an unset
+  // override resolves to `undefined` and the resolver falls back to the family
+  // default. They are still declared keys: `schemaDefaults` keeps every key, so
+  // the settings page's field-coverage guard sees them.
   defaultSteps: Schema.number().default(25).volatile(),
   comfyuiSteps: Schema.number().volatile(),
-  localSteps: Schema.number().volatile(),
+  comfyModel: Schema.union(['base', 'turbo']).default('base').volatile(),
+  turboSteps: Schema.number().volatile(),
 })
 
 /**
@@ -257,7 +169,12 @@ function resolveConfig(config?: ConfigFields): Config {
 }
 
 /**
- * Register the image tools and the routing skill.
+ * Register the image tools, the routing skill, and — when the host serves one —
+ * the Studio's HTTP routes.
+ *
+ * The Studio routes mount through a dedicated inner plugin ({@link
+ * registerStudioRoutesIfMounted}) so a host without a web server still gets the
+ * Agent tools, and a host whose server mounts late gets the routes at all.
  *
  * @param ctx - cordis context; `tools` and `skills` are injected above.
  * @param config - the activation's config, volatile references included.
@@ -265,4 +182,48 @@ function resolveConfig(config?: ConfigFields): Config {
 export function apply(ctx: Context, config?: ConfigFields): void {
   registerImageForgeTools(ctx, resolveConfig(config))
   registerImageForgeSkill(ctx)
+  registerStudioRoutesIfMounted(ctx, config)
+}
+
+/**
+ * Wire the Studio routes onto the host's web server, reading the config fresh
+ * per request so a settings save takes effect without a restart.
+ *
+ * The routes live in a **dedicated inner plugin** that declares `webServer` as
+ * its own injected service, rather than in the plugin body. The reason is
+ * activation order: a plugin only starts once *every* service in its `inject`
+ * list exists, so putting `webServer` on the outer plugin would park the tools
+ * and the skill on any host that never starts a web server, while reading
+ * `ctx.get('webServer')` once from the body loses the race the other way — on
+ * Desktop the server mounts after plugin activation, the getter returns
+ * `undefined`, and the Studio panel then reports HTTP 404 against a server
+ * that is in fact running. The inner plugin gets both halves right: the outer
+ * body starts immediately (tools work everywhere), and cordis (re)activates
+ * the inner one exactly when the web server appears.
+ *
+ * @param ctx - host context.
+ * @param config - the activation's config, or undefined for the schema defaults.
+ */
+function registerStudioRoutesIfMounted(ctx: Context, config?: ConfigFields): void {
+  // A minimal or mocked context (the unit-test harness, a stripped embedder) may
+  // not implement nested plugins. Skipping the Studio there loses only the HTTP
+  // routes — never the tools — so it must not throw out of `apply`.
+  const nest = (ctx as unknown as { plugin?: unknown }).plugin
+  if (typeof nest !== 'function') return
+
+  ctx.plugin({
+    name: 'dsh-image-forge:studio',
+    inject: ['webServer'],
+    apply: (svcCtx) => {
+      const disposers = registerStudioRoutes(svcCtx, {
+        settings: () => studioSettingsOf(resolveConfig(config)),
+        ctx: svcCtx,
+      })
+      if (!disposers.length) {
+        svcCtx.logger.warn('webServer 已挂载但 register() 不可用，工作台路由未注册')
+        return
+      }
+      return () => disposers.forEach((dispose) => dispose())
+    },
+  })
 }

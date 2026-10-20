@@ -2,28 +2,24 @@
  * The reference-image edit path: what reaches the backends, and what happens when
  * a reference cannot be used.
  *
- * Everything here runs against fakes — a fake ComfyUI (which also receives the
- * `/upload/image` multipart POST) and the existing node fake worker — so `npm
- * test` stays hermetic. The live runs against the real ComfyUI and the real
- * worker are the `test:live` script and the manual e2e in the notes.
+ * Everything here runs against a fake ComfyUI (which also receives the
+ * `/upload/image` multipart POST), so `npm test` stays hermetic. The cloud
+ * backend has no edit channel at all, which is why there is exactly one backend
+ * to fake here; the live run against the real server is `test:live:edit`.
  *
  * The reference PNGs are built here rather than checked in: the sizing logic
  * depends on the *pixel size* of a reference, so a fixture whose IHDR says
  * 2048x1152 has to be a real PNG, and generating one keeps that honest without
  * adding binary files to the repository.
  */
-import test, { after } from 'node:test'
+import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 import * as plugin from '../lib/index.js'
-
-/** The node stand-in for `resources/worker.py` (same fixture the lifecycle tests use). */
-const FAKE_WORKER = fileURLToPath(new URL('./fixtures/fake-worker.mjs', import.meta.url))
 
 /** The file names the fake ComfyUI offers, mirroring a real install. */
 const OBJECT_INFO = {
@@ -187,16 +183,6 @@ async function startFakeComfy(options = {}) {
   }
 }
 
-/**
- * Ephemeral runtime for the whole file: a machine that already has
- * ~/.dsh-image-forge/venv must not make tests spawn that worker.
- */
-const HERMETIC_RUNTIME = mkdtempSync(join(tmpdir(), 'forge-rt-'))
-
-after(() => {
-  rmSync(HERMETIC_RUNTIME, { recursive: true, force: true })
-})
-
 /** Register the plugin against a stub context and hand back the tool map. */
 function register(config) {
   const tools = new Map()
@@ -204,7 +190,9 @@ function register(config) {
     tools: { register: (definition) => tools.set(definition.name, definition) },
     skills: { register: () => undefined },
   }
-  plugin.apply(ctx, { ...plugin.Config({}), runtimeDir: HERMETIC_RUNTIME, ...config })
+  // A closed port by default: an edit must never reach a real ComfyUI on the
+  // machine running the tests unless the test points it at a fake one.
+  plugin.apply(ctx, { ...plugin.Config({}), comfyPorts: '1', ...config })
   return tools
 }
 
@@ -221,24 +209,15 @@ async function failure(tools, name, args) {
   )
 }
 
-/** A temp directory tree: references, output, runtime, and a weights stub. */
+/** A temp directory tree: just the reference images and an output directory. */
 function fixture(prefix) {
   const root = mkdtempSync(join(tmpdir(), `${prefix}-`))
   const outputDir = join(root, 'out')
-  const runtimeDir = join(root, 'runtime')
-  const modelsDir = join(root, 'models')
   const refs = join(root, 'refs')
-  for (const dir of [outputDir, runtimeDir, modelsDir, refs]) mkdirSync(dir, { recursive: true })
-  for (const relative of ['model_index.json', 'transformer/config.json', 'text_encoder/config.json', 'vae/config.json']) {
-    const path = join(modelsDir, ...relative.split('/'))
-    mkdirSync(join(path, '..'), { recursive: true })
-    writeFileSync(path, '{}\n')
-  }
+  for (const dir of [outputDir, refs]) mkdirSync(dir, { recursive: true })
   return {
     root,
     outputDir,
-    runtimeDir,
-    modelsDir,
     refs,
     ref: (name, bytes) => {
       const path = join(refs, name)
@@ -246,38 +225,6 @@ function fixture(prefix) {
       return path
     },
     cleanup: () => rmSync(root, { recursive: true, force: true }),
-  }
-}
-
-/** A free port, so the fake worker can be reached at a known endpoint. */
-async function freePort() {
-  const server = createServer()
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const { port } = server.address()
-  await new Promise((resolve) => server.close(resolve))
-  return port
-}
-
-/** Every event the fake worker recorded for this runtime directory. */
-function workerEvents(runtimeDir) {
-  const log = join(runtimeDir, 'fake-worker-events.jsonl')
-  if (!existsSync(log)) return []
-  return readFileSync(log, 'utf8')
-    .trim()
-    .split('\n')
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line))
-}
-
-/** Kill the worker process the plugin started, so a temp dir can go away. */
-function killWorkers(runtimeDir) {
-  for (const pid of new Set(workerEvents(runtimeDir).map((entry) => entry.pid))) {
-    if (typeof pid !== 'number' || !Number.isFinite(pid)) continue
-    try {
-      process.kill(pid)
-    } catch {
-      /* already gone */
-    }
   }
 }
 
@@ -299,7 +246,6 @@ test('a fake ComfyUI edit: references uploaded, graph wired, image written', asy
       comfyEndpoint: comfy.endpoint,
       outputDir: fx.outputDir,
       timeoutMs: 20_000,
-      localEndpoint: 'http://127.0.0.1:1',
     })
 
     const result = await run(tools, 'qwen_image_edit', {
@@ -378,7 +324,7 @@ test('with neither ratio nor size the canvas follows the first reference by defa
   const fx = fixture('forge-edit-default')
   try {
     const path = fx.ref('exact.png', makePng(1664, 928))
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir, localEndpoint: 'http://127.0.0.1:1' })
+    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const result = await run(tools, 'qwen_image_edit', { prompt: '只把标题换成「夏日特惠」。', images: [path] })
     console.log('defaulted ratio_follow:', JSON.stringify({ ratio_follow: result.ratio_follow, defaulted: result.ratio_follow_defaulted, size: result.size, deviation: result.ratio_deviation_percent }))
     assert.equal(result.ratio_follow, 'image1')
@@ -404,7 +350,7 @@ test('ratio_follow also accepts the path (or data URI) that images[] carried', a
   try {
     const square = fx.ref('square.png', makePng(1200, 1200))
     const wide = fx.ref('wide.png', makePng(2048, 1152))
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir, localEndpoint: 'http://127.0.0.1:1' })
+    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const result = await run(tools, 'qwen_image_edit', { prompt: '把第二张图的天空换到第一张图上。', images: [square, wide], ratio_follow: wide.toUpperCase() })
     console.log('ratio_follow by path ->', JSON.stringify({ followed: result.ratio_follow_image, size: result.size }))
     assert.equal(result.ratio_follow, 'image2', 'the path resolves to the reference it matches, not to image1')
@@ -432,7 +378,7 @@ test('wh_ratio and ratio_follow together are refused before any backend is touch
   const comfy = await startFakeComfy()
   const fx = fixture('forge-edit-exclusive')
   try {
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir, localEndpoint: 'http://127.0.0.1:1' })
+    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const error = await failure(tools, 'qwen_image_edit', {
       prompt: '把背景换成雪夜。',
       images: [fx.ref('a.png', makePng(256, 256))],
@@ -453,7 +399,7 @@ test('wh_ratio and ratio_follow together are refused before any backend is touch
 test('every unusable reference is refused by position, never dropped', async () => {
   const fx = fixture('forge-edit-bad-refs')
   try {
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: 'http://127.0.0.1:1', outputDir: fx.outputDir, localEndpoint: 'http://127.0.0.1:1' })
+    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: 'http://127.0.0.1:1', outputDir: fx.outputDir })
     const good = fx.ref('good.png', makePng(256, 256))
     const cases = [
       { name: 'too many', images: Array.from({ length: 11 }, () => good), match: /carries 11 reference images, but at most 10/ },
@@ -491,11 +437,15 @@ test('backend "api" refuses to carry references instead of dropping them', async
   try {
     const tools = register({ backend: 'api', apiKey: 'test-key', apiBaseUrl: 'http://127.0.0.1:1/v1', outputDir: fx.outputDir })
     const error = await failure(tools, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('a.png', makePng(256, 256))] })
-    console.log('backend api error:\n' + error.message)
+    console.log('backend api error://n' + error.message)
     assert.match(error.message, /backend "api" 没有编辑通道/)
+    // The one backend that can carry a reference, and the document that installs
+    // it. The removed `local` tier must not be offered as a third option.
     assert.match(error.message, /comfyui/)
-    assert.match(error.message, /local/)
-    // `backend: "auto"` with a key present still edits locally, and says so.
+    assert.match(error.message, /docs\/comfyui-deployment\.md/)
+    assert.ok(!/`local`/.test(error.message), 'the removed local backend is still offered')
+    // `backend: "auto"` with a key present still edits over ComfyUI, and says why
+    // it did not use the key.
     const comfy = await startFakeComfy({ rendered: makePng(992, 992) })
     try {
       const auto = register({
@@ -504,7 +454,6 @@ test('backend "api" refuses to carry references instead of dropping them', async
         apiBaseUrl: 'http://127.0.0.1:1/v1',
         comfyEndpoint: comfy.endpoint,
         outputDir: fx.outputDir,
-        localEndpoint: 'http://127.0.0.1:1',
       })
       const result = await run(auto, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('b.png', makePng(600, 600))] })
       console.log('auto + key ->', JSON.stringify({ backend: result.backend, api_skipped: result.api_skipped }))
@@ -519,99 +468,73 @@ test('backend "api" refuses to carry references instead of dropping them', async
 })
 
 // ---------------------------------------------------------------------------
-// The managed worker: the additive `images` field, and text-to-image staying put
+// The canvas the reference implies: ComfyUI scales it itself, so there is no
+// plugin-side gate to trip — the check here is that nothing got in the way.
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// The local edit size gate is local-only: ComfyUI is one of its ways out
-// ---------------------------------------------------------------------------
-
-test('an over-budget canvas edits fine over ComfyUI', async () => {
-  const comfy = await startFakeComfy({ rendered: makePng(992, 992) })
-  const fx = fixture('forge-edit-gate-comfy')
+test('a full-size canvas edits fine over ComfyUI, with no gate in between', async () => {
+  const comfy = await startFakeComfy({ rendered: makePng(1248, 1248) })
+  const fx = fixture('forge-edit-fullsize')
   try {
     const tools = register({
       backend: 'comfyui',
       apiKey: '',
       comfyEndpoint: comfy.endpoint,
       outputDir: fx.outputDir,
-      localEndpoint: 'http://127.0.0.1:1',
     })
     const result = await run(tools, 'qwen_image_edit', {
       prompt: '把背景换成雪夜。',
       images: [fx.ref('a.png', makePng(256, 256))],
-      // 1248×1248 is the canvas the gate refuses for the worker (budget 1248); ComfyUI
-      // has no conditioning budget of its own, so it must be untouched by the gate.
+      // 1248×1248 is the 1:1 default canvas — the largest one this plugin asks
+      // for. ComfyUI does its own reference conditioning, so nothing here refuses.
       width: 1248,
       height: 1248,
     })
-    console.log('over-budget over comfyui ->', JSON.stringify({ backend: result.backend, size: result.size, gate: result.local_edit_budget }))
+    console.log('full-size edit ->', JSON.stringify({ backend: result.backend, size: result.size }))
     assert.equal(result.backend, 'comfyui')
     assert.deepEqual(result.size, { width: 1248, height: 1248 })
-    assert.equal(result.local_edit_budget, null, 'only the local path has a conditioning budget to gate')
+    // The gate's payload is gone, not merely empty: a key that still ships would
+    // tell a reader there is a budget to configure.
+    assert.equal('local_edit_budget' in result, false, 'the local edit budget must not appear in a result')
+    assert.equal('local_worker' in result, false, 'the worker report must not appear in a result')
     assert.equal(comfy.state.graph['5'].inputs.width, 1248)
+    assert.equal(comfy.state.graph['5'].inputs.height, 1248)
   } finally {
     await comfy.close()
     fx.cleanup()
   }
 })
 
-test('an "auto" edit that has to fall back to the worker still hits the gate', async () => {
-  const fx = fixture('forge-edit-gate-fallback')
+test('an "auto" edit with no ComfyUI running names the deployment document', async () => {
+  const fx = fixture('forge-edit-auto-down')
   try {
     const tools = register({
       backend: 'auto',
       apiKey: '',
-      // Nothing listens: ComfyUI fails, so the call falls through to the worker —
-      // which the size gate refuses before any process is started.
-      comfyEndpoint: 'http://127.0.0.1:1',
-      localEndpoint: 'http://127.0.0.1:1',
-      manageWorker: false,
-      minFreeVramMiB: 0,
+      comfyEndpoint: '',
+      comfyPorts: '1',
       outputDir: fx.outputDir,
     })
     const error = await failure(tools, 'qwen_image_edit', {
       prompt: 'x',
       images: [fx.ref('a.png', makePng(256, 256))],
-      width: 1248,
-      height: 1248,
     })
-    console.log('auto fallback error:\n' + error.message)
-    assert.match(error.message, /neither local backend could run the edit/)
-    // The gate's own text has to survive inside the combined error, because it is
-    // the only part that names the three ways out.
-    assert.match(error.message, /本地编辑尺寸门/)
-    assert.match(error.message, /allowLocalEditOverBudget: true/)
+    console.log('auto edit with nothing running://n' + error.message)
+    // There is no `local` fallback left, so the only useful thing this message can
+    // do is name what is missing and where the fix is written down.
+    assert.match(error.message, /改图只能在本机 ComfyUI 上跑/)
+    assert.match(error.message, /docs\/comfyui-deployment\.md/)
+    assert.ok(!/neither local backend/.test(error.message), 'the removed local fallback is still described')
   } finally {
     fx.cleanup()
   }
 })
 
-test('the local worker receives images[] as base64, and text-to-image sends none', async () => {
-  const port = await freePort()
-  const fx = fixture('forge-edit-worker')
+test('every reference is uploaded for an edit, and text-to-image uploads none', async () => {
+  const comfy = await startFakeComfy({ rendered: makePng(992, 992) })
+  const fx = fixture('forge-edit-upload')
   try {
-    const tools = register({
-      backend: 'local',
-      apiKey: '',
-      pythonPath: process.execPath,
-      workerScript: FAKE_WORKER,
-      localEndpoint: `http://127.0.0.1:${port}`,
-      workerPorts: `${port}-${port + 2}`,
-      workerStartTimeoutMs: 15_000,
-      idleUnloadMs: 0,
-      manageWorker: true,
-      minFreeVramMiB: 0,
-      // This test is about the wire shape of a local edit, and `ratio_follow`
-      // image2 (512×512) resolves to the 1248×1248 default canvas — which the local
-      // edit size gate refuses by default. `local-edit-budget.test.mjs` owns the
-      // three gate bands; here the opt-in keeps a not-yet-existing worker off the
-      // path being asserted.
-      allowLocalEditOverBudget: true,
-      outputDir: fx.outputDir,
-      runtimeDir: fx.runtimeDir,
-      modelsDir: fx.modelsDir,
-    })
+    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const square = makePng(512, 512)
     const wide = makePng(2048, 1152)
     const result = await run(tools, 'qwen_image_edit', {
@@ -620,27 +543,31 @@ test('the local worker receives images[] as base64, and text-to-image sends none
       ratio_follow: 'image2',
       seed: 3,
     })
-    console.log('local edit result:', JSON.stringify({ backend: result.backend, size: result.size, ratio_follow: result.ratio_follow, local_worker: result.local_worker }))
+    console.log('edit result:', JSON.stringify({ backend: result.backend, size: result.size, ratio_follow: result.ratio_follow }))
 
-    const sent = JSON.parse(workerEvents(fx.runtimeDir).find((entry) => entry.event === 'generate').body)
-    assert.equal(sent.images.length, 2, 'the worker must receive one entry per reference')
-    assert.ok(Buffer.from(sent.images[0], 'base64').equals(wide), 'the first reference must arrive byte-exact')
-    assert.ok(Buffer.from(sent.images[1], 'base64').equals(square))
-    assert.equal(sent.width, 1248, 'ratio_follow image2 (512x512) resolves on the plugin side')
-    assert.equal(sent.height, 1248)
-    assert.equal(sent.seed, 3)
-    assert.equal(result.backend, 'local')
+    assert.equal(result.backend, 'comfyui')
+    assert.equal(comfy.state.uploads.length, 2, 'the server must receive one upload per reference')
+    assert.ok(comfy.state.uploads[0].bytes.equals(wide), 'the first reference must arrive byte-exact')
+    assert.ok(comfy.state.uploads[1].bytes.equals(square), 'the second reference must arrive byte-exact')
+    assert.equal(comfy.state.uploads[0].contentType, 'image/png')
+    // ratio_follow image2 (512×512) resolves to the 1:1 canvas on the plugin side,
+    // before anything is sent.
+    assert.deepEqual(result.size, { width: 1248, height: 1248 })
     assert.equal(result.ratio_follow, 'image2')
+    assert.equal(result.seed, 3)
+    // Both references are wired into the graph as LoadImage nodes.
+    const classes = Object.values(comfy.state.graph).map((node) => node.class_type)
+    assert.equal(classes.filter((name) => name === 'LoadImage').length, 2)
 
-    // Backward compatibility: a text-to-image call through the same worker has no
-    // `images` key at all, so an old worker sees exactly the old request.
-    await run(tools, 'qwen_image_generate', { prompt: 'A brass compass.', wh_ratio: '1:1' })
-    const generates = workerEvents(fx.runtimeDir).filter((entry) => entry.event === 'generate')
-    const plain = JSON.parse(generates[generates.length - 1].body)
-    assert.equal('images' in plain, false, 'a text-to-image request must not grow an images field')
-    console.log('text-to-image request keys:', JSON.stringify(Object.keys(plain)))
+    // Text-to-image must not grow an upload: the graph has no LoadImage at all.
+    const uploadsBefore = comfy.state.uploads.length
+    const generated = await run(tools, 'qwen_image_generate', { prompt: 'A brass compass.', wh_ratio: '1:1' })
+    assert.equal(generated.backend, 'comfyui')
+    assert.equal(comfy.state.uploads.length, uploadsBefore, 'a text-to-image call must not upload anything')
+    const generatedClasses = Object.values(comfy.state.graph).map((node) => node.class_type)
+    assert.equal(generatedClasses.includes('LoadImage'), false, 'a text-to-image graph must carry no reference node')
   } finally {
-    killWorkers(fx.runtimeDir)
+    await comfy.close()
     fx.cleanup()
   }
 })

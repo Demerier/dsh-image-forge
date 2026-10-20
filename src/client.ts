@@ -30,13 +30,21 @@
  */
 import { createElement, useEffect, useState, type ReactNode } from 'react'
 import { injectClientStyles } from './client-styles.ts'
+import { studioFileUrl } from './studio-shared.ts'
+import { StudioPanel } from './studio-view.ts'
+
+/**
+ * Pseudo tab id for the workbench. It is not a member of `SETTINGS_TABS`
+ * because it renders a live surface rather than a form over config fields, so
+ * giving it a `groupIds` list would be a lie the tab renderer would act on.
+ */
+const STUDIO_TAB_ID = 'studio'
 import {
   SECRET_MASK,
   SETTINGS_TABS,
   advisoryAfterGroup,
   displayValue,
   isSecretField,
-  resolveHint,
   tabFields,
   type SettingsAdvisory,
   type SettingsField,
@@ -79,7 +87,6 @@ const TOOL_KEYS = [
   'qwen_image_generate',
   'qwen_image_edit',
   'qwen_image_status',
-  'qwen_image_env',
 ] as const
 
 /** Minimal shape of the host-provided image loader. */
@@ -213,18 +220,24 @@ function CardShell(props: {
 /** The image grid both generate and edit render once paths exist. */
 function ImageGrid(props: ToolRowProps): ReactNode {
   const paths = imagePaths(props)
-  if (paths.length === 0 || typeof props.loadImage !== 'function') return null
+  if (paths.length === 0) return null
   return createElement(
     'div',
     { key: 'images', className: 'dsh-image-forge-images' },
-    paths.map((path, index) =>
-      createElement('img', {
+    paths.map((path, index) => {
+      // Prefer the host's loader when it exists and answers with a string; a
+      // Desktop host whose web server mounts late (or omits `loadImage`)
+      // otherwise yields `src: undefined`, which renders as the broken-image
+      // alt box. The plugin's own file route serves the same bytes same-origin.
+      const loaded = typeof props.loadImage === 'function' ? props.loadImage(path) : undefined
+      const src = typeof loaded === 'string' && loaded.length > 0 ? loaded : studioFileUrl(path)
+      return createElement('img', {
         key: `image-${index}`,
-        src: props.loadImage?.(path) as string,
+        src,
         alt: path,
         loading: 'lazy',
-      }),
-    ),
+      })
+    }),
   )
 }
 
@@ -260,20 +273,11 @@ function ImageResultRow(props: ToolRowProps): ReactNode {
     const refs = payload?.['references']
     if (Array.isArray(refs) && refs.length > 0) pills.push(pill('refs', `${refs.length} 张参考`))
 
-    const notes: ReactNode[] = []
-    const gate = asRecord(payload?.['local_edit_budget'])
-    const gateWarning = gate?.['warning']
-    if (typeof gateWarning === 'string' && gateWarning.length > 0) {
-      notes.push(
-        createElement('p', { key: 'gate', className: 'dsh-image-forge-row-note' }, gateWarning.split('\n')[0] ?? ''),
-      )
-    }
-
     return createElement(CardShell, {
       title: isEdit ? '参考图编辑' : '文生图',
       status,
       pills,
-      children: [createElement(ImageGrid, { key: 'grid', ...props }), ...notes],
+      children: [createElement(ImageGrid, { key: 'grid', ...props })],
     })
   } catch {
     // A presentation failure must never take down the conversation row.
@@ -304,9 +308,6 @@ function StatusRow(props: ToolRowProps): ReactNode {
     const status = phaseLabel(props, '探测完成', '正在探测后端…')
     const api = asRecord(payload?.['api'])
     const comfy = asRecord(payload?.['comfyui'])
-    const worker = asRecord(payload?.['worker'])
-    const venv = asRecord(payload?.['venv'])
-    const weights = asRecord(payload?.['weights'])
 
     const apiOk = api?.['reachable'] === true
     const apiAuth = api?.['authenticated'] === true
@@ -332,21 +333,17 @@ function StatusRow(props: ToolRowProps): ReactNode {
         ? '在跑，三个权重齐'
         : '在跑，但缺 Qwen 权重'
 
-    const workerOk = worker?.['ready'] === true || worker?.['reachable'] === true
-    const workerTone: 'ok' | 'warn' | 'bad' = worker?.['ready'] === true ? 'ok' : workerOk ? 'warn' : 'bad'
-    const workerText = worker?.['ready'] === true
-      ? `ready${typeof worker['pid'] === 'number' ? ` · pid ${worker['pid']}` : ''}`
-      : workerOk
-        ? '进程在，未就绪'
-        : '不在跑（按需拉起）'
-
-    const localReady = venv?.['exists'] === true && weights?.['ready'] === true
-    const localTone: 'ok' | 'warn' | 'bad' = localReady ? 'ok' : venv?.['exists'] === true ? 'warn' : 'bad'
-    const localText = localReady
-      ? 'venv + 权重就绪'
-      : venv?.['exists'] === true
-        ? '权重未就绪'
-        : '本地运行时未安装'
+    // One GPU line, straight from ComfyUI's own `/system_stats`: the card that
+    // matters is the one it loaded its weights onto.
+    const devices = Array.isArray(comfy?.['devices']) ? comfy['devices'] : []
+    const device = asRecord(devices[0])
+    const vramFree = typeof device?.['vram_free_MiB'] === 'number' ? device['vram_free_MiB'] : null
+    const vramTotal = typeof device?.['vram_total_MiB'] === 'number' ? device['vram_total_MiB'] : null
+    const gpuText = vramTotal === null
+      ? '未报告'
+      : `${String(device?.['name'] ?? 'GPU')} · 空闲 ${String(vramFree ?? '?')} / ${String(vramTotal)} MiB`
+    const output = asRecord(payload?.['output'])
+    const outputWritable = output?.['writable'] === true
 
     return createElement(CardShell, {
       title: '后端健康',
@@ -364,73 +361,11 @@ function StatusRow(props: ToolRowProps): ReactNode {
           [
             checkCell('api', '云端 API', apiText, apiTone),
             checkCell('comfy', 'ComfyUI', comfyText, comfyTone),
-            checkCell('worker', '本地 worker', workerText, workerTone),
-            checkCell('local', '本地运行时', localText, localTone),
+            checkCell('vram', '显卡', gpuText, vramTotal === null ? 'warn' : 'neutral'),
+            checkCell('output', '输出目录', outputWritable ? '可写' : '不可写', outputWritable ? 'ok' : 'bad'),
           ],
         ),
       ],
-    })
-  } catch {
-    return null
-  }
-}
-
-/**
- * Env card: which action ran and the one number that matters for it.
- *
- * @param props - owner props supplied by ui-tool's dispatch.
- * @returns the card, or nothing on a presentation failure.
- */
-function EnvRow(props: ToolRowProps): ReactNode {
-  try {
-    const payload = payloadOf(props)
-    const action = typeof payload?.['action'] === 'string' ? (payload['action'] as string) : 'status'
-    const dryRun = payload?.['dry_run'] === true
-    const ok = payload?.['ok'] !== false
-    const status = phaseLabel(
-      props,
-      ok ? (dryRun ? `完成（dry-run）：${action}` : `完成：${action}`) : `未完成：${action}`,
-      `正在执行 ${action}…`,
-    )
-    const pills: ReactNode[] = [
-      pill('action', action),
-      pill('ok', ok ? 'ok' : 'failed', ok ? 'ok' : 'bad'),
-    ]
-    if (dryRun) pills.push(pill('dry', 'dry-run', 'warn'))
-
-    if (action === 'unload') {
-      const before = payload?.['vram_before_MiB']
-      const after = payload?.['vram_after_MiB']
-      if (typeof before === 'number' && typeof after === 'number') {
-        pills.push(pill('vram', `显存 ${before} → ${after} MiB`, after < before ? 'ok' : 'neutral'))
-      }
-    }
-    if (action === 'status') {
-      const gate = asRecord(payload?.['worker_start_gate'])
-      if (gate?.['would_refuse_start'] === true) pills.push(pill('gate', 'worker 将被拒绝启动', 'warn'))
-      else if (gate?.['would_refuse_start'] === false) pills.push(pill('gate', 'worker 可启动', 'ok'))
-    }
-    const files = payload?.['files']
-    if (Array.isArray(files) && files.length > 0 && action === 'fetch-weights') {
-      pills.push(pill('files', `${files.length} 个文件`))
-    }
-    const steps = payload?.['steps']
-    if (Array.isArray(steps) && action === 'install') {
-      const planned = steps.filter((step) => asRecord(step)?.['status'] === 'planned').length
-      if (planned > 0) pills.push(pill('steps', `${planned} 步待执行`, 'warn'))
-    }
-
-    const note = payload?.['note']
-    const children: ReactNode[] = []
-    if (typeof note === 'string' && note.length > 0) {
-      children.push(createElement('p', { key: 'note', className: 'dsh-image-forge-row-note' }, note))
-    }
-
-    return createElement(CardShell, {
-      title: '环境与运行时',
-      status,
-      pills,
-      children,
     })
   } catch {
     return null
@@ -450,7 +385,6 @@ function createToolRow(toolName: string): (props: ToolRowProps) => ReactNode {
   return function QwenImageToolRow(props: ToolRowProps): ReactNode {
     const bound: ToolRowProps = { ...props, toolName: toolNameOf(props) || toolName }
     if (toolName === 'qwen_image_status') return StatusRow(bound)
-    if (toolName === 'qwen_image_env') return EnvRow(bound)
     return ImageResultRow(bound)
   }
 }
@@ -551,10 +485,10 @@ function FieldRow(props: ControlProps): ReactNode {
       field.label,
     ),
     createElement('div', { key: 'control', className: 'dsh-image-forge-setting-control' }, control),
-    // Hints may carry the runtime-directory token, which is substituted with the
-    // live value: an empty `modelsDir`/`pythonPath` follows `runtimeDir`, so the
-    // page has to show where it currently lands without freezing a path.
-    createElement('p', { key: 'hint', className: 'dsh-image-forge-setting-hint' }, resolveHint(field.hint, value)),
+    // Hints are plain text and may name a directory (`comfyModelsDir` names the
+    // one ComfyUI reads, `outputDir` the one images land in) — they are shown
+    // verbatim, with no token substitution to keep in step.
+    createElement('p', { key: 'hint', className: 'dsh-image-forge-setting-hint' }, field.hint),
     createElement('div', { key: 'status', className: 'dsh-image-forge-setting-status' }, status),
   ])
 }
@@ -690,139 +624,6 @@ function buildControl(
   ]
 }
 
-// ---------------------------------------------------------------------------
-// One-click local deploy (settings).
-// ---------------------------------------------------------------------------
-
-/** Loopback bridge the host half serves; see `src/deploy-server.ts`. */
-const DEPLOY_BASE = 'http://127.0.0.1:8411'
-
-/** Shape of `GET /status` from the deploy bridge. */
-interface DeployStatusPayload {
-  readonly deploying?: boolean
-  readonly phase?: string | null
-  readonly venv?: { readonly exists?: boolean }
-  readonly weights?: {
-    readonly ready?: boolean
-    readonly present?: number
-    readonly missing?: number
-    readonly total_MiB?: number
-  }
-  readonly last?: { readonly ok?: boolean; readonly message?: string; readonly at?: string } | null
-}
-
-/**
- * One-click deploy card: readiness chips + the button that runs venv install
- * and the 10.63 GiB weight fetch through the host-side bridge.
- *
- * @returns the block, or a notice when the bridge is unreachable.
- */
-function DeployBlock(): ReactNode {
-  const [status, setStatus] = useState<DeployStatusPayload | null>(null)
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    let stopped = false
-    const pull = (): void => {
-      void fetch(`${DEPLOY_BASE}/status`)
-        .then((response) => response.json() as Promise<DeployStatusPayload>)
-        .then((payload) => {
-          if (stopped) return
-          setStatus(payload)
-          setError(undefined)
-        })
-        .catch(() => {
-          if (stopped) return
-          setStatus(null)
-          setError('一键部署服务未响应（宿主插件未运行，或端口 8411 被占用）。')
-        })
-    }
-    pull()
-    const timer = setInterval(pull, 4000)
-    return () => {
-      stopped = true
-      clearInterval(timer)
-    }
-  }, [])
-
-  const deploy = (): void => {
-    setBusy(true)
-    setError(undefined)
-    void fetch(`${DEPLOY_BASE}/deploy`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dryRun: false, weights: true }),
-    })
-      .then(async (response) => {
-        const payload = (await response.json()) as { ok?: boolean; error?: string }
-        if (!response.ok || payload.ok === false) {
-          setError(payload.error ?? `部署失败（HTTP ${response.status}）`)
-        }
-        return fetch(`${DEPLOY_BASE}/status`)
-      })
-      .then((response) => response.json() as Promise<DeployStatusPayload>)
-      .then((payload) => {
-        setStatus(payload)
-        setBusy(false)
-      })
-      .catch((cause: unknown) => {
-        setError(cause instanceof Error ? cause.message : String(cause))
-        setBusy(false)
-      })
-  }
-
-  const venvOk = status?.venv?.exists === true
-  const weightsOk = status?.weights?.ready === true
-  const ready = venvOk && weightsOk
-  const deploying = status?.deploying === true || busy
-
-  return createElement('section', { className: 'dsh-image-forge-deploy', 'data-dsh-part': 'local-deploy' }, [
-    createElement('h4', { key: 'title', className: 'dsh-image-forge-deploy-title' }, '本地运行时一键部署'),
-    createElement(
-      'p',
-      { key: 'hint', className: 'dsh-image-forge-deploy-hint' },
-      '自动创建 venv、安装 CUDA torch，并下载 Qwen-Image nf4 权重（约 10.63 GiB）。自定义路径与镜像使用默认值，不在设置页暴露。',
-    ),
-    createElement('div', { key: 'chips', className: 'dsh-image-forge-row-meta' }, [
-      pill('venv', venvOk ? 'venv 就绪' : 'venv 未安装', venvOk ? 'ok' : 'warn'),
-      pill(
-        'weights',
-        weightsOk
-          ? `权重就绪 · ${status?.weights?.total_MiB ?? 0} MiB`
-          : `权重缺 ${status?.weights?.missing ?? '?'} 个文件`,
-        weightsOk ? 'ok' : 'warn',
-      ),
-      ...(status?.deploying === true && status.phase
-        ? [pill('phase', `部署中：${status.phase}`, 'warn')]
-        : []),
-      ...(status?.last
-        ? [
-            pill(
-              'last',
-              status.last.ok ? `上次成功${status.last.at ? '' : ''}` : '上次未完成',
-              status.last.ok ? 'ok' : 'bad',
-            ),
-          ]
-        : []),
-    ]),
-    createElement(
-      'button',
-      {
-        key: 'go',
-        type: 'button',
-        className: 'dsh-image-forge-deploy-go',
-        disabled: deploying,
-        onClick: deploy,
-      },
-      deploying ? '部署中…' : ready ? '重新部署' : '一键部署本地环境',
-    ),
-    ...(error !== undefined
-      ? [createElement('p', { key: 'error', className: 'dsh-image-forge-setting-failure' }, error)]
-      : []),
-  ])
-}
-
 /**
  * One titled block of fields.
  *
@@ -907,7 +708,9 @@ function AdvisoryBlock(props: { advisory: SettingsAdvisory }): ReactNode {
 function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNode {
   const form = props.form as ConfigFormLike<unknown> | undefined
   const [tick, setTick] = useState(0)
-  const [tabId, setTabId] = useState<string>(SETTINGS_TABS[0]?.id ?? 'generate')
+  // The Studio is listed first: it is the surface people open this page for,
+  // while the configuration rows below it are a setup task they finish once.
+  const [tabId, setTabId] = useState<string>(STUDIO_TAB_ID)
 
   useEffect(() => {
     if (form === undefined) return undefined
@@ -928,12 +731,36 @@ function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNo
     }
   }, [form])
 
+  const studioTab = createElement(
+    'button',
+    {
+      key: STUDIO_TAB_ID,
+      type: 'button',
+      role: 'tab',
+      className: tabId === STUDIO_TAB_ID ? 'dsh-image-forge-tab dsh-image-forge-tab-active' : 'dsh-image-forge-tab',
+      'aria-selected': tabId === STUDIO_TAB_ID,
+      onClick: () => setTabId(STUDIO_TAB_ID),
+    },
+    '图像工作台',
+  )
+
+  // A host that serves no config form still gets a usable workbench: the Studio
+  // route reads the config live on the host side, so nothing here needs the
+  // browser's form binding. Only the configuration rows disappear.
   if (form === undefined) {
-    return createElement(
-      'div',
-      { className: 'dsh-image-forge-settings-notice' },
-      props.unavailableReason ?? '配置表单不可用。',
-    )
+    return createElement('div', { className: 'dsh-image-forge-settings' }, [
+      createElement('div', { key: 'tabs', className: 'dsh-image-forge-tabs', role: 'tablist' }, [studioTab]),
+      createElement(
+        'div',
+        { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' },
+        createElement(StudioPanel),
+        createElement(
+          'div',
+          { key: 'notice', className: 'dsh-image-forge-settings-notice' },
+          props.unavailableReason ?? '配置表单不可用：本页只能出图，参数请在 profile 里改。',
+        ),
+      ),
+    ])
   }
 
   let snapshot: ReturnType<ConfigFormLike<unknown>['getSnapshot']> | undefined
@@ -958,61 +785,73 @@ function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNo
       (error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }),
     )
 
-  const activeTab = SETTINGS_TABS.find((tab) => tab.id === tabId) ?? SETTINGS_TABS[0]
+  const activeTab = tabId === STUDIO_TAB_ID ? undefined : SETTINGS_TABS.find((tab) => tab.id === tabId) ?? SETTINGS_TABS[0]
   const panels = activeTab === undefined ? [] : tabFields(activeTab)
+  const studioActive = activeTab === undefined
 
   return createElement('div', { className: 'dsh-image-forge-settings', 'data-dsh-tick': tick }, [
     createElement(
       'div',
       { key: 'tabs', className: 'dsh-image-forge-tabs', role: 'tablist' },
-      SETTINGS_TABS.map((tab) =>
-        createElement(
-          'button',
-          {
-            key: tab.id,
-            type: 'button',
-            role: 'tab',
-            className:
-              tab.id === activeTab?.id
-                ? 'dsh-image-forge-tab dsh-image-forge-tab-active'
-                : 'dsh-image-forge-tab',
-            'aria-selected': tab.id === activeTab?.id,
-            onClick: () => setTabId(tab.id),
-          },
-          tab.label,
-        ),
-      ),
-    ),
-    createElement(
-      'p',
-      { key: 'lead', className: 'dsh-image-forge-settings-lead' },
       [
-        activeTab?.hint ?? '',
-        disabled ? ' 当前配置条目为只读。' : ' 改动会立即写入。',
-      ]
-        .filter((part) => part.length > 0)
-        .join(' '),
+        studioTab,
+        ...SETTINGS_TABS.map((tab) =>
+          createElement(
+            'button',
+            {
+              key: tab.id,
+              type: 'button',
+              role: 'tab',
+              className:
+                tab.id === activeTab?.id
+                  ? 'dsh-image-forge-tab dsh-image-forge-tab-active'
+                  : 'dsh-image-forge-tab',
+              'aria-selected': tab.id === activeTab?.id,
+              onClick: () => setTabId(tab.id),
+            },
+            tab.label,
+          ),
+        ),
+      ],
     ),
-    createElement(
-      'div',
-      { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' },
-      panels.map(({ group, fields }) => {
-        const block = createElement(GroupBlock, {
-          key: group.id,
-          group,
-          fields,
-          value,
-          disabled,
-          write,
-          dense: true,
-          ...(group.id === 'local' ? { beforeFields: createElement(DeployBlock, { key: 'deploy' }) } : {}),
-        })
-        const advisory = advisoryAfterGroup(group.id)
-        return advisory === undefined
-          ? [block]
-          : [block, createElement(AdvisoryBlock, { key: advisory.id, advisory })]
-      }),
-    ),
+    // Exactly one sibling picks `panel`: the Studio workbench is the only tab
+    // that is not a config form, so it renders without the lead line that
+    // describes a config write. Both branches must sit in the *same* ternary —
+    // two independent ternaries would emit two `key: 'panel'` siblings and make
+    // React reconcile the wrong one on every tab switch.
+    studioActive
+      ? createElement(
+        'div',
+        { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' },
+        createElement(StudioPanel),
+      )
+      : createElement('div', { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' }, [
+        createElement(
+          'p',
+          { key: 'lead', className: 'dsh-image-forge-settings-lead' },
+          [
+            activeTab?.hint ?? '',
+            disabled ? ' 当前配置条目为只读。' : ' 改动会立即写入。',
+          ]
+            .filter((part) => part.length > 0)
+            .join(' '),
+        ),
+        ...panels.map(({ group, fields }) => {
+          const block = createElement(GroupBlock, {
+            key: group.id,
+            group,
+            fields,
+            value,
+            disabled,
+            write,
+            dense: true,
+          })
+          const advisory = advisoryAfterGroup(group.id)
+          return advisory === undefined
+            ? [block]
+            : [block, createElement(AdvisoryBlock, { key: advisory.id, advisory })]
+        }),
+      ]),
   ])
 }
 

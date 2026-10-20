@@ -33,12 +33,9 @@ export const MAX_SIDE = 4096
  * **5680–6016 MiB reserved / 5349–5358 MiB allocated**, so ~1.5 MP keeps at least
  * 2.1 GiB of headroom and is the default for **every** backend, not only ComfyUI.
  *
- * Those two numbers say nothing about the **local edit** path, which conditions on
- * reference images and is measured separately: on the same card a 1248×1248 edit
- * canvas (this table's `1:1`) does not survive at all, and **every one of the seven
- * default canvases lands above the reliable edit budget**. The i2i numbers — and
- * the gate the tool layer now derives from them — are
- * {@link LOCAL_EDIT_BUDGET_RELIABLE} and {@link LOCAL_EDIT_BUDGET_EDGE}.
+ * The **edit** path is measured separately and has no table of its own: ComfyUI
+ * scales the references to the canvas' own budget, so the same 1.5 MP ceiling
+ * applies and the seven defaults below are what both tools ask for.
  */
 export const DEFAULT_MEGAPIXELS = 1.5
 
@@ -58,152 +55,6 @@ export const DEFAULT_SIZES: Readonly<Record<WhRatio, readonly [number, number]>>
   '2:3': [1024, 1536],
   '16:9': [1664, 928],
   '9:16': [928, 1664],
-}
-
-/**
- * The reference-conditioning budget a canvas implies for the **local** backend.
- *
- * A side length whose square is the pixel budget the worker resizes every
- * reference image (and the condition latents) to; the worker uses it at
- * `resources/worker.py:244 / :246 / :289`. This mirror exists so the tool layer can
- * predict the load a local edit is about to ask for *before* spawning anything.
- *
- * Kept value-for-value equivalent to the worker's own
- * `min(4096, max(32, int(round(math.sqrt(width * height) / 32) * 32)))`:
- * `test/local-edit-budget.test.mjs` reads that Python source, evaluates the
- * extracted expression, and fails if the two sides ever disagree.
- *
- * This is the **derived** budget, i.e. the default. A user who sets the
- * `localReferenceBudget` config sends an explicit budget instead, and everything
- * that bands "how heavy is this edit" must then use
- * {@link resolveReferenceBudget} rather than this function.
- *
- * Python's `round` is half-to-even while `Math.round` is half-up, so the two can
- * only diverge on an exact `.5` — unreachable for 32-aligned sides, because
- * `w * h` is then a multiple of 1024 while `(32k + 16)² = 1024(k² + k) + 256` is
- * not. The test asserts that no tie exists on the grid rather than assuming it.
- *
- * @param width - canvas width in pixels.
- * @param height - canvas height in pixels.
- * @returns the 32-aligned conditioning side length, in [32, 4096].
- */
-export function referenceBudget(width: number, height: number): number {
-  return Math.min(4096, Math.max(32, Math.round(Math.sqrt(width * height) / 32) * 32))
-}
-
-/**
- * Conditioning budget a local edit is **reliably** expected to survive: **896**.
- *
- * Measured on the card class this plugin targets (RTX 4070 Laptop, 8188 MiB,
- * `_fresh2` venv, 1 step): canvas **1216×672** → budget 896 → condition 896×896 →
- * peak `reserved` **7458 MiB**, 3/3 runs bit-identical. This is *this card's* wall,
- * not a law about editing — it is this one card's measurement.
- *
- * The line is **budget-only**: it says nothing about the canvas's own cost. The
- * same 896 on a 1.5 MP canvas (1248×1248) measured **67 s/step** — no error, just
- * ~28 min for 25 steps — while 0.82 MP measured 1.9 s/step.
- */
-export const LOCAL_EDIT_BUDGET_RELIABLE = 896
-
-/**
- * Canvas area, in pixels, above which a local edit's budget stops being the whole
- * story: **1.0 MP**.
- *
- * The two measured endpoints are **0.82 MP** at budget 896 → 1.9 s/step
- * (1216×672) and **1.55 MP** at the *same* 896 → 67 s/step (1248×1248); 1.0 MP
- * sits between them, so this line is **interpolation, not a measurement** —
- * nothing has been run at 1.0 MP itself.
- */
-export const LOCAL_EDIT_CANVAS_WARN_AREA = 1_000_000
-
-/**
- * The only conditioning budget measured to **finish** on a 1.5 MP canvas: **512**.
- *
- * 1248×1248 + 512 → HTTP 200, wall 109.5 s, peak `reserved` **6488 MiB**, worker
- * alive; the same canvas at 896 never finished (two runs, 67 s/step, extrapolated
- * ≈28 min, **no error**).
- */
-export const LOCAL_EDIT_CANVAS_SAFE_BUDGET = 512
-
-/**
- * Conditioning budget a local edit may still **just** pass: **960**.
- *
- * Canvas 960×960 → budget 960 passed, but its peak `reserved` was **8492 MiB**,
- * i.e. **above this card's 8188 MiB total** — it only held because the driver fell
- * back to WDDM shared memory, and denoise took 21.19 s (≈ 2× the 928 tier). Above
- * this line the same card fails: 992–1024 in the GPU denoise stage, ≥1216 with a
- * native access violation in the CPU text-encode stage.
- */
-export const LOCAL_EDIT_BUDGET_EDGE = 960
-
-/** Which band a local edit's conditioning budget falls into. */
-export type LocalEditBudgetTier = 'reliable' | 'edge' | 'over'
-
-/** Smallest conditioning budget `localReferenceBudget` may be set to. */
-export const REFERENCE_BUDGET_MIN = 32
-
-/** Largest conditioning budget `localReferenceBudget` may be set to (the worker's own clamp). */
-export const REFERENCE_BUDGET_MAX = 4096
-
-/** The conditioning budget one local edit really runs at, and where it came from. */
-export interface EffectiveReferenceBudget {
-  /** The budget the worker is told to use, or asked to derive. */
-  readonly budget: number
-  /** `config` when an explicit budget overrode the canvas, `canvas` when it was derived. */
-  readonly source: 'config' | 'canvas'
-  /** What {@link referenceBudget} derives from the canvas, whether or not it is used. */
-  readonly canvasBudget: number
-}
-
-/**
- * Resolve the conditioning budget a local edit will actually condition at.
- *
- * Explicit beats derived, and the whole size gate keys off the result: a user who
- * sets `localReferenceBudget` to 512 is asking for *that* load, so a 1248×1248
- * canvas must be judged as a 512 edit rather than by the 1248 its area implies —
- * otherwise the knob could not make a 1.5 MP canvas runnable, which is what it is
- * for.
- *
- * `0`/`undefined` means "no override": the worker derives the budget from the
- * canvas itself (`resources/worker.py`'s `_reference_budget`), which is the
- * behaviour every release before this knob had.
- *
- * @param width - canvas width in pixels.
- * @param height - canvas height in pixels.
- * @param override - the configured budget; `0` or undefined for "derive".
- * @returns the effective budget, its source, and the canvas-derived one beside it.
- * @throws When the override is not `0` and not a 32-aligned value in
- *   [{@link REFERENCE_BUDGET_MIN}, {@link REFERENCE_BUDGET_MAX}], naming the
- *   accepted shape — a typo here would otherwise be silently honoured.
- */
-export function resolveReferenceBudget(width: number, height: number, override?: number): EffectiveReferenceBudget {
-  const canvasBudget = referenceBudget(width, height)
-  if (override === undefined || override === 0) return { budget: canvasBudget, source: 'canvas', canvasBudget }
-  if (
-    !Number.isInteger(override) ||
-    override < REFERENCE_BUDGET_MIN ||
-    override > REFERENCE_BUDGET_MAX ||
-    override % SIZE_MULTIPLE !== 0
-  ) {
-    throw new Error(
-      `localReferenceBudget must be 0 (= derive from the canvas) or a multiple of ${SIZE_MULTIPLE} ` +
-        `within [${REFERENCE_BUDGET_MIN}, ${REFERENCE_BUDGET_MAX}], got ${override}`,
-    )
-  }
-  return { budget: override, source: 'config', canvasBudget }
-}
-
-/**
- * Band a conditioning budget falls into, using the two measured lines.
- *
- * @param budget - {@link referenceBudget} of the requested canvas.
- * @returns `reliable` at or below {@link LOCAL_EDIT_BUDGET_RELIABLE}, `edge` up to
- *   {@link LOCAL_EDIT_BUDGET_EDGE}, `over` above it.
- */
-export function localEditBudgetTier(budget: number): LocalEditBudgetTier {
-  if (budget <= LOCAL_EDIT_BUDGET_RELIABLE) return 'reliable'
-  if (budget <= LOCAL_EDIT_BUDGET_EDGE) return 'edge'
-  return 'over'
 }
 
 /** A resolved, backend-ready canvas size. */

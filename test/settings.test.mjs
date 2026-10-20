@@ -58,8 +58,6 @@ import {
   isSecretField,
   missingFieldKeys,
   redactForLog,
-  resolveHint,
-  RUNTIME_DIR_TOKEN,
   staleFieldKeys,
   tabFields,
 } from '../testlib/settings-fields.js'
@@ -69,6 +67,38 @@ const CLIENT_SOURCE = readFileSync(fileURLToPath(new URL('../lib/client.js', imp
 
 /** A plaintext that must never surface in any display string or message. */
 const PLAINTEXT_KEY = 'sk-live-DO-NOT-LEAK-0123456789abcdef'
+
+/**
+ * Every config field the plugin may not reintroduce.
+ *
+ * The plugin owns no local runtime any more: no venv, no weight cache, no managed
+ * worker process. Each of these used to be a control on this page, so a
+ * regression that brings one back shows up here as a name rather than as a
+ * count that nobody can explain.
+ */
+const RETIRED_FIELDS = [
+  'localEndpoint',
+  'runtimeDir',
+  'modelsDir',
+  'modelRepo',
+  'hfMirror',
+  'workerPorts',
+  'workerStartTimeoutMs',
+  'idleUnloadMs',
+  'manageWorker',
+  'pythonPath',
+  'workerScript',
+  'basePython',
+  'torchWheels',
+  'pipIndexUrl',
+  'reuseBaseTorch',
+  'minFreeVramMiB',
+  'freeComfyBeforeLocalStart',
+  'allowLocalEditOverBudget',
+  'localReferenceBudget',
+  'skipLmHead',
+  'localSteps',
+]
 
 // ---------------------------------------------------------------------------
 // Fakes for the Host-provided services.
@@ -332,22 +362,22 @@ test('a successful write goes through the bound form with the field and value', 
 })
 
 test('clearing a field goes through unset', async () => {
-  const inner = fakeForm({ value: { modelsDir: '/x' } })
+  const inner = fakeForm({ value: { comfyModelsDir: '/x' } })
   const form = createResolvedEntryForm({ forms: fakeForms(['dsh-image-forge']), entryIds: SETTINGS_ENTRY_IDS })
   form.rebind()
-  const outcome = await saveField(form, 'modelsDir', undefined)
+  const outcome = await saveField(form, 'comfyModelsDir', undefined)
   assert.deepEqual(inner.calls, [], 'the unbound form is the only one this fake served')
   assert.equal(outcome.ok, false)
 })
 
 test('clearing a bound field goes through the bound form\'s unset', async () => {
-  const inner = fakeForm({ value: { modelsDir: '/x' } })
+  const inner = fakeForm({ value: { comfyModelsDir: '/x' } })
   const forms = fakeForms(['dsh-image-forge'])
   forms.table.set('dsh-image-forge', inner)
   const form = createResolvedEntryForm({ forms, entryIds: SETTINGS_ENTRY_IDS })
-  const outcome = await saveField(form, 'modelsDir', undefined)
+  const outcome = await saveField(form, 'comfyModelsDir', undefined)
   console.log('unset calls:', JSON.stringify(inner.calls))
-  assert.deepEqual(inner.calls, [{ op: 'unset', field: 'modelsDir' }])
+  assert.deepEqual(inner.calls, [{ op: 'unset', field: 'comfyModelsDir' }])
   assert.equal(outcome.ok, true)
 })
 
@@ -370,7 +400,7 @@ test('a revision that moved under us is reported as a conflict, and re-read rath
       return false
     },
   })
-  const outcome = await saveField(inner, 'backend', 'local')
+  const outcome = await saveField(inner, 'backend', 'comfyui')
   console.log('conflict outcome:', JSON.stringify(outcome))
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'conflict')
@@ -385,7 +415,7 @@ test('a revision that moved under us is reported as a conflict, and re-read rath
 
 test('a refusal that did not move the revision is reported as a plain refusal', async () => {
   const inner = fakeForm({ revision: 4, onSet: () => false })
-  const outcome = await saveField(inner, 'backend', 'local')
+  const outcome = await saveField(inner, 'backend', 'comfyui')
   console.log('refusal outcome:', JSON.stringify(outcome))
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'refused')
@@ -399,7 +429,7 @@ test('a rejecting transport is surfaced, never swallowed', async () => {
       throw new Error('transport down')
     },
   })
-  const outcome = await saveField(inner, 'backend', 'local')
+  const outcome = await saveField(inner, 'backend', 'comfyui')
   console.log('transport failure outcome:', JSON.stringify(outcome))
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'error')
@@ -411,7 +441,7 @@ test('a form whose set throws synchronously is reported too', async () => {
   inner.set = () => {
     throw new Error('sync boom')
   }
-  const outcome = await saveField(inner, 'backend', 'local')
+  const outcome = await saveField(inner, 'backend', 'comfyui')
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'error')
   assert.match(outcome.message, /sync boom/)
@@ -493,9 +523,11 @@ test('redactForLog masks a secret and keeps ordinary values readable', () => {
   assert.equal(redactForLog('apiKey', ''), '（空）')
   assert.ok(!redactForLog('apiKey', PLAINTEXT_KEY).includes(PLAINTEXT_KEY))
   assert.equal(redactForLog('apiModel', 'qwen-image'), 'qwen-image')
-  assert.equal(redactForLog('manageWorker', true), '开')
-  assert.equal(redactForLog('manageWorker', false), '关')
   assert.equal(redactForLog('timeoutMs', 180000), '180000')
+  // No boolean control survives on the page, but the renderer still knows how to
+  // show one: the next flag must not have to re-invent this.
+  assert.equal(redactForLog('someFutureFlag', true), '开')
+  assert.equal(redactForLog('someFutureFlag', false), '关')
 })
 
 // ---------------------------------------------------------------------------
@@ -541,15 +573,15 @@ test('unwrapConfigFields turns a mixed object into plain data', () => {
 })
 
 test('resolving over the defaults keeps falsy values instead of falling back', () => {
-  const defaults = { manageWorker: true, timeoutMs: 180000, apiKey: 'default-key', backend: 'auto' }
+  const defaults = { someFlag: true, timeoutMs: 180000, apiKey: 'default-key', backend: 'auto' }
   const resolved = resolveConfigFields(defaults, {
-    manageWorker: { get: () => false },
+    someFlag: { get: () => false },
     timeoutMs: { get: () => 1000 },
     apiKey: { get: () => '' },
     // `backend` is left out entirely and must keep its default.
   })
   console.log('resolved over defaults:', JSON.stringify(resolved))
-  assert.equal(resolved.manageWorker, false, 'an explicit false must not fall back to the default')
+  assert.equal(resolved.someFlag, false, 'an explicit false must not fall back to the default')
   assert.equal(resolved.timeoutMs, 1000)
   assert.equal(resolved.apiKey, '', 'an explicit empty string must not fall back to the default')
   assert.equal(resolved.backend, 'auto', 'a missing field keeps its default')
@@ -564,20 +596,18 @@ test('the real schema defaults survive a resolve round trip as plain data', () =
   const resolved = resolveConfigFields(schemaDefaults(plugin.Config({})), plugin.Config({}))
   const kinds = new Set(Object.values(resolved).filter((value) => value !== undefined).map((value) => typeof value))
   console.log('resolved value types:', JSON.stringify([...kinds]))
-  assert.deepEqual([...kinds].sort(), ['boolean', 'number', 'string'])
+  assert.deepEqual([...kinds].sort(), ['number', 'string'], 'the surviving fields are strings and numbers only')
   assert.equal(resolved.backend, 'auto')
-  assert.equal(resolved.manageWorker, true)
   assert.equal(resolved.apiStyle, 'openai')
   assert.equal(resolved.timeoutMs, 180000)
   assert.equal(resolved.defaultSteps, 25)
+  assert.equal(resolved.comfyModel, 'base')
   // The two overrides are declared-but-unset, which is a real state: the key
   // exists and its value is undefined, so the resolver falls through.
-  assert.equal(Object.keys(resolved).length, 33)
+  assert.equal(Object.keys(resolved).length, 14, 'the documented field count')
   assert.ok('comfyuiSteps' in resolved, 'a nullable field must keep its key')
   assert.equal(resolved.comfyuiSteps, undefined)
-  assert.equal(resolved.localSteps, undefined)
-  // The local-edit size gate's opt-in is off unless a user turns it on.
-  assert.equal(resolved.allowLocalEditOverBudget, false)
+  assert.equal(resolved.turboSteps, undefined)
 })
 
 // ---------------------------------------------------------------------------
@@ -601,54 +631,49 @@ test('every field in the config schema has a control on the settings page', () =
   assert.deepEqual(missing, [], 'these config fields have no control on the settings page')
   assert.deepEqual(stale, [], 'the settings page renders controls for fields the schema does not declare')
   assert.equal(SETTINGS_FIELD_KEYS.length, declared.length)
-  assert.equal(declared.length, 33, 'the documented field count')
-  // Custom environment plumbing is schema-only: the page must not show it.
-  assert.ok(HIDDEN_FIELD_KEYS.includes('pythonPath'), 'pythonPath stays off the page')
-  assert.ok(HIDDEN_FIELD_KEYS.includes('torchWheels'), 'torchWheels stays off the page')
-  assert.ok(HIDDEN_FIELD_KEYS.includes('runtimeDir'), 'runtimeDir stays off the page')
-  assert.ok(VISIBLE_FIELD_KEYS.includes('minFreeVramMiB'), 'the VRAM floor stays on the page')
-  assert.ok(VISIBLE_FIELD_KEYS.includes('localReferenceBudget'), 'the reference budget stays on the page')
-  // The newest additions are named so a regression that drops one is diagnosable
-  // rather than just a count mismatch.
-  for (const key of ['defaultSteps', 'comfyuiSteps', 'localSteps', 'allowLocalEditOverBudget', 'localReferenceBudget']) {
+  assert.equal(declared.length, 14, 'the documented field count')
+  // Nothing is hidden: the page shows every remaining field, because none of
+  // them is plumbing any more.
+  assert.deepEqual(HIDDEN_FIELD_KEYS, [], 'no surviving field is hidden')
+  // The turbo pair is the newest thing on the page, so name it: a regression that
+  // drops one reads as "what is missing" rather than "14 !== 13".
+  for (const key of ['comfyModel', 'turboSteps', 'comfyEndpoint', 'comfyPorts', 'comfyModelsDir']) {
     assert.ok(declared.includes(key), `${key} must be a schema field`)
     assert.ok(SETTINGS_FIELD_KEYS.includes(key), `${key} must have a control`)
   }
 })
 
-test('the local-edit size gate has a control that says what it overrides', () => {
-  const byKey = Object.fromEntries(SETTINGS_FIELDS.map((field) => [field.key, field]))
-  const field = byKey.allowLocalEditOverBudget
-  console.log('allowLocalEditOverBudget control:', JSON.stringify(field))
-  assert.equal(field.group, 'local')
-  assert.equal(field.kind, 'boolean')
-  // The control is only honest if the page says the default is a refusal, because
-  // the failure it opts out of is not the VRAM-gate one the neighbouring control
-  // explains.
-  assert.match(field.hint, /拒绝/)
-  assert.match(field.hint, /风险/)
-  assert.equal(byKey.minFreeVramMiB.kind, 'number')
-  assert.match(byKey.minFreeVramMiB.hint, /加载期门禁/)
-  assert.match(byKey.minFreeVramMiB.hint, /不是编辑尺寸门/)
+test('the retired local-runtime fields are gone from both the schema and the page', () => {
+  const declared = schemaKeys()
+  for (const retired of RETIRED_FIELDS) {
+    assert.ok(!declared.includes(retired), `${retired} is back in the config schema`)
+    assert.ok(!SETTINGS_FIELD_KEYS.includes(retired), `${retired} is back on the settings page`)
+  }
 })
 
-test('the reference-budget control states its default, its effect and its unmeasured cost', () => {
+test('the backend control offers exactly the two surviving backends', () => {
+  const field = fieldByKey('backend')
+  console.log('backend control:', JSON.stringify(field))
+  assert.equal(field.kind, 'enum')
+  assert.deepEqual(field.choices.map((choice) => choice.value), ['auto', 'api', 'comfyui'])
+  // The hint has to say what auto means and that editing is ComfyUI-only, because
+  // those two facts decide which tab a user has to fill in.
+  assert.match(field.hint, /auto/)
+  assert.match(field.hint, /改图只有 ComfyUI/)
+})
+
+test('the weight-family control states the trade and the fallback', () => {
   const byKey = Object.fromEntries(SETTINGS_FIELDS.map((field) => [field.key, field]))
-  const field = byKey.localReferenceBudget
-  console.log('localReferenceBudget control:', JSON.stringify(field))
-  assert.equal(field.group, 'local')
-  assert.equal(field.kind, 'number')
-  // 0 has to read as "derive from the canvas", not as a zero-pixel budget.
-  assert.equal(field.min, 0)
-  assert.match(field.hint, /0=按画布推导/)
-  assert.match(field.hint, /降参考图分辨率/)
-  // The fidelity side is a 1-image, 1-judge comparison (the local matrix): the page states
-  // that shape, and must not present it as a measurement or as blanket "unmeasured".
-  assert.match(field.hint, /目视无差/)
-  assert.match(field.hint, /n=1/)
-  assert.ok(!field.hint.includes('未测'), 'the withdrawn blanket fidelity claim is back')
-  // The schema agrees with the control about what "unset" is.
-  assert.equal(plugin.Config({}).localReferenceBudget.get(), 0)
+  const field = byKey.comfyModel
+  console.log('comfyModel control:', JSON.stringify(field))
+  assert.equal(field.group, 'steps')
+  assert.equal(field.kind, 'enum')
+  assert.deepEqual(field.choices.map((choice) => choice.value), ['base', 'turbo'])
+  assert.match(field.hint, /8 步/)
+  assert.match(field.hint, /2\.7/)
+  // turbo is a request, not a guarantee — the page has to say what happens when
+  // the turbo weights are not installed.
+  assert.match(field.hint, /退回 base/)
 })
 
 test('the step controls state the tradeoff and mark the two overrides nullable', () => {
@@ -656,22 +681,21 @@ test('the step controls state the tradeoff and mark the two overrides nullable',
   console.log('step hints:', JSON.stringify({
     defaultSteps: byKey.defaultSteps.hint,
     comfyuiSteps: byKey.comfyuiSteps.hint,
-    localSteps: byKey.localSteps.hint,
+    turboSteps: byKey.turboSteps.hint,
   }, null, 2))
   assert.equal(byKey.defaultSteps.group, 'steps')
   assert.equal(byKey.defaultSteps.kind, 'number')
   assert.equal(byKey.defaultSteps.nullable, undefined, 'the shared default is not nullable')
-  for (const key of ['comfyuiSteps', 'localSteps']) {
+  for (const key of ['comfyuiSteps', 'turboSteps']) {
     assert.equal(byKey[key].group, 'steps')
     assert.equal(byKey[key].kind, 'number')
     assert.equal(byKey[key].nullable, true, `${key} must be clearable back to unset`)
     assert.equal(byKey[key].min, 1)
   }
-  // The tradeoff has to be on the page, not only in the shipped prose: the slow-but-
-  // official option and the fast-but-unofficial one must both be spelled out.
-  assert.match(byKey.localSteps.hint, /2\.7/)
-  assert.match(byKey.localSteps.hint, /25/)
-  assert.match(byKey.localSteps.hint, /8/)
+  // turbo's own default is the distilled 8, and the hint must not let a user
+  // think raising it is free.
+  assert.match(byKey.turboSteps.hint, /留空 = 8/)
+  assert.match(byKey.turboSteps.hint, /不一定更好/)
 })
 
 test('the config keys really are volatile references, and resolve back to plain data', () => {
@@ -693,21 +717,25 @@ test('the settings tabs cover every visible group exactly once', () => {
     assert.ok(tab.label.length > 0 && tab.hint.length > 0, `tab ${tab.id} needs a label and hint`)
     assert.ok(tabFields(tab).length > 0, `tab ${tab.id} must not be empty`)
   }
-  // The local tab is where the deploy card lives.
-  const localTab = SETTINGS_TABS.find((tab) => tab.id === 'local')
-  assert.ok(localTab, 'a local tab is required for the deploy card')
-  assert.ok(tabFields(localTab).some(({ group }) => group.id === 'local'))
   console.log(
     'tabs:',
     JSON.stringify(SETTINGS_TABS.map((tab) => `${tab.label}(${tabFields(tab).map((e) => e.group.id).join('+')})`)),
   )
 })
 
+test('the ComfyUI tab points at the deployment document', () => {
+  // A user who has no ComfyUI yet lands on this tab first; the one thing it must
+  // not do is leave them to guess. The document is asserted to exist below.
+  const tab = SETTINGS_TABS.find((candidate) => candidate.id === 'comfyui')
+  assert.ok(tab, 'the ComfyUI tab must exist')
+  assert.match(tab.hint, /docs\/comfyui-deployment\.md/)
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  assert.ok(existsSync(join(root, 'docs', 'comfyui-deployment.md')), 'the cited deployment document must ship')
+})
+
 test('the section groups every visible field exactly once and every group is non-empty', () => {
   const buckets = groupedFields()
   const seen = buckets.flatMap(({ fields }) => fields.map((field) => field.key))
-  // Hidden custom-env controls stay in the schema but never reach the page, so
-  // the buckets must cover exactly the visible set.
   assert.deepEqual([...seen].sort(), [...VISIBLE_FIELD_KEYS].sort())
   assert.equal(new Set(seen).size, seen.length, 'a field must not appear in two groups')
   const groupIds = SETTINGS_GROUPS.map((group) => group.id)
@@ -720,8 +748,11 @@ test('the section groups every visible field exactly once and every group is non
       `group ${group.id} must not carry hidden fields`,
     )
   }
-  // The whole python block is hidden: it must not appear as an empty heading.
-  assert.ok(!buckets.some(({ group }) => group.id === 'python'), 'the python group must be gone from the page')
+  // The whole python / local-runtime block is gone: it must not appear as an
+  // empty heading either.
+  for (const retiredGroup of ['python', 'local']) {
+    assert.ok(!buckets.some(({ group }) => group.id === retiredGroup), `the ${retiredGroup} group must be gone`)
+  }
   console.log('groups:', JSON.stringify(buckets.map(({ group, fields }) => `${group.label}=${fields.length}`)))
 })
 
@@ -761,23 +792,20 @@ test('every enum control offers the value its schema field defaults to', () => {
 // The sampler-step policy.
 // ---------------------------------------------------------------------------
 
-test('resolveSteps follows explicit > backend override > default', async () => {
+test('resolveSteps follows explicit > comfyui override > default, and api has no override', async () => {
   const { resolveSteps } = await import('../testlib/tools.js')
-  /** A settings stub carrying only the three fields the resolver reads. */
-  const withSteps = (defaultSteps, comfyuiSteps, localSteps) => ({ defaultSteps, comfyuiSteps, localSteps })
+  /** A settings stub carrying only the fields the resolver reads. */
+  const withSteps = (defaultSteps, comfyuiSteps) => ({ defaultSteps, comfyuiSteps })
 
   const cases = [
     // label, explicit, backend, settings, expected
-    ['explicit beats everything (comfyui)', 12, 'comfyui', withSteps(25, 30, 8), { steps: 12, source: 'explicit' }],
-    ['explicit beats everything (local)', 6, 'local', withSteps(25, 30, 8), { steps: 6, source: 'explicit' }],
-    ['explicit beats everything (api)', 20, 'api', withSteps(25, 30, 8), { steps: 20, source: 'explicit' }],
-    ['comfyui takes its own override', undefined, 'comfyui', withSteps(25, 30, 8), { steps: 30, source: 'backend' }],
-    ['local takes its own override', undefined, 'local', withSteps(25, 30, 8), { steps: 8, source: 'backend' }],
-    ['api has no override, so it falls through', undefined, 'api', withSteps(25, 30, 8), { steps: 25, source: 'default' }],
-    ['an unset comfyui override falls through', undefined, 'comfyui', withSteps(25, undefined, 8), { steps: 25, source: 'default' }],
-    ['an unset local override falls through', undefined, 'local', withSteps(25, 30, undefined), { steps: 25, source: 'default' }],
-    ['the shipped defaults resolve to 25', undefined, 'local', withSteps(25, undefined, undefined), { steps: 25, source: 'default' }],
-    ['a non-positive override is ignored', undefined, 'local', withSteps(25, undefined, 0), { steps: 25, source: 'default' }],
+    ['explicit beats everything (comfyui)', 12, 'comfyui', withSteps(25, 30), { steps: 12, source: 'explicit' }],
+    ['explicit beats everything (api)', 20, 'api', withSteps(25, 30), { steps: 20, source: 'explicit' }],
+    ['comfyui takes its own override', undefined, 'comfyui', withSteps(25, 30), { steps: 30, source: 'backend' }],
+    ['api has no override, so it falls through', undefined, 'api', withSteps(25, 30), { steps: 25, source: 'default' }],
+    ['an unset comfyui override falls through', undefined, 'comfyui', withSteps(25, undefined), { steps: 25, source: 'default' }],
+    ['the shipped defaults resolve to 25', undefined, 'comfyui', withSteps(25, undefined), { steps: 25, source: 'default' }],
+    ['a non-positive override is ignored', undefined, 'comfyui', withSteps(25, 0), { steps: 25, source: 'default' }],
   ]
   for (const [label, explicit, backend, settings, expected] of cases) {
     const actual = resolveSteps(explicit, backend, settings)
@@ -786,21 +814,36 @@ test('resolveSteps follows explicit > backend override > default', async () => {
   }
 })
 
+test('resolveTurboSteps never borrows the base family\'s 25', async () => {
+  const { resolveTurboSteps } = await import('../testlib/tools.js')
+  // The distilled checkpoint is tuned for 8 steps: handing it the base family's
+  // 25 makes the picture worse, so the fallthrough must be the turbo default and
+  // never `defaultSteps` / `comfyuiSteps`.
+  const settings = { defaultSteps: 25, comfyuiSteps: 30, turboSteps: undefined }
+  assert.deepEqual(resolveTurboSteps(undefined, settings), { steps: 8, source: 'default' })
+  assert.deepEqual(resolveTurboSteps(undefined, { ...settings, turboSteps: 6 }), { steps: 6, source: 'backend' })
+  assert.deepEqual(resolveTurboSteps(4, { ...settings, turboSteps: 6 }), { steps: 4, source: 'explicit' })
+  assert.deepEqual(
+    resolveTurboSteps(undefined, { ...settings, turboSteps: 0 }),
+    { steps: 8, source: 'default' },
+    'a non-positive override must not be honoured',
+  )
+})
+
 test('the resolved step count is what reaches each backend, and the result says so', () => {
   // `resolveSteps` is unit-tested above; this asserts the *wiring* is present in
   // the bundle the Host loads. Whether "no explicit steps" really puts 25 on the
   // wire is not covered by a test here — the e2e harnesses that could observe it
-  // (api-e2e / comfyui-e2e / worker-lifecycle) exercise the explicit path, and
-  // they do assert those explicit values (20 / 12 / 8) arrive unchanged.
+  // (api-e2e / comfyui-e2e) exercise the explicit path, and they do assert those
+  // explicit values arrive unchanged.
   const source = readFileSync(fileURLToPath(new URL('../lib/index.js', import.meta.url)), 'utf8')
-  for (const needle of ['steps_used', 'steps_source', 'resolveSteps', 'comfyuiSteps', 'localSteps', 'defaultSteps']) {
+  for (const needle of ['steps_used', 'steps_source', 'resolveSteps', 'comfyuiSteps', 'defaultSteps', 'turboSteps']) {
     assert.match(source, new RegExp(needle), `${needle} must be present in the host bundle`)
   }
   // Every dispatch site must pass a resolved count rather than the raw request.
   // Anchored on `await` so the callee's own definition — whose first parameter
   // is also named `request` — cannot produce a false positive.
   const rawSites = [
-    /await generateWithWorker\(runtime, request,/,
     /await generateViaComfyUi\(target, models, request,/,
     /await generateViaComfyUiEdit\(target, models, request,/,
     /await generateViaApi\(apiSettings, request,/,
@@ -810,12 +853,20 @@ test('the resolved step count is what reaches each backend, and the result says 
   }
   // And the positive half: every dispatch site carries a resolved count. The
   // bundle wraps these object literals across lines, so this counts the markers
-  // rather than trying to match one line.
+  // rather than trying to match one line. The turbo dispatch sites resolve
+  // through `resolveTurboSteps` (a distilled checkpoint must never borrow the
+  // base family's 25), so both resolvers count.
+  //
+  // Three base sites: generate-via-api, generate-via-comfyui, edit-via-comfyui.
+  // Two turbo sites: the same generate/edit pair. Five forwards: every call that
+  // actually reaches a backend.
   const resolved = source.match(/resolveSteps\(steps, "/g) ?? []
+  const turboResolved = source.match(/resolveTurboSteps\(steps, settings\)/g) ?? []
   const forwarded = source.match(/steps: usedSteps\.steps/g) ?? []
-  console.log('resolveSteps call sites:', resolved.length, '/ resolved-count forwards:', forwarded.length)
-  assert.equal(resolved.length, 7, 'all seven dispatch sites (api/local/comfyui + fallbacks, generate + edit) must resolve')
-  assert.equal(forwarded.length, 7, 'each dispatch site must forward the resolved count, not the raw request')
+  console.log('resolveSteps call sites:', resolved.length, '/ turbo sites:', turboResolved.length, '/ resolved-count forwards:', forwarded.length)
+  assert.equal(resolved.length, 3, 'all three base dispatch sites must resolve')
+  assert.equal(turboResolved.length, 2, 'both turbo dispatch sites (generate + edit) must resolve through the turbo resolver')
+  assert.equal(forwarded.length, 5, 'each of the five dispatch sites must forward the resolved count, not the raw request')
 })
 
 // ---------------------------------------------------------------------------
@@ -828,7 +879,7 @@ test('the resolved step count is what reaches each backend, and the result says 
 const ADVISORY_TEXT = advisoryText(BACKEND_PERF_ADVISORY)
 
 /**
- * The shipped prose surface, which is where the advisory's evidence now lives.
+ * The shipped prose surface, which is where the advisory's evidence lives.
  *
  * That surface used to be the README alone, which is why the binding below keeps
  * its old name. The 734-line README was split into a quick-reference page plus
@@ -847,23 +898,20 @@ const README_SOURCE = [
     .map((name) => readFileSync(join(DOCS_DIR, name), 'utf8')),
 ].join('\n')
 
-test('the advisory states the conclusion and the numbers, in two lines', () => {
+test('the advisory states the turbo/base conclusion and the numbers, in two lines', () => {
   console.log('--- advisory as rendered ---\n' + ADVISORY_TEXT + '\n--- end ---')
-  assert.equal(BACKEND_PERF_ADVISORY.id, 'backend-perf')
-  assert.equal(BACKEND_PERF_ADVISORY.placedAfterGroup, 'backend')
+  assert.equal(BACKEND_PERF_ADVISORY.id, 'turbo-vs-base')
+  assert.equal(BACKEND_PERF_ADVISORY.placedAfterGroup, 'steps')
   // The recommendation the user asked to keep on the page.
-  assert.match(BACKEND_PERF_ADVISORY.title, /8 GB/)
-  assert.match(BACKEND_PERF_ADVISORY.title, /参考图编辑/)
-  assert.match(BACKEND_PERF_ADVISORY.title, /comfyui/)
+  assert.match(BACKEND_PERF_ADVISORY.title, /turbo/)
+  assert.match(BACKEND_PERF_ADVISORY.title, /8 步/)
+  assert.match(BACKEND_PERF_ADVISORY.title, /base/)
   assert.equal(BACKEND_PERF_ADVISORY.paragraphs.length, 2, 'two lines, not a page of evidence')
-  // The headline numbers, and the one caveat that stops 2.77x being misread.
-  assert.match(ADVISORY_TEXT, /19–23 s/)
-  assert.match(ADVISORY_TEXT, /219 s/)
-  assert.match(ADVISORY_TEXT, /2\.77×/)
-  assert.match(ADVISORY_TEXT, /量化档不同/)
-  assert.match(ADVISORY_TEXT, /不是纯后端差异/)
-  // And it must tell the reader where the reasoning went.
-  assert.match(ADVISORY_TEXT, /README/)
+  // The blind-test score, the per-image times and the three题材 turbo loses on.
+  assert.match(ADVISORY_TEXT, /3 : 2|3:2/)
+  assert.match(ADVISORY_TEXT, /27–29 s/)
+  assert.match(ADVISORY_TEXT, /9–11 s/)
+  assert.match(ADVISORY_TEXT, /中文小字/)
 })
 
 test('the advisory and every hint stay inside their text budget', () => {
@@ -878,18 +926,14 @@ test('the advisory and every hint stay inside their text budget', () => {
   // which is the one thing that makes those two fields legible. Hints containing a
   // path separator therefore get their own, larger ceiling.
   const MAX_FIELD_HINT_PATHED = 110
-  const MAX_GROUP_HINT = 20
-  const MAX_ADVISORY = 400
-  // Raised twice, each time by exactly what the new control costs, so the slack the
-  // earlier fields left is untouched: `allowLocalEditOverBudget` (the opt-out from a
-  // measured hard failure) cost 34 characters, and `localReferenceBudget` (the knob
-  // that is what makes a 1.5 MP canvas runnable at all) cost 34 more. A later local run then
-  // replaced that hint's blanket "unmeasured fidelity cost" with the shape of the
-  // measurement it has (512 vs 896 on one canvas, n=1): +14 characters, and the
-  // phrase does not fit in the 40-character hint budget in full — the argument lives
-  // in the shipped prose and the tool text.
-  const MAX_FIELD_TOTAL = 1264
-  const MAX_GROUP_TOTAL = 150
+  const MAX_GROUP_HINT = 36
+  const MAX_ADVISORY = 180
+  // The totals were reset with the local-runtime teardown: 14 controls replaced
+  // 35, and the surviving hints were rewritten around turbo/base. The slack over
+  // the measured 459 / 117 is deliberately thin — the next addition has to argue
+  // for its characters here.
+  const MAX_FIELD_TOTAL = 470
+  const MAX_GROUP_TOTAL = 125
 
   const longestField = SETTINGS_FIELDS.reduce(
     (worst, field) => (field.hint.length > worst.hint.length ? field : worst),
@@ -923,31 +967,6 @@ test('the advisory and every hint stay inside their text budget', () => {
   assert.ok(ADVISORY_TEXT.length <= MAX_ADVISORY, `the advisory is ${ADVISORY_TEXT.length} chars`)
   assert.ok(fieldTotal <= MAX_FIELD_TOTAL, `field text totals ${fieldTotal} chars`)
   assert.ok(groupTotal <= MAX_GROUP_TOTAL, `group text totals ${groupTotal} chars`)
-
-  // The static budget is not the whole story for the two derived-path hints:
-  // they carry a token that is replaced by the *live* runtime directory, so what
-  // the user sees is longer than what is authored. Measure that too, using the
-  // shipped default — this is the number that has to stay readable.
-  const liveRuntimeDir = plugin.Config({}).runtimeDir.get()
-  const hinted = SETTINGS_FIELDS.filter((field) => field.hint.includes(RUNTIME_DIR_TOKEN))
-  console.log('path hints rendered with the live runtimeDir:', JSON.stringify(
-    hinted.map((field) => [field.key, resolveHint(field.hint, { runtimeDir: liveRuntimeDir })]),
-    null,
-    2,
-  ))
-  assert.ok(hinted.length >= 2, 'modelsDir and pythonPath should show their derived path')
-  for (const field of hinted) {
-    const rendered = resolveHint(field.hint, { runtimeDir: liveRuntimeDir })
-    assert.ok(!rendered.includes(RUNTIME_DIR_TOKEN), `${field.key} left the token unresolved`)
-    assert.ok(rendered.includes(liveRuntimeDir), `${field.key} must show the live runtime directory`)
-    assert.ok(
-      rendered.length <= MAX_FIELD_HINT_PATHED,
-      `${field.key} renders to ${rendered.length} chars, over the ${MAX_FIELD_HINT_PATHED} budget`,
-    )
-  }
-  // An unresolved token must survive rather than render a wrong path.
-  assert.match(resolveHint('留空 = 跟随：<运行时目录>\\x', undefined), /<运行时目录>/)
-  assert.match(resolveHint('留空 = 跟随：<运行时目录>\\x', {}), /<运行时目录>/)
 })
 
 test('the withdrawn and falsified figures never come back', () => {
@@ -955,7 +974,7 @@ test('the withdrawn and falsified figures never come back', () => {
   // divided by steps and are withdrawn. `37 s` is the contaminated historical
   // reading the sweep could not reproduce (4 steps measures 18.81 s). Keeping
   // this list is the point: it pins "do not reintroduce that mistake".
-  const withdrawn = ['8 倍', '15 倍', '7.75', '0.98', '36–43', '2.4–2.9', '37 s', '口径存疑']
+  const withdrawn = ['8 倍', '15 倍', '7.75', '0.98', '36–43', '2.4–2.9', '37 s', '口径存疑', '219 s', '2.77×']
   for (const needle of withdrawn) {
     assert.ok(!ADVISORY_TEXT.includes(needle), `a withdrawn or falsified figure is back: ${needle}`)
   }
@@ -977,20 +996,7 @@ test('the advisory promises no fix, and the shipped prose keeps the honest verdi
 test('the moved evidence is in the shipped prose and no longer on the page', () => {
   // Everything the page used to carry. It must be findable in the prose surface
   // (the README plus `docs/*.md`)...
-  const evidence = [
-    '0.727',
-    '2.014',
-    '60.3%',
-    'kDequantizeBlockwise',
-    'convrot_w4a4_linear',
-    '3.6 GiB',
-    'cudaMallocAsync',
-    '24.06',
-    '8666',
-    'WDDM',
-    '18.81',
-    '28.20',
-  ]
+  const evidence = ['0.727', '2.014', '60.3%', 'kDequantizeBlockwise', 'convrot_w4a4_linear', '3.6 GiB', 'cudaMallocAsync', '24.06', '8666', 'WDDM', '18.81', '28.20']
   for (const needle of evidence) {
     assert.ok(README_SOURCE.includes(needle), `the shipped prose lost the evidence: ${needle}`)
     assert.ok(!ADVISORY_TEXT.includes(needle), `the evidence is still on the page: ${needle}`)
@@ -1023,65 +1029,35 @@ test('the path fields default to real, resolved values rather than blanks', () =
   const resolved = plugin.Config({})
   const value = (key) => (typeof resolved[key]?.get === 'function' ? resolved[key].get() : resolved[key])
   console.log('detected defaults:', JSON.stringify({
-    runtimeDir: value('runtimeDir'),
-    modelsDir: value('modelsDir'),
-    pythonPath: value('pythonPath'),
-    workerScript: value('workerScript'),
-    basePython: value('basePython'),
+    outputDir: value('outputDir'),
     comfyModelsDir: value('comfyModelsDir'),
+    comfyEndpoint: value('comfyEndpoint'),
   }))
 
-  // Constant and probed values: real, and they cannot go stale.
-  assert.match(value('workerScript'), /resources[\\/]worker\.py$/)
-  assert.ok(isAbsolute(value('workerScript')))
-  for (const key of ['basePython', 'comfyModelsDir']) {
-    const detected = value(key)
-    assert.equal(typeof detected, 'string')
-    if (detected !== '') assert.ok(existsSync(detected), `${key} default must exist on disk: ${detected}`)
-  }
-
-  // Derived-from-runtimeDir values: deliberately **blank**, because a real value
-  // would freeze to the default runtime directory and silently point at the wrong
-  // weights/venv once the user moves `runtimeDir`. The rule goes in the hint
-  // instead, substituted with the live value so it cannot go stale either.
-  for (const key of ['modelsDir', 'pythonPath']) {
-    assert.equal(value(key), '', `${key} must stay blank so it keeps following runtimeDir`)
-    const field = SETTINGS_FIELDS.find((candidate) => candidate.key === key)
-    const rendered = resolveHint(field.hint, { runtimeDir: value('runtimeDir') })
-    console.log(`${key} hint ->`, rendered)
-    assert.match(rendered, /留空/)
-    assert.match(rendered, /跟随运行时目录/)
-    assert.ok(rendered.includes(value('runtimeDir')), `${key} must show the live runtime directory`)
-  }
+  assert.ok(isAbsolute(value('outputDir')), 'the output directory must be an absolute path')
+  // The models directory is *probed*: it names a real directory when one exists
+  // and stays blank otherwise, which keeps the error phrasing generic rather than
+  // pointing at a path that is not there.
+  const comfyModelsDir = value('comfyModelsDir')
+  assert.equal(typeof comfyModelsDir, 'string')
+  if (comfyModelsDir !== '') assert.ok(existsSync(comfyModelsDir), `comfyModelsDir must exist on disk: ${comfyModelsDir}`)
 })
 
-test('the derived-path hints state exactly what the tool layer derives', async () => {
-  // The hint is documentation of a rule, so it has to agree with the rule. Compare
-  // it against the canonical derivation rather than against a copied string.
-  const defaults = await import('../testlib/config-defaults.js')
-  const runtimeDir = plugin.Config({}).runtimeDir.get()
-  const cases = [
-    ['modelsDir', defaults.defaultModelsDir(runtimeDir)],
-    ['pythonPath', defaults.defaultPythonPath(runtimeDir)],
-  ]
-  for (const [key, derived] of cases) {
-    const field = SETTINGS_FIELDS.find((candidate) => candidate.key === key)
-    const rendered = resolveHint(field.hint, { runtimeDir })
-    console.log(`${key}: derived=${derived}`)
-    assert.ok(isAbsolute(derived))
-    assert.ok(rendered.includes(derived), `${key}'s hint must name the path it derives: "${rendered}"`)
-  }
+test('comfyEndpoint stays blank on purpose: building the schema opens no socket', () => {
+  const value = plugin.Config({}).comfyEndpoint.get()
+  assert.equal(value, '', 'comfyEndpoint must stay blank so the schema has no side effects')
+  const field = fieldByKey('comfyEndpoint')
+  // Blank is only an answer if the hint names the concrete fallback.
+  assert.match(field.hint, /留空/)
+  assert.match(field.hint, /8000/)
+  assert.match(field.hint, /8188/)
 })
 
 test('the probes themselves only ever return an existing path or nothing', async () => {
   const defaults = await import('../testlib/config-defaults.js')
-  const base = defaults.probeBasePython()
   const comfy = defaults.probeComfyModelsDir()
-  console.log('probeBasePython ->', JSON.stringify(base))
   console.log('probeComfyModelsDir ->', JSON.stringify(comfy))
-  assert.equal(typeof base, 'string')
   assert.equal(typeof comfy, 'string')
-  if (base !== '') assert.ok(existsSync(base), 'probeBasePython returned a path that does not exist')
   if (comfy !== '') assert.ok(existsSync(comfy), 'probeComfyModelsDir returned a path that does not exist')
   // The candidate list is data, so its shape is checkable without any I/O.
   const candidates = defaults.comfyModelsCandidates()
@@ -1089,25 +1065,11 @@ test('the probes themselves only ever return an existing path or nothing', async
   assert.ok(candidates.every((entry) => isAbsolute(entry)))
 })
 
-test('every field that may still be blank says what blank means', () => {
-  // The acceptance rule: for each "empty = auto" field the page must show either a
-  // real default or a hint naming the concrete fallback. These three stay empty on
-  // purpose — `comfyEndpoint` must not open a socket while the schema is being
-  // built — so their hints have to carry the value instead.
-  const resolved = plugin.Config({})
-  const value = (key) => (typeof resolved[key]?.get === 'function' ? resolved[key].get() : resolved[key])
-  for (const key of ['comfyEndpoint', 'torchWheels', 'pipIndexUrl']) {    assert.equal(value(key), '', `${key} is expected to stay blank`)
-    const field = SETTINGS_FIELDS.find((candidate) => candidate.key === key)
-    console.log(`${key} hint:`, field.hint)
-    assert.match(field.hint, /留空/, `${key} must say what blank means`)
-    // A concrete fallback, not a vague "auto": each is checked by its own value
-    // rather than by a digit, since a pip index is named by a URL.
-  }
-  assert.match(SETTINGS_FIELDS.find((f) => f.key === 'comfyEndpoint').hint, /8000/)
-  assert.match(SETTINGS_FIELDS.find((f) => f.key === 'comfyEndpoint').hint, /8188/)
-  assert.match(SETTINGS_FIELDS.find((f) => f.key === 'torchWheels').hint, /cu128/)
-  assert.match(SETTINGS_FIELDS.find((f) => f.key === 'torchWheels').hint, /cu118/)
-  assert.match(SETTINGS_FIELDS.find((f) => f.key === 'pipIndexUrl').hint, /pypi\.org/)
+test('the defaults module exposes no runtime-shaped helper any more', async () => {
+  const defaults = await import('../testlib/config-defaults.js')
+  const exported = Object.keys(defaults).sort()
+  console.log('config-defaults exports:', JSON.stringify(exported))
+  assert.deepEqual(exported, ['comfyModelsCandidates', 'defaultOutputDir', 'probeComfyModelsDir'])
 })
 
 // ---------------------------------------------------------------------------
@@ -1123,13 +1085,25 @@ test('the built client entry wires the section and keeps the keyed tool view', (
   assert.match(CLIENT_SOURCE, /dsh-image-forge/, 'the seat id must be in the bundle')
   assert.match(CLIENT_SOURCE, /registerSettingsSection/, 'the registration must be wired')
   assert.match(CLIENT_SOURCE, /tool\.call\.toolview/, 'the tool view slot must survive')
-  // All four wire names must be seated, or the missing ones silently render nothing.
-  for (const key of ['qwen_image_generate', 'qwen_image_edit', 'qwen_image_status', 'qwen_image_env']) {
+  // All three wire names must be seated, or the missing one silently renders
+  // nothing.
+  for (const key of ['qwen_image_generate', 'qwen_image_edit', 'qwen_image_status']) {
     assert.ok(CLIENT_SOURCE.includes(key), `the keyed tool view ${key} must survive`)
   }
+  // ...and the retired one must be gone, in the bundle as well as in the source.
+  assert.ok(!CLIENT_SOURCE.includes('qwen_image_env'), 'the retired local-runtime tool is still wired into the client')
   assert.match(CLIENT_SOURCE, /password/, 'a secret control must render as a password input')
   assert.match(CLIENT_SOURCE, /SECRET_MASK|••••/, 'the secret mask must be reachable from the bundle')
   console.log('lib/client.js bytes:', CLIENT_SOURCE.length)
+})
+
+test('the one-click deploy card is gone from the bundle', () => {
+  // The deploy bridge existed to build a venv and fetch nf4 weights. With no
+  // runtime of ours left there is nothing to deploy, and a button that points at
+  // a dead host-side port is worse than no button.
+  for (const needle of ['dsh-image-forge-deploy', '一键部署', '127.0.0.1:8411', 'DeployStatusPayload']) {
+    assert.ok(!CLIENT_SOURCE.includes(needle), `the deploy card is still in the client bundle: ${needle}`)
+  }
 })
 
 test('the client ships the presentation CSS and the settings ergonomics', () => {
@@ -1146,17 +1120,12 @@ test('the client ships the presentation CSS and the settings ergonomics', () => 
   assert.match(CLIENT_SOURCE, /overflow-wrap: anywhere/, 'long path hints must wrap instead of clipping')
   assert.match(CLIENT_SOURCE, /dsh-image-forge-images/, 'generate/edit cards must use the image grid')
   assert.match(CLIENT_SOURCE, /dsh-image-forge-checklist/, 'the status card must use the health checklist')
-  assert.match(CLIENT_SOURCE, /data-advanced/, 'the advanced group must be marked for de-emphasis')
+  assert.match(CLIENT_SOURCE, /data-advanced/, 'the advanced marker must stay available for a future group')
   assert.match(CLIENT_SOURCE, /htmlFor: controlId/, 'labels must point at their controls')
   // The Host hands the view a tool-result block, not `result.value`. Reading the
   // wrong shape made every card fall back to empty-state text on a real client.
   assert.match(CLIENT_SOURCE, /tool-result|block\?\.content/, 'the card must read the Host tool-result block')
   assert.match(CLIENT_SOURCE, /JSON\.parse/, 'the block text must be parsed as JSON')
-  // One-click deploy: a host-side loopback bridge plus the settings button.
-  assert.match(CLIENT_SOURCE, /dsh-image-forge-deploy/, 'the deploy card must be in the bundle')
-  assert.match(CLIENT_SOURCE, /一键部署/, 'the deploy button must be labelled in Chinese')
-  assert.match(CLIENT_SOURCE, /127\.0\.0\.1:8411/, 'the deploy bridge origin must be in the bundle')
-  assert.match(CLIENT_SOURCE, /beforeFields/, 'the deploy card must slot into the local group')
   // Tabbed settings page: a strip of tabs, one active panel, denser field grid.
   assert.match(CLIENT_SOURCE, /dsh-image-forge-tabs/, 'the tab strip must be in the bundle')
   assert.match(CLIENT_SOURCE, /dsh-image-forge-tab-active/, 'the active tab must be styled')
@@ -1165,11 +1134,9 @@ test('the client ships the presentation CSS and the settings ergonomics', () => 
   assert.match(CLIENT_SOURCE, /role: ['"]tab['"]/, 'tabs must be exposed as tabs')
   assert.match(CLIENT_SOURCE, /role: ['"]tabpanel['"]/, 'the panel must be exposed as a tabpanel')
   assert.match(CLIENT_SOURCE, /SETTINGS_TABS|tabFields/, 'the tab model must drive the page')
-  // The advanced marker is data, not a one-off string in the React layer.
-  assert.ok(
-    SETTINGS_GROUPS.some((group) => group.id === 'python' && group.advanced === true),
-    'the python group must be the advanced one',
-  )
+  // The status card reports the card ComfyUI loaded its weights onto, so the
+  // device list has to survive into the card.
+  assert.match(CLIENT_SOURCE, /devices/, 'the status card must read the device list')
 })
 
 test('the browser half registers a lazy factory in the loader format', () => {

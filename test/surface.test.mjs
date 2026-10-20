@@ -40,17 +40,37 @@ test('the built module exports exactly name / inject / Config / apply', () => {
 test('the config schema resolves every documented field', () => {
   const resolved = plugin.Config({})
   console.log('resolved config:', JSON.stringify({ ...resolved, apiKey: resolved.apiKey === '' ? '<empty>' : '<set>' }))
-  for (const field of ['backend', 'apiBaseUrl', 'apiKey', 'apiModel', 'outputDir', 'timeoutMs', 'localEndpoint']) {
+  for (const field of [
+    'backend',
+    'apiBaseUrl',
+    'apiKey',
+    'apiModel',
+    'apiStyle',
+    'comfyEndpoint',
+    'comfyPorts',
+    'comfyModelsDir',
+    'defaultSteps',
+    'comfyuiSteps',
+    'comfyModel',
+    'turboSteps',
+    'outputDir',
+    'timeoutMs',
+  ]) {
     assert.ok(field in resolved, `Config must expose ${field}`)
+  }
+  // The plugin owns no runtime of its own any more: the venv / weights / worker
+  // knobs are gone, and a stray one coming back would mean the old local-worker
+  // path is being reintroduced under a different name.
+  for (const retired of ['localEndpoint', 'runtimeDir', 'modelsDir', 'pythonPath', 'workerScript', 'minFreeVramMiB', 'manageWorker']) {
+    assert.ok(!(retired in resolved), `Config must not expose the retired runtime field ${retired}`)
   }
 })
 
-test('apply registers the four qwen_image_* tools and the skill', () => {
+test('apply registers the three qwen_image_* tools and the skill', () => {
   const { ctx, tools, skills } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-surface-')) }))
   assert.deepEqual([...tools.keys()].sort(), [
     'qwen_image_edit',
-    'qwen_image_env',
     'qwen_image_generate',
     'qwen_image_status',
   ])
@@ -133,15 +153,20 @@ test('the wh_ratio description cites a document that really prints the conversio
     )
   }
 })
-test('qwen_image_env declares the five actions and qwen_image_generate the four backends', () => {
+test('both image tools offer exactly the three backends, and status needs no parameters', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-schema2-')) }))
-  const envNode = tools.get('qwen_image_env').parameters
-  const actionNode = envNode?.properties?.action ?? envNode?.action
-  assert.deepEqual(actionNode.enum, ['status', 'install', 'fetch-weights', 'repair', 'unload'])
+  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+    const genNode = tools.get(tool).parameters
+    const backendNode = genNode?.properties?.backend ?? genNode?.backend
+    assert.deepEqual(backendNode.enum, ['auto', 'api', 'comfyui'], `${tool}.backend must offer exactly the surviving backends`)
+  }
+  // `qwen_image_env` is gone; the surviving status tool is read-only and takes
+  // only an optional timeout budget.
+  assert.equal(tools.get('qwen_image_env'), undefined, 'the local-runtime tool must not come back')
+  const statusNode = tools.get('qwen_image_status').parameters
+  assert.deepEqual(Object.keys(statusNode?.properties ?? statusNode ?? {}), ['timeoutMs'])
   const genNode = tools.get('qwen_image_generate').parameters
-  const backendNode = genNode?.properties?.backend ?? genNode?.backend
-  assert.deepEqual(backendNode.enum, ['auto', 'api', 'local', 'comfyui'])
   const required = genNode?.required ?? []
   console.log('required parameters:', JSON.stringify(required))
   assert.ok(required.includes('prompt'), 'prompt must be required')
@@ -159,7 +184,7 @@ test('the skill body ships its reference documents with usable absolute paths', 
   for (const path of paths) assert.ok(path.endsWith('.md') && path.includes('dsh-image-forge'), path)
 })
 
-test('the composed skill body carries the two new knobs the way the model reads them', () => {
+test('the composed skill body describes only the two surviving backends', () => {
   const { ctx, skills } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-skill-knobs-')) }))
   // `src/skill.ts` reads `skill.md` at **runtime** (`readFileSync(new URL("../skill.md", …
@@ -168,34 +193,41 @@ test('the composed skill body carries the two new knobs the way the model reads 
   const content = skills[0].content
   const mentions = (needle) => content.split(needle).length - 1
   console.log('composed skill body chars:', content.length, JSON.stringify({
-    localReferenceBudget: mentions('localReferenceBudget'),
-    cudaMallocAsync: mentions('cudaMallocAsync'),
-    'OSError 1455': mentions('OSError 1455'),
-    freeComfyBeforeLocalStart: mentions('freeComfyBeforeLocalStart'),
-    保真: mentions('保真'),
-    未测: mentions('未测'),
+    qwen_image_status: mentions('qwen_image_status'),
+    qwen_image_env: mentions('qwen_image_env'),
+    comfyModel: mentions('comfyModel'),
+    deploymentDoc: mentions('docs/comfyui-deployment.md'),
   }))
 
-  // P1: the budget knob, its default, and the trade it makes — in the gate section
-  // and again in the pitfalls list, so a model that skips one still sees it.
-  assert.ok(mentions('localReferenceBudget') >= 2, 'the knob must be named in both the gate section and the pitfalls list')
-  assert.match(content, /`0`\s*=\s*默认\s*=\s*按画布推导|0.*按画布推导/)
-  assert.match(content, /参考图条件化分辨率/)
-  assert.match(content, /只影响 `local` 编辑|只影响 `local`/)
-  // The fidelity side is a 1-image, 1-judge comparison (n=1), so the body has to
-  // say that rather than either "no side effects" or a blanket "unmeasured" — and
-  // the withdrawn blanket claim must not come back.
-  assert.match(content, /目视看不出差别/)
-  assert.match(content, /n=1/)
-  assert.ok(!content.includes('保真代价未测'), 'the withdrawn blanket fidelity claim is back')
-  assert.ok(!content.includes('保真度的代价未测'), 'the withdrawn blanket fidelity claim is back')
+  // The tool the model is told about must be one that exists, and the retired
+  // local-runtime tool must not be described anywhere in the body.
+  assert.ok(mentions('qwen_image_status') >= 1, 'the skill must point at the surviving status tool')
+  assert.equal(mentions('qwen_image_env'), 0, 'the skill still documents a tool that no longer exists')
 
-  // P2: both shapes of a full card, and the retry that clears OSError 1455.
-  assert.match(content, /cudaMallocAsync/)
-  assert.match(content, /OSError 1455/)
-  assert.match(content, /nvidia-smi --query-compute-apps/)
-  assert.match(content, /freeComfyBeforeLocalStart/)
-  // The skill must not tell the model the old, wrong thing about a backend that is
-  // already gated: `comfyui` stays ungated, and that sentence has to survive.
-  assert.match(content, /这道门\*\*只拦 `local`\*\*/)
+  // Two backends, named as such — and the retried `local` tier must not be offered.
+  assert.match(content, /可以选择的后端只有|可选后端只有两档/)
+  assert.match(content, /云 API \*\*没有编辑通道\*\*|只有文生图通道，没有编辑通道/)
+  assert.ok(!/`local`（零下载|backend: "local"` 走/.test(content), 'the skill still offers the removed local backend')
+
+  // Every retired knob is gone from the body: a config field the model would have
+  // to ask a user to set, which no longer exists, is worse than no advice at all.
+  for (const retired of [
+    'localReferenceBudget',
+    'allowLocalEditOverBudget',
+    'freeComfyBeforeLocalStart',
+    'minFreeVramMiB',
+    'local_edit_budget',
+    'qwen_image_env',
+  ]) {
+    assert.equal(mentions(retired), 0, `the retired knob ${retired} is still in the skill body`)
+  }
+
+  // Turbo / base is a config decision the model has to explain, so both families,
+  // the step counts and the fallback disclaimer must be spelled out.
+  assert.match(content, /comfyModel/)
+  assert.match(content, /turbo/)
+  assert.match(content, /8 步/)
+  assert.match(content, /turbo_fallback/)
+  // Deployment is delegated to the one document that actually holds the steps.
+  assert.match(content, /docs\/comfyui-deployment\.md/)
 })

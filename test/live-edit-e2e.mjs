@@ -1,41 +1,82 @@
 /**
- * Live acceptance for the reference-image edit path: the real ComfyUI and the real
- * managed worker, driven through `qwen_image_edit` exactly as a session would.
+ * Live acceptance for the reference-image edit path: the real ComfyUI, driven
+ * through `qwen_image_edit` exactly as a session would.
  *
- * This is **not** part of `npm test`: it needs this machine's ComfyUI (with the
- * Qwen-Image weights), the plugin's venv + nf4 weights, and an 8 GiB GPU with
- * room for one ~1 MP edit. Everything hermetic lives in `edit-e2e.test.mjs`.
+ * This is **not** part of `npm test`: it needs this machine's ComfyUI with the
+ * Qwen-Image weights loaded and a GPU with room for one ~1.5 MP edit. Everything
+ * hermetic lives in `edit-e2e.test.mjs`.
  *
- *   node test/live-edit-e2e.mjs [comfyui|local|both]
+ *   node test/live-edit-e2e.mjs
  *
- * Overridable, with this box's values as defaults:
+ * Overridable:
  *   FORGE_LIVE_COMFY     http://127.0.0.1:8188
- *   FORGE_LIVE_PYTHON    D:\file\qwen生图插件\_m0\venv\Scripts\python.exe
- *   FORGE_LIVE_MODELS    D:\file\qwen生图插件\_m0\models\qwen-image-2.1-bnb4bit
- *   FORGE_LIVE_REF_16X9  _comfyui_ref\e2e\comfy_1312x736_1.png   (1312x736)
- *   FORGE_LIVE_REF_WIDE  _integration\out\qwen_2048x1152_1.png  (2048x1152)
+ *   FORGE_LIVE_REF_16X9  a 16:9 reference (default: generated)
+ *   FORGE_LIVE_REF_WIDE  a 2048×1152 reference (default: generated)
  *   FORGE_LIVE_OUT       output directory (default: a temp dir)
+ *
+ * The two references are **generated** rather than read from a scratch
+ * directory: a live test that depends on files some earlier session left behind
+ * fails for the wrong reason. Point those two variables at your own pictures
+ * when you want the run to look like a real edit.
  */
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import zlib from 'node:zlib'
 import * as plugin from '../lib/index.js'
 import { probeImageSize } from '../src/refs.ts'
 
-const WORKSPACE = 'D:\\file\\qwen生图插件'
 const COMFY = process.env.FORGE_LIVE_COMFY ?? 'http://127.0.0.1:8188'
-const PYTHON = process.env.FORGE_LIVE_PYTHON ?? join(WORKSPACE, '_m0', 'venv', 'Scripts', 'python.exe')
-const MODELS = process.env.FORGE_LIVE_MODELS ?? join(WORKSPACE, '_m0', 'models', 'qwen-image-2.1-bnb4bit')
-const REF_16X9 = process.env.FORGE_LIVE_REF_16X9 ?? join(WORKSPACE, '_comfyui_ref', 'e2e', 'comfy_1312x736_1.png')
-const REF_WIDE = process.env.FORGE_LIVE_REF_WIDE ?? join(WORKSPACE, '_integration', 'out', 'qwen_2048x1152_1.png')
+const SCRATCH = mkdtempSync(join(tmpdir(), 'forge-live-refs-'))
 const OUTPUT_DIR = process.env.FORGE_LIVE_OUT ?? mkdtempSync(join(tmpdir(), 'forge-live-edit-'))
+
 /**
- * The plugin-owned runtime directory (worker log, breadcrumb, venv). It defaults
- * to `~/.dsh-image-forge`, which a sandboxed session may not be allowed to
- * create — the worker then cannot write its breadcrumb — so the live run keeps
- * it in the temp directory instead.
+ * Write a real PNG of the given size, so the plugin's header parser and
+ * ComfyUI's decoder both see a genuine image.
+ *
+ * @param width - pixel width.
+ * @param height - pixel height.
+ * @returns the path written (inside the scratch directory).
  */
-const RUNTIME_DIR = process.env.FORGE_LIVE_RUNTIME ?? join(tmpdir(), 'forge-live-edit-runtime')
+function makeReference(width, height) {
+  const stride = width * 3 + 1
+  const raw = Buffer.alloc(stride * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const at = y * stride + 1 + x * 3
+      // A gradient with a bright band near the top, so an edit has something
+      // visibly different to change.
+      raw[at] = 40 + ((x * 7) % 64)
+      raw[at + 1] = 60 + ((y * 5) % 96)
+      raw[at + 2] = y < height / 4 ? 200 : 120
+    }
+  }
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(8)
+    head.writeUInt32BE(data.length, 0)
+    head.write(type, 4, 'ascii')
+    const crc = Buffer.alloc(4)
+    crc.writeUInt32BE(zlib.crc32(Buffer.concat([head.subarray(4), data])), 0)
+    return Buffer.concat([head, data, crc])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = 2 // truecolour
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ])
+  const path = join(SCRATCH, `ref_${width}x${height}.png`)
+  writeFileSync(path, png)
+  return path
+}
+
+const REF_16X9 = process.env.FORGE_LIVE_REF_16X9 ?? makeReference(1312, 736)
+const REF_WIDE = process.env.FORGE_LIVE_REF_WIDE ?? makeReference(2048, 1152)
 
 /** The edit instruction, in Chinese, so the language path is exercised too. */
 const PROMPT = '把画面里的天空改成黄昏色调，其余内容保持不变。'
@@ -60,10 +101,7 @@ function describeReference(path) {
   return `${path} -> ${size === undefined ? 'unreadable' : `${size.width}x${size.height} ${size.mime}`}`
 }
 
-/**
- * Register the plugin and hand back the tools plus a disposer that stops the
- * worker the plugin started (the same path a session's teardown takes).
- */
+/** Register the plugin and hand back the tools plus a no-op disposer. */
 function register(config) {
   const tools = new Map()
   const disposers = []
@@ -122,9 +160,7 @@ async function editAndReport(label, forge, args) {
         ratio_deviation_percent: result.ratio_deviation_percent,
         references: result.references.map((reference) => ({ index: reference.index, size: reference.size, mime: reference.mime, bytes: reference.bytes })),
         images: result.images.map((image) => ({ path: image.path, width: image.width, height: image.height, mime: image.mime })),
-        transparent: result.transparent,
         comfyui: result.comfyui === null ? null : { endpoint: result.comfyui.endpoint, models: result.comfyui.models, references_uploaded: result.comfyui.references_uploaded, elapsed_ms: result.comfyui.elapsed_ms },
-        local_worker: result.local_worker,
         notes: result.api_skipped,
       },
       null,
@@ -139,69 +175,33 @@ async function editAndReport(label, forge, args) {
   return { result, files }
 }
 
-const which = (process.argv[2] ?? 'both').toLowerCase()
-console.log(`live edit acceptance | backends: ${which} | output: ${OUTPUT_DIR} | runtime: ${RUNTIME_DIR}`)
+console.log(`live edit acceptance | ComfyUI: ${COMFY} | output: ${OUTPUT_DIR}`)
 console.log('reference A (16:9):', describeReference(REF_16X9))
 console.log('reference B (wide):', describeReference(REF_WIDE))
 
-if (which === 'comfyui' || which === 'both') {
-  const forge = register({
-    backend: 'comfyui',
-    apiKey: '',
-    comfyEndpoint: COMFY,
-    outputDir: OUTPUT_DIR,
-    runtimeDir: RUNTIME_DIR,
-    timeoutMs: 900_000,
-    localEndpoint: 'http://127.0.0.1:1',
-  })
-  // Both calls take a non-square reference and must come out at that reference's
-  // aspect ratio, not at the 1:1 default a text-to-image call would use.
-  await editAndReport('ComfyUI · default follows image1 (1312x736)', forge, {
-    images: [REF_16X9],
-    steps: 8,
-    seed: 7,
-    preset: 'live-comfy-16x9',
-  })
-  await editAndReport('ComfyUI · ratio_follow image1 of a 2048x1152 reference', forge, {
-    images: [REF_WIDE],
-    ratio_follow: 'image1',
-    steps: 8,
-    seed: 7,
-    preset: 'live-comfy-wide',
-  })
-}
+const forge = register({
+  backend: 'comfyui',
+  apiKey: '',
+  comfyEndpoint: COMFY,
+  outputDir: OUTPUT_DIR,
+  timeoutMs: 900_000,
+})
+// Both calls take a non-square reference and must come out at that reference's
+// aspect ratio, not at the 1:1 default a text-to-image call would use.
+await editAndReport('ComfyUI · default follows image1 (1312x736)', forge, {
+  images: [REF_16X9],
+  steps: 8,
+  seed: 7,
+  preset: 'live-comfy-16x9',
+})
+await editAndReport('ComfyUI · ratio_follow image1 of a 2048x1152 reference', forge, {
+  images: [REF_WIDE],
+  ratio_follow: 'image1',
+  steps: 8,
+  seed: 7,
+  preset: 'live-comfy-wide',
+})
 
-if (which === 'local' || which === 'both') {
-  const forge = register({
-    backend: 'local',
-    apiKey: '',
-    localEndpoint: 'http://127.0.0.1:8399',
-    workerPorts: '8399-8403',
-    pythonPath: PYTHON,
-    modelsDir: MODELS,
-    runtimeDir: RUNTIME_DIR,
-    outputDir: OUTPUT_DIR,
-    timeoutMs: 900_000,
-    workerStartTimeoutMs: 600_000,
-    minFreeVramMiB: 0,
-    // This script exists to drive the local edit path end to end, and the
-    // 1312×736 reference resolves to a default canvas whose conditioning budget is
-    // above the local edit size gate (see test/local-edit-budget.test.mjs). The
-    // gate is the thing being opted out of here, on purpose: the run is a
-    // measurement, and it reports `local_edit_budget.warning` back.
-    allowLocalEditOverBudget: true,
-  })
-  try {
-    await editAndReport('local worker · reference 1312x736, default follows image1', forge, {
-      images: [REF_16X9],
-      steps: 6,
-      seed: 3,
-      preset: 'live-local-16x9',
-    })
-    const unload = await forge.run('qwen_image_env', { action: 'unload' })
-    console.log('\nunload:', JSON.stringify({ ok: unload.ok, vram_before_MiB: unload.vram_before_MiB, vram_after_MiB: unload.vram_after_MiB, note: unload.note }, null, 2))
-  } finally {
-    const stopped = await forge.dispose()
-    console.log('worker stopped (plugin dispose):', JSON.stringify(stopped ?? null))
-  }
-}
+const status = await forge.run('qwen_image_status', {})
+console.log('\nstatus:', JSON.stringify({ comfyui: status.comfyui, output: status.output }, null, 2))
+await forge.dispose()

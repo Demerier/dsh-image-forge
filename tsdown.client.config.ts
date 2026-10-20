@@ -73,6 +73,10 @@ export default defineConfig({
   dts: { enabled: false },
   // React comes from the shell's baseline module table. Keep it a bare request.
   deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom/client'] },
+  // `studio-shared.ts` is imported by both halves. Without this it becomes a
+  // sibling chunk, and the loader materializes exactly one bundle — see the
+  // structural constraints above. One entry, so rolldown accepts the flag.
+  outputOptions: { codeSplitting: false },
   banner: FACTORY_OPEN,
   footer: FACTORY_CLOSE,
   // The package declares "type": "module", so the default CJS extension would be
