@@ -31,25 +31,42 @@ qwen_image_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
 但形变 +1.1%，不是本产品要公布的画布。七个值都过「能被 32 整除」与「比例偏差 < 3%」两条检查
 （`test/ratio.test.mjs` 逐个钉住）。比例**先约分再查表**，所以 `2048:1152` 这种参照图会落到同一张
 `16:9` 画布上；**表外**的比例（`21:9`）仍走搜索：最小化「比例偏差 + 0.5 × 像素预算偏差」，同分取更大的画布。
-`local` 后端也用同一张表——本机实测（RTX 4070 Laptop 8188 MiB，nf4 worker，25 步）**文生图**的 1248×1248 与
-1664×928 自报峰值都是 **reserved 5680–6016 MiB / allocated 5349–5358 MiB**，离 8188 MiB 至少
-还有 2.1 GiB 余量，所以没有按后端分表；**文生图这条路也没有加显存阈值护栏**（护栏加在编辑路径上，
-而且是一道**尺寸门**，不是显存门——见 [本地编辑尺寸门](backends.md#本地编辑尺寸门只在-local-后端生效)）。
 
-> ⚠️ **上面这组数字只覆盖文生图，完全不覆盖参考图编辑**（本仓库早些时候把它读成「编辑也没问题」，
-> 那是过期依据）。同一张卡上编辑路径是另一个量级，实测：可靠上限是参考图条件化预算
-> **`_reference_budget` ≤ 896**（例如 1216×672，峰值 reserved **7458 MiB**，3/3 次一致）；
-> **928–960 贴边**（960×960 峰值 reserved **8492 MiB 已超过卡总量 8188 MiB**，靠 WDDM 共享内存撑住）；
-> **≥992 在 GPU 去噪段 CUDA OOM**（碎片签名）；**≥1216 在 CPU 文本编码段以访问违例崩掉**，
-> 有时直接带走 worker 进程（同一张 1248×1248 画布：t2i reserved 5700 MiB，edit 500）。
-> ⚠️ **896 这条可靠线只按预算分档，画布自身的代价不在内**：它的实测出处是 1216×672（0.82 MP，1.9 s/步）；
-> 同一预算搬到 1.5MP 画布（1248×1248）上实测 **67 s/步**、25 步外推 ≈28 min（**不报错**，但等于不可用）——
-> 那张画布上唯一实测跑得完的是 **512**（wall **109.5 s**、峰值 reserved **6488 MiB**、worker 存活）。
-> 依据：本机逐次实测记录（报告未随包发布）。
+显存：这张表对**两个后端都用同一套值**，插件不再按后端分表，也不做任何前置显存门禁。
+8 GB 卡上的实测代价见 [后端 → 基准](backends.md#8-gb-卡上的实测基准)；**编辑时的显存压力要自己看着办**——
+真不够是 ComfyUI 回报的 CUDA OOM，缩 `width`/`height` 是唯一可靠的减法。
 要显式像素就用 `width`/`height`（必须 32 的倍数，否则报错并给出最近的合法值）——**显式值永远优先**。
 
 落盘命名：`<outputDir>/<prefix>_<W>x<H>_<n>.png`，`prefix` 默认 `qwen`，可用 `preset` 覆盖；
 编号从 1 起且**跳过已占用的名字**，所以重复调用不会覆盖旧图。
+
+## 画板：成果的存储与显示单位
+
+PNG 落在同一个 `outputDir` 里，但「哪几张图属于同一件事」由**画板**回答——一个题材、一次拍摄、
+一轮改稿就是一个画板。存储在 `<outputDir>/.dsh-image-forge/`：
+
+```text
+.dsh-image-forge/
+  state.json          { "active": "b…" }   工作台上次打开的画板
+  boards/<id>.json    一块画板：名字 + 每张图的出处（prompt/步数/种子/模式）+ 画布坐标
+```
+
+规则（两个入口共用同一套）：
+
+- **对话调用省略 `board` 就新建一个画板**，用提示词首行命名；返回载荷里的 `board.id` 就是它，
+  `summary` 末尾会点名。同一组图继续出图/改图时**把这个 id 传回 `board`**，成果才落进同一块画板。
+- `board` 也收**名字**（大小写不敏感）；一个没见过的值按「新画板的名字」处理，而不是报错——
+  拒绝就意味着这次出图白跑。
+- 每张图在画板里记：`path`、尺寸、字节数、prompt、`ratio`/`steps`/`seed`、`mode`（generate/edit）、
+  来源会话（`sessionId`，来自宿主）、画布坐标。同一路径重复记录只更新元数据，不会长出第二份。
+- 工作台按画板组织：顶部选画板 / 新建 / 重命名，画布位置与相机**自动保存**（拖动后 700 ms 落盘），
+  重开页面恢复上次的画板与排布。
+- 「素材」页是跨画板的资产视图：本画板 / 全部画板两个范围 + 文本过滤（prompt、文件名、画板名），
+  每张图可「用作参考」「定位」（跳到它所在画布）「移除」（只摘出画板）「删文件」（确认后删 PNG）。
+- 删除有双重护栏：默认只把图从画板摘掉（可逆）；「删文件」要求二次确认，且只允许删
+  `outputDir` 里面的文件——画板数据被手工改坏也删不到目录外的任何东西。
+- 画板记录失败**不会**让出图失败：图已在盘上，返回里的 `board_note`（工具）/`boardNote`（工作台）
+  说明原因。
 
 图片回传：工具结果里给出 `![](绝对路径)` 的 Markdown（客户端会渲染成真图），
 另有一份 JSON 供机器读；客户端侧注册了 `tool.call.toolview` 的 `qwen_image_generate` 槽做卡片显示。
@@ -77,18 +94,52 @@ qwen_image_edit(prompt = <成品改图指令>, images = ["D:\\pictures\\room.png
 - 参考图就是**图片字节**：路径必须**绝对**（相对路径会被拒绝，理由写在报错里），也收 `data:image/…;base64,…`。
   只认 PNG / JPEG / WebP（要读文件头拿像素尺寸）。**任何一张读不出来都会报错并点名 `images[n]`**——
   静默丢一张会让提示词里的 `<imageN>` 全部错位。
-- 后端只有两个：`comfyui` 与 `local`（都在本机）。`backend: "auto"` 在编辑场景**跳过云 API**
-  （它没有编辑通道），返回里的 `api_skipped` 如实说明；显式传 `backend: "api"` 会明确报错。
+- **后端只有 `comfyui` 一个**。`backend: "auto"` 在编辑场景**不看 key**，直接走 ComfyUI（返回里的
+  `api_skipped` 如实说明）；显式传 `backend: "api"` 会明确报错，并且**不丢参考图**。
+  两条都不通时的错误会点名缺什么，并指向 [部署文档](comfyui-deployment.md)。
+- 参考图由 ComfyUI 按画布缩放（工作流的 `resolution` 预算），插件侧**没有**参考图预算旋钮。
 - 落盘命名与文生图一致，`preset` 默认是 `edit`（`<outputDir>/<prefix>_<W>x<H>_<n>.png`）。
 
 ## 工具一览
 
 | 工具 | 说明 |
 |---|---|
-| `qwen_image_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`transparent`、`backend`（`auto`/`api`/`comfyui`/`local`）、`preset` |
-| `qwen_image_edit` | **参考图编辑（图生图）**。`prompt`（成品修改指令，必填）、`images`（1–10 张绝对路径或 `data:image/…;base64,…`，必填，按序对应 `<image1>`…）、`ratio_follow`（画布跟随某张参考图的宽高比；`image1`… 或该图在 `images` 里的原字符串）、`wh_ratio`（**与 `ratio_follow` 互斥**）、`width`/`height`、`steps`、`seed`、`count`、`transparent`、`backend`、`preset`（默认 `edit`）。编辑只在**本机**后端跑：`comfyui` / `local`；`api` 没有编辑通道，会明确报错而**不丢参考图** |
-| `qwen_image_status` | 后端健康探测：云端点是否可达、key 是否被接受（401/403 会点名）、**本机 ComfyUI 是否在跑**（探了哪几个端口、三个权重能不能枚举到）、本地 worker 的六态与最近一次启动失败原因。**只读**，不会拉起或杀掉任何进程；**不回显 key** |
-| `qwen_image_env` | **本机环境体检 + 本地运行时管理**。`status`（默认）报告 GPU/驱动、**显存余量（低于阈值就预警，并指名是谁占着——例如 ComfyUI 常驻 2.9 GiB，给出它的 `POST /free` 命令）**、宿主内存、磁盘、输出目录、三端点应答，以及 venv/权重/worker 的就绪情况与 worker 的六态之一（`never-started` / `starting` / `ready` / `unloaded` / `load-failed` / `not-responding`）。`install`（建 venv + CUDA torch，cu128→cu126→cu118 逐级降级，已装 CUDA torch 就复用）、`fetch-weights`（hf-mirror.com 下载 10.63 GiB，查磁盘 + 断点续传 + sha256）、`unload`（`POST /unload` 交回显存）、`repair`（能修就修，不能修明确报因 + 给下一步）。三者都支持 `dryRun:true` 只看计划 |
+| `qwen_image_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`transparent`、`backend`（`auto`/`api`/`comfyui`）、`preset`、`board`（画板 id/名字，**省略就新建**，见「画板」一节） |
+| `qwen_image_edit` | **参考图编辑（图生图）**。`prompt`（成品修改指令，必填）、`images`（1–10 张绝对路径或 `data:image/…;base64,…`，必填，按序对应 `<image1>`…）、`ratio_follow`（画布跟随某张参考图的宽高比；`image1`… 或该图在 `images` 里的原字符串）、`wh_ratio`（**与 `ratio_follow` 互斥**）、`width`/`height`、`steps`、`seed`、`count`、`transparent`、`backend`、`preset`（默认 `edit`）、`board`（改图通常传参考图所在画板的 id）。编辑**只走 `comfyui`**；`api` 没有编辑通道，会明确报错而**不丢参考图** |
+| `qwen_image_status` | **只读**体检：云端点是否可达、key 是否被接受（401/403 会点名）、**本机 ComfyUI 是否在跑**（探了哪几个端口、三个权重能不能枚举到、显卡型号与显存余量）、输出目录能否写。不产图、不写盘、不改配置、不回显 key，也不拉起或杀掉任何进程 |
 
-排障顺序：先 `qwen_image_status`，再 `qwen_image_env status`。
+排障顺序：先 `qwen_image_status`，`next_steps` 非空就照着那句话做。
 
+### `qwen_image_status` 返回什么
+
+```jsonc
+{
+  "checked_at": "2026-10-19T…",
+  "configured_backend": "auto",
+  "api": {
+    "baseUrl": "https://…", "model": "qwen-image", "style": "openai",
+    "keySource": "env" | "config" | null,
+    "keyPresent": true, "reachable": true, "authenticated": true,
+    "modelsProbeStatus": 200, "note": "endpoint answered"
+  },
+  "comfyui": {
+    "modelsDir": "D:\\Comfy-Desktop\\ComfyUI-Shared\\models",   // 探测到的值，探不到是 null
+    "endpoint": "http://127.0.0.1:8188", "port": 8188, "reachable": true,
+    "probed": [ … 每个端口的尝试记录 … ],
+    "models": { "unet": "…", "clip": "…", "vae": "…", "clipType": "qwen_image", "ok": true },
+    "note": "ComfyUI 在跑，且三个 Qwen-Image 权重都能被它的加载器枚举到。",
+    "version": "0.41.3",
+    "devices": [{ "name": "cuda:0 NVIDIA GeForce RTX 4070 Laptop GPU : cudaMallocAsync",
+                  "type": "cuda", "vram_total_MiB": 8188, "vram_free_MiB": 7068 }],
+    "stats_note": null
+  },
+  "output": { "dir": "…", "writable": true },
+  "next_steps": null
+}
+```
+
+- `version` / `devices` / `stats_note` 来自 ComfyUI 自己的 `GET /system_stats`，**不是** `nvidia-smi`：
+  真正要紧的那张卡是 ComfyUI 加载权重的那张。ComfyUI 没起来时这三项是 `null`（不是缺键）。
+- `api.keyPresent` / `keySource` 只报**状态**，不回显 key 本身；载荷里不会出现 `Bearer …`。
+- 整个载荷是 **lossless JSON**：没有 `undefined`，不适用的字段一律 `null`——DSH 的工具层会拒收带
+  `undefined` 的值（`value is not lossless JSON`），这条由测试钉住。

@@ -34,3 +34,11 @@ docs/plans/
 # Verification reports and screenshots are not vendored: the shipped prose keeps
 # the claims, the raw captures stay out of the repository (and its history).
 docs/evidence/
+
+# Live preview harness scratch: generated images and screenshots (test/preview-*.mjs).
+.preview/
+
+# Blind-comparison samples (test/blind-*.mjs): ~15 MB of generated PNGs used to
+# score base vs turbo. Evidence for a judgement already recorded in prose, same
+# treatment as docs/evidence/ — the claim stays, the captures do not.
+.blindtest/

@@ -2,6 +2,13 @@
 
 First public release.
 
+> **This file is history, not current documentation.** 0.1.0 shipped a managed local runtime
+> (venv + nf4 weights + a worker process) and a fourth tool `qwen_image_env`. All of it was removed
+> afterwards: the plugin now runs on a cloud key or the user's own ComfyUI, and nothing else.
+> For the current surface read [README](../README.md) and
+> [docs/comfyui-deployment.md](comfyui-deployment.md). The notes below are kept verbatim so the
+> 0.1.0 tarball stays describable.
+
 ## What it is
 
 A DeepSeek Harness plugin for **Qwen-Image text-to-image and reference-image editing**, with the official prompt-contract `wh_ratio` as a first-class tool parameter.
