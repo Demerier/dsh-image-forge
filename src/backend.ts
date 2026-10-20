@@ -82,13 +82,6 @@ export interface GenerateRequest {
    * shifts every `<imageN>` label the caller wrote in the prompt.
    */
   readonly images?: readonly ReferenceImagePayload[]
-  /**
-   * Explicit reference-conditioning budget (pixels per side) for a backend that
-   * conditions on references. Omitted means "derive it yourself from the canvas",
-   * which is what every backend did before this field existed; only the local
-   * worker reads it, and it never changes the output size.
-   */
-  readonly referenceBudget?: number
 }
 
 /**
@@ -207,7 +200,7 @@ export function describeApiError(payload: unknown, status: number): string {
 /**
  * Decode every image in any supported envelope shape.
  *
- * Shared with the local worker client so both backends accept the same
+ * Shared with the ComfyUI adapter so both backends accept the same
  * `data[]` / `images[]` / `output[].image` layouts and the same
  * base64-or-`data:`-URI-or-`url` entries.
  *
@@ -256,8 +249,8 @@ export async function generateViaApi(
       `qwen-image api: this backend has no edit path, so it cannot carry ${request.images.length} reference image(s). ` +
         'Editing over the OpenAI-compatible wire format is a different request shape (multipart POST /images/edits ' +
         'with the images as file parts, which this client does not implement), and the reference images are never ' +
-        "dropped silently. Use backend 'comfyui' (the local ComfyUI with the official Qwen-Image 2.1 edit graph) or " +
-        "'local' (the managed worker, whose /generate accepts an images[] field).",
+        "dropped silently. Use backend 'comfyui' — the local ComfyUI with the official Qwen-Image 2.1 edit graph." +
+        " This plugin runs no model of its own, so there is no second local path.",
     )
   }
   const body: Record<string, unknown> = {

@@ -550,7 +550,6 @@ export const EDIT_MAX_REFERENCES = 10
 
 /** First node id used for the edit graph's `LoadImage` nodes (ids 1–8 are the graph itself). */
 export const EDIT_IMAGE_NODE_BASE = 11
-
 /**
  * The edit graph, which is the text-to-image graph with a different encode node:
  * `TextEncodeQwenImage21` additionally receives the VAE (it VAE-encodes each
@@ -601,6 +600,159 @@ export function editWorkflow(
     encode.inputs[`images.image_${position + 1}`] = [id, 0]
   }
   return graph
+}
+
+// ---------------------------------------------------------------------------
+// Turbo: the distilled checkpoint and its fixed 8-step sigma schedule
+// ---------------------------------------------------------------------------
+
+/**
+ * The sigma schedule the Turbo checkpoint was distilled for.
+ *
+ * This is copied verbatim from the official `image_qwen_image_2_1_turbo_t2i.json`
+ * template's `ManualSigmas` node, and it is what makes 8 steps enough. Raising
+ * the step count **without** swapping this schedule in makes the result worse,
+ * not better: the template's own note says so, and that is why the turbo path
+ * passes the schedule rather than only a smaller `steps`.
+ */
+export const TURBO_SIGMAS = '1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0'
+
+/** Steps the schedule above describes: one per remaining sigma. */
+export const TURBO_STEPS = 8
+
+/**
+ * The Turbo text-to-image graph, in ComfyUI's API format.
+ *
+ * The Turbo templates do **not** use `KSampler`. They drive
+ * `SamplerCustomAdvanced`, which takes the noise, guider, sampler and sigmas as
+ * separate inputs — that separation is the only way to hand it a `ManualSigmas`
+ * node, and the manual schedule is the whole point of the turbo checkpoint. So
+ * this graph has a different shape from {@link QWEN_IMAGE_WORKFLOW}, not just
+ * different numbers:
+ *
+ * ```
+ * RandomNoise ─┐
+ * CFGGuider ───┼→ SamplerCustomAdvanced → VAEDecode → SaveImage
+ * KSamplerSelect┤
+ * ManualSigmas ─┤
+ * EmptyLatentImage ─┘
+ * ```
+ *
+ * Note also what is *absent*: the non-turbo graph's `QwenImage21Cache` is not
+ * used here either, matching the official template, which leaves it out for the
+ * turbo path.
+ */
+export const QWEN_IMAGE_TURBO_WORKFLOW: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
+  '1': { class_type: 'UNETLoader', inputs: { unet_name: '{{unet_name}}', weight_dtype: '{{weight_dtype}}' } },
+  '2': { class_type: 'CLIPLoader', inputs: { clip_name: '{{clip_name}}', type: '{{clip_type}}' } },
+  '3': { class_type: 'VAELoader', inputs: { vae_name: '{{vae_name}}' } },
+  '4': {
+    class_type: 'TextEncodeQwenImage21',
+    inputs: { clip: ['2', 0], prompt: '{{prompt}}', negative_prompt: '{{negative_prompt}}', resolution: 1024 },
+  },
+  '5': { class_type: 'EmptyLatentImage', inputs: { width: '{{width}}', height: '{{height}}', batch_size: '{{batch_size}}' } },
+  // The four ingredients SamplerCustomAdvanced consumes, one node each.
+  '6': { class_type: 'RandomNoise', inputs: { noise_seed: '{{seed}}' } },
+  '7': {
+    class_type: 'CFGGuider',
+    inputs: {
+      model: ['1', 0],
+      positive: ['4', 0],
+      negative: ['4', 1],
+      cfg: '{{cfg}}',
+    },
+  },
+  '8': { class_type: 'KSamplerSelect', inputs: { sampler_name: '{{sampler_name}}' } },
+  '9': { class_type: 'ManualSigmas', inputs: { sigmas: '{{sigmas}}' } },
+  '10': {
+    class_type: 'SamplerCustomAdvanced',
+    inputs: {
+      noise: ['6', 0],
+      guider: ['7', 0],
+      sampler: ['8', 0],
+      sigmas: ['9', 0],
+      latent_image: ['5', 0],
+    },
+  },
+  '11': { class_type: 'VAEDecode', inputs: { samples: ['10', 0], vae: ['3', 0] } },
+  '12': { class_type: 'SaveImage', inputs: { images: ['11', 0], filename_prefix: '{{filename_prefix}}' } },
+}
+
+/**
+ * The Turbo edit graph: the turbo skeleton plus the edit encode node plus the
+ * reference slots that {@link editTurboWorkflow} wires per call.
+ *
+ * One parameter differs from the turbo **text-to-image** template and it is not
+ * a typo: the official `image_qwen_image_2_1_turbo_image_edit.json` runs
+ * `CFGGuider` at **8**, while its t2i sibling runs at **1**. The edit path feeds
+ * a condition built from the reference images, and the guidance scale is what
+ * balances that condition against the prompt.
+ */
+export const QWEN_IMAGE_TURBO_EDIT_WORKFLOW: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
+  ...QWEN_IMAGE_TURBO_WORKFLOW,
+  '4': {
+    class_type: 'TextEncodeQwenImage21',
+    inputs: {
+      clip: ['2', 0],
+      vae: ['3', 0],
+      prompt: '{{prompt}}',
+      negative_prompt: '{{negative_prompt}}',
+      resolution: '{{resolution}}',
+    },
+  },
+}
+
+/** First node id for the turbo edit graph's `LoadImage` nodes (ids 1–12 are the graph). */
+export const TURBO_EDIT_IMAGE_NODE_BASE = 13
+
+/**
+ * Wire one `LoadImage` per reference into the turbo edit graph.
+ *
+ * Same autogrow contract as {@link editWorkflow} — the encode node takes
+ * `images.image_1` … `images.image_16` — but against the turbo skeleton.
+ *
+ * @param imageNames - file names inside ComfyUI's `input` folder, in prompt order.
+ * @returns a fresh API-format graph with one loader per reference.
+ * @throws When the list is empty or longer than {@link EDIT_MAX_REFERENCES}.
+ */
+export function editTurboWorkflow(
+  imageNames: readonly string[],
+): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
+  if (imageNames.length === 0) throw new Error('comfyui backend: the edit graph needs at least one reference image')
+  if (imageNames.length > EDIT_MAX_REFERENCES) {
+    throw new Error(
+      `comfyui backend: the edit graph wires ${EDIT_MAX_REFERENCES} reference slots, got ${imageNames.length}`,
+    )
+  }
+  const graph: Record<string, { class_type: string; inputs: Record<string, unknown> }> = { ...QWEN_IMAGE_TURBO_EDIT_WORKFLOW }
+  const encode = {
+    class_type: 'TextEncodeQwenImage21',
+    inputs: { ...(QWEN_IMAGE_TURBO_EDIT_WORKFLOW['4'] as { inputs: Record<string, unknown> }).inputs },
+  }
+  graph['4'] = encode
+  for (const [position, name] of imageNames.entries()) {
+    const id = String(TURBO_EDIT_IMAGE_NODE_BASE + position)
+    graph[id] = { class_type: 'LoadImage', inputs: { image: name } }
+    encode.inputs[`images.image_${position + 1}`] = [id, 0]
+  }
+  return graph
+}
+
+/**
+ * Pick the turbo checkpoint out of whatever `/object_info` reported.
+ *
+ * Read as a *preference*, never a requirement: the plugin still works with only
+ * the base weights installed, it just cannot use the turbo path. A name is
+ * turbo when it contains `turbo` — that is how both official files are named
+ * (`qwen_image_2.1_turbo_bf16.safetensors`,
+ * `qwen_image_2.1_turbo_int8_convrot.safetensors`) — so a user who renamed their
+ * copy still matches as long as the rename kept the marker.
+ *
+ * @param models - the three file names resolved from `/object_info`.
+ * @returns the turbo unet name, or `undefined` when only a base checkpoint is present.
+ */
+export function turboUnetOf(models: ComfyModels): string | undefined {
+  return /turbo/i.test(models.unet) ? models.unet : undefined
 }
 
 /**
@@ -1010,6 +1162,170 @@ export async function generateViaComfyUiEdit(
     filename_prefix: 'dsh-image-forge-edit',
   }) as Record<string, unknown>
   return await runGraph(target, graph, '改图', options, signal)
+}
+
+/**
+ * Run one Turbo text-to-image generation.
+ *
+ * Differs from {@link generateViaComfyUi} in exactly two ways, both of which the
+ * official turbo template prescribes: the step count defaults to
+ * {@link TURBO_STEPS} (not 25) and the graph is driven by the manual sigma
+ * schedule (not `KSampler`). A caller that passes an explicit `steps` gets it —
+ * the override exists so the blind test can ask for 4, 8 and 12 and see what
+ * actually happens, rather than trusting the "8 is enough" note.
+ *
+ * @param target - the endpoint that answered.
+ * @param models - the three file names read from `/object_info`.
+ * @param request - prompt, canvas, count, seed, optional step override.
+ * @param options - timeout and poll interval.
+ * @param signal - caller cancellation.
+ * @returns one entry per produced image, in ComfyUI's order.
+ * @throws With the adapter's usual quoted-upstream text when the run fails.
+ */
+export async function generateViaComfyUiTurbo(
+  target: ComfyTarget,
+  models: ComfyModels,
+  request: GenerateRequest,
+  options: ComfyOptions,
+  signal?: AbortSignal,
+): Promise<GeneratedImage[]> {
+  const graph = renderWorkflow(QWEN_IMAGE_TURBO_WORKFLOW, {
+    unet_name: models.unet,
+    weight_dtype: 'default',
+    clip_name: models.clip,
+    clip_type: models.clipType,
+    vae_name: models.vae,
+    prompt: request.prompt,
+    negative_prompt: '',
+    width: request.width,
+    height: request.height,
+    batch_size: request.count,
+    seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
+    steps: request.steps ?? TURBO_STEPS,
+    cfg: 1,
+    sampler_name: 'euler',
+    scheduler: 'simple',
+    sigmas: TURBO_SIGMAS,
+    filename_prefix: 'dsh-image-forge-turbo',
+  }) as Record<string, unknown>
+  return await runGraph(target, graph, '出图（turbo）', options, signal)
+}
+
+/**
+ * Run one Turbo reference-image edit.
+ *
+ * As with the base edit path, references are uploaded first and wired in as
+ * `LoadImage` nodes. Two turbo-specific values differ from the t2i sibling:
+ * `cfg` is 8 (the edit template's own value) and the step default is
+ * {@link TURBO_STEPS}.
+ *
+ * @param target - the endpoint that answered.
+ * @param models - the three file names read from `/object_info`.
+ * @param request - edit prompt, canvas, and at least one reference image.
+ * @param options - timeout and poll interval.
+ * @param signal - caller cancellation.
+ * @returns one entry per produced image, in ComfyUI's order.
+ * @throws When no reference is present, an upload fails, or the run fails.
+ */
+export async function generateViaComfyUiTurboEdit(
+  target: ComfyTarget,
+  models: ComfyModels,
+  request: GenerateRequest,
+  options: ComfyOptions,
+  signal?: AbortSignal,
+): Promise<GeneratedImage[]> {
+  const references = request.images ?? []
+  if (references.length === 0) {
+    throw new Error('comfyui backend: the edit path needs reference images, but request.images is empty')
+  }
+  const deadline = Date.now() + options.timeoutMs
+  const names: string[] = []
+  for (const reference of references) {
+    names.push(await uploadReferenceImage(target, reference, Math.max(1, deadline - Date.now()), signal))
+  }
+  const graph = renderWorkflow(editTurboWorkflow(names), {
+    unet_name: models.unet,
+    weight_dtype: 'default',
+    clip_name: models.clip,
+    clip_type: models.clipType,
+    vae_name: models.vae,
+    prompt: request.prompt,
+    negative_prompt: '',
+    resolution: referenceBudget(request.width, request.height),
+    width: request.width,
+    height: request.height,
+    batch_size: request.count,
+    seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
+    steps: request.steps ?? TURBO_STEPS,
+    cfg: 8,
+    sampler_name: 'euler',
+    scheduler: 'simple',
+    sigmas: TURBO_SIGMAS,
+    filename_prefix: 'dsh-image-forge-turbo-edit',
+  }) as Record<string, unknown>
+  return await runGraph(target, graph, '改图（turbo）', options, signal)
+}
+
+/** One GPU as ComfyUI's own `/system_stats` reports it. */
+export interface ComfyDevice {
+  /** `nvidia-smi`-style product name, e.g. `NVIDIA GeForce RTX 4070 Laptop GPU`. */
+  readonly name: string
+  /** Device type (`cuda`, `cpu`, …), when the server said. */
+  readonly type: string | null
+  /** Total VRAM in MiB, when reported. */
+  readonly vram_total_MiB: number | null
+  /** Free VRAM in MiB at the moment of the call, when reported. */
+  readonly vram_free_MiB: number | null
+}
+
+/** What `/system_stats` can tell the status tool; never throws. */
+export interface ComfySystemStats {
+  /** ComfyUI's own version string, e.g. `0.41.3`. */
+  readonly version: string | null
+  /** One entry per device ComfyUI enumerated. */
+  readonly devices: readonly ComfyDevice[]
+  /** Why the numbers are missing, when the call did not produce them. */
+  readonly note?: string
+}
+
+/**
+ * Read `/system_stats` from a ComfyUI that already answered.
+ *
+ * This exists so `qwen_image_status` can report the GPU and its remaining VRAM
+ * without spawning `nvidia-smi`: the card that matters is the one ComfyUI loaded
+ * its weights onto, and ComfyUI is the only party that knows. Every field is
+ * optional in practice — an older server, or a CPU-only one, simply yields fewer
+ * numbers rather than an error.
+ *
+ * @param endpoint - origin that already passed {@link discoverComfyUi}.
+ * @param timeoutMs - probe budget; a status call must not hang on this.
+ * @param signal - caller cancellation.
+ * @returns the version, devices, and a note when the endpoint refused to answer.
+ */
+export async function comfySystemStats(
+  endpoint: string,
+  timeoutMs = 5000,
+  signal?: AbortSignal,
+): Promise<ComfySystemStats> {
+  try {
+    const response = await requestJson(`${endpoint}/system_stats`, { method: 'GET' }, timeoutMs, signal)
+    if (!response.ok) return { version: null, devices: [], note: `GET /system_stats → HTTP ${String(response.status)}` }
+    const system = prop(response.payload, 'system')
+    const devices = prop(response.payload, 'devices')
+    return {
+      version: typeof prop(system, 'comfyui_version') === 'string' ? prop(system, 'comfyui_version') as string : null,
+      devices: Array.isArray(devices)
+        ? devices.map((device) => ({
+            name: typeof prop(device, 'name') === 'string' ? prop(device, 'name') as string : 'unknown',
+            type: typeof prop(device, 'type') === 'string' ? prop(device, 'type') as string : null,
+            vram_total_MiB: typeof prop(device, 'vram_total') === 'number' ? Math.round((prop(device, 'vram_total') as number) / 1024 ** 2) : null,
+            vram_free_MiB: typeof prop(device, 'vram_free') === 'number' ? Math.round((prop(device, 'vram_free') as number) / 1024 ** 2) : null,
+          }))
+        : [],
+    }
+  } catch (error) {
+    return { version: null, devices: [], note: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /**

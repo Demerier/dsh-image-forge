@@ -1,149 +1,36 @@
 /**
  * The plugin's **default paths**, as the settings page shows them.
  *
- * These exist because an empty text box is not an answer. Eight config fields
- * used to default to `''` and resolve to something concrete only deep inside the
- * tool layer, so the settings page showed a blank where the plugin was in fact
- * using a specific interpreter, a specific weight directory and a specific
- * ComfyUI models root. A user reading the page could not tell what would happen.
+ * There are only two kinds left, both about the machine the plugin runs on:
  *
- * So the defaults here are the *resolved* values:
+ * - `outputDir` is a normal user-visible pictures folder.
+ * - `comfyModelsDir` is *probed*: it scans a candidate list with `existsSync`
+ *   and falls back to `''` when nothing is found, which keeps the "let the tool
+ *   layer phrase a generic error" path intact on an unknown box.
  *
- * - **Derived** ones (`pythonPath`, `modelsDir`, `workerScript`) are pure string
- *   arithmetic over the runtime directory and the package location — no I/O, and
- *   identical to what the tool layer derives from an empty field, so baking them
- *   as defaults cannot change behaviour.
- * - **Probed** ones (`basePython`, `comfyModelsDir`) scan a candidate list with
- *   `existsSync` and fall back to `''` when nothing is found, which keeps the
- *   original "let the tool layer figure it out" path intact on an unknown box.
+ * Everything the plugin used to own itself — a venv, a weight cache, a worker
+ * script — is gone. Generation now runs either through a cloud key or through
+ * the user's own ComfyUI, and ComfyUI owns its model directory; this file only
+ * tries to *name* that directory so the error messages can be specific.
  *
  * Two deliberate limits:
  *
  * - **Nothing here does network I/O.** `comfyEndpoint` stays empty on purpose:
  *   its documented meaning is "probe `comfyPorts` at call time", and opening a
  *   socket while building a config schema would be a side effect in the wrong
- *   place. Its hint states the ports instead.
+ *   place.
  * - **Nothing here is imported by the browser half.** `settings-fields.ts` is
- *   bundled for the browser and therefore cannot touch `node:fs`; the page learns
- *   these values from the Host, which serves the schema defaults as the form's
- *   values.
+ *   bundled for the browser and therefore cannot touch `node:fs`; the page
+ *   learns these values from the Host, which serves the schema defaults as the
+ *   form's values.
  */
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { delimiter, join } from 'node:path'
-import { venvPaths } from './venv.ts'
-import { resourcePath } from './tools.ts'
+import { join } from 'node:path'
 
 /** Default output directory: a normal user-visible pictures folder. */
 export function defaultOutputDir(): string {
   return join(homedir(), 'Pictures', 'dsh-image-forge')
-}
-
-/** Default home for the plugin-owned runtime (venv, weights, logs). */
-export function defaultRuntimeDir(): string {
-  return join(homedir(), '.dsh-image-forge')
-}
-
-/**
- * The weight directory the tool layer derives for a runtime directory.
- *
- * @param runtimeDir - plugin-owned data directory.
- * @returns the absolute weight path.
- */
-export function defaultModelsDir(runtimeDir: string): string {
-  return join(runtimeDir, 'models', 'qwen-image-2.1-bnb4bit')
-}
-
-/**
- * The interpreter inside the venv the plugin builds.
- *
- * @param runtimeDir - plugin-owned data directory.
- * @returns the absolute interpreter path, whether or not it exists yet.
- */
-export function defaultPythonPath(runtimeDir: string): string {
-  return venvPaths(runtimeDir).python
-}
-
-/**
- * The worker script shipped beside this package.
- *
- * @returns the absolute path to `resources/worker.py`.
- */
-export function defaultWorkerScript(): string {
-  return resourcePath('resources/worker.py')
-}
-
-/**
- * Look for one of several executable names across `PATH`, in order.
- *
- * @param names - file names to try, all of them in each directory before moving on.
- * @returns the first existing absolute path, or `''`.
- */
-function searchPath(names: readonly string[]): string {
-  const raw = process.env.PATH
-  if (raw === undefined || raw === '') return ''
-  for (const dir of raw.split(delimiter)) {
-    if (dir.length === 0) continue
-    for (const name of names) {
-      const candidate = join(dir, name)
-      try {
-        if (existsSync(candidate)) return candidate
-      } catch {
-        // An unreadable PATH entry is not a finding; keep looking.
-      }
-    }
-  }
-  return ''
-}
-
-/**
- * Look for a CPython install in the platform's usual locations.
- *
- * The installer's default `Python3xx` layout is what this scans for; anything
- * else would need a real registry or launcher query, which is out of proportion
- * for a default value the user can overwrite.
- *
- * @returns the first existing interpreter path, or `''`.
- */
-function searchPythonRoots(): string {
-  const roots =
-    process.platform === 'win32'
-      ? [join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Python'), join(process.env.ProgramFiles ?? '', 'Python')]
-      : ['/usr/local/bin', '/usr/bin']
-  for (const root of roots) {
-    if (root.length === 0) continue
-    let entries: string[]
-    try {
-      entries = readdirSync(root)
-    } catch {
-      continue
-    }
-    for (const entry of entries.filter((name) => /^Python3/i.test(name)).sort()) {
-      const candidate = join(root, entry, 'python.exe')
-      try {
-        if (existsSync(candidate)) return candidate
-      } catch {
-        // Same reasoning as above.
-      }
-    }
-  }
-  return ''
-}
-
-/**
- * Find a base interpreter for `action:"install"` to build the venv from.
- *
- * A real interpreter is preferred over the `py` launcher, and a `PATH` hit over
- * a scanned install root, so the value is the most directly usable one.
- *
- * @returns an absolute interpreter path, or `''` when none is found — which
- *   leaves the tool layer's own `python` / `python3` / `py` fallback in charge.
- */
-export function probeBasePython(): string {
-  const win = process.platform === 'win32'
-  const interpreters = win ? ['python.exe', 'python3.exe'] : ['python3', 'python']
-  const launcher = win ? ['py.exe'] : []
-  return searchPath(interpreters) || (launcher.length > 0 ? searchPath(launcher) : '') || searchPythonRoots()
 }
 
 /**
@@ -152,9 +39,9 @@ export function probeBasePython(): string {
  * The two `D:\Comfy-Desktop\…` entries are the layout the ComfyUI Desktop
  * installer produces on this machine and were confirmed present — Windows only;
  * the rest are the conventional per-user locations, with the Linux/macOS clone
- * and `/opt` spots added where those platforms actually put one. Ordering only decides which one wins when
- * several exist, and the value is shown on the settings page so a wrong pick is
- * visible and correctable.
+ * and `/opt` spots added where those platforms actually put one. Ordering only
+ * decides which one wins when several exist, and the value is shown on the
+ * settings page so a wrong pick is visible and correctable.
  *
  * @returns candidate directories, whether or not they exist.
  */
@@ -163,9 +50,8 @@ export function comfyModelsCandidates(): readonly string[] {
   const roaming = process.env.APPDATA ?? ''
   const local = process.env.LOCALAPPDATA ?? ''
   return [
-    // The two `D:\Comfy-Desktop\…` entries are the layout the ComfyUI Desktop
-    // installer produces on this machine and were confirmed present. They are
-    // Windows-only, and on any other platform they are not even absolute paths.
+    // ComfyUI Desktop's shared-models layout: one models tree reused by every
+    // installed instance, which is what the current installer offers.
     ...(win
       ? ['D:\\Comfy-Desktop\\ComfyUI-Shared\\models', 'D:\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\ComfyUI\\models']
       : []),
