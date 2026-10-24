@@ -42,3 +42,9 @@ docs/evidence/
 # score base vs turbo. Evidence for a judgement already recorded in prose, same
 # treatment as docs/evidence/ — the claim stays, the captures do not.
 .blindtest/
+
+# Mimosa scanner state (machine-local scan history / indexes): never committed.
+.mimosa/
+
+# 宣传片等工作产物：machine-local working material, never committed.
+输出/
