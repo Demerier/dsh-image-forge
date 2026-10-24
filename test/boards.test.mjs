@@ -35,6 +35,7 @@ import {
   sanitizeBoardName,
   setActiveBoard,
 } from '../testlib/boards.js'
+import { writeImages } from '../testlib/output.js'
 
 /** A fresh output directory per test; nothing is shared between them. */
 function makeDir() {
@@ -336,6 +337,69 @@ test('creating a board by hand gives it a printable default name', async () => {
     const fallback = await createBoard(dir)
     assert.match(fallback.name, /^画板 \d{2}-\d{2} \d{2}:\d{2}$/)
     assert.notEqual(fallback.id, named.id)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a crafted board id cannot walk out of the boards directory', async () => {
+  const dir = makeDir()
+  try {
+    // Every read, write and delete funnels through one id check, so a hostile
+    // id — from a route parameter or hand-edited board file — is refused at the
+    // storage layer instead of resolving to a path outside `boards/`.
+    const escape = join(dir, 'escaped.json')
+    assert.equal(await readBoard(dir, '../../escaped'), undefined)
+    assert.equal(await readBoard(dir, '..%2Fescaped'), undefined)
+    assert.equal(await deleteBoard(dir, '../../escaped'), false)
+    assert.equal(await renameBoard(dir, '../../escaped', 'x'), undefined)
+    assert.equal(await saveLayout(dir, '../../escaped', { items: [] }), undefined)
+    assert.equal(await removeItem(dir, '../../escaped', 'i1'), undefined)
+    assert.ok(!existsSync(escape), 'no file may appear outside the boards directory')
+    // A legitimate generated id still round-trips.
+    const created = await recordItems(dir, undefined, [item(dir, 'ok')])
+    assert.match(created.board.id, /^[a-z0-9]+$/)
+    assert.ok(await readBoard(dir, created.board.id))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('parentPaths resolve to board item ids, and unmatched paths drop silently', async () => {
+  const dir = makeDir()
+  try {
+    const source = await recordItems(dir, undefined, [item(dir, 'source')], { prompt: '原图' })
+    const sourcePath = source.items[0].path
+    // The caller passes the reference path as it had it — separators and case
+    // may differ from what the board stored (Windows reports both forms).
+    const flipped = sourcePath.split('\\').join('/').toUpperCase()
+    const edited = await recordItems(dir, source.board.id, [
+      item(dir, 'edit', { mode: 'edit', parentPaths: [flipped, join(dir, '不存在.png')] }),
+    ], { prompt: '改图' })
+    assert.deepEqual(edited.items[0].parents, [source.items[0].id], 'the matched path becomes the edge')
+    // An item that carries explicit ids is left untouched.
+    const manual = await recordItems(dir, source.board.id, [
+      item(dir, 'manual', { mode: 'edit', parents: ['i-custom'] }),
+    ], { prompt: '手动连线' })
+    assert.deepEqual(manual.items[0].parents, ['i-custom'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('concurrent writeImages calls never overwrite each other', async () => {
+  const dir = makeDir()
+  try {
+    // Four simultaneous single-image writes with the same prefix and size: the
+    // directory queue serialises probe-then-write, so the four results must
+    // carry four distinct indices and all four files must exist.
+    const runs = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        writeImages(dir, 'qwen', 1248, 1248, [{ bytes: new Uint8Array([137, 80]), mime: 'image/png' }])),
+    )
+    const indices = runs.flat().map((written) => written.index).sort((a, b) => a - b)
+    assert.deepEqual(indices, [1, 2, 3, 4], 'each concurrent call must claim its own free index')
+    for (const written of runs.flat()) assert.ok(existsSync(written.path))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

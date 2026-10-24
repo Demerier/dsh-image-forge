@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
 import {
-  DEFAULT_COMFY_PORTS,
+  comfyOptionsOf as buildComfyOptions,
   comfySystemStats,
   discoverComfyUi,
   generateViaComfyUi,
@@ -23,15 +23,16 @@ import {
   generateViaComfyUiTurbo,
   generateViaComfyUiTurboEdit,
   loadComfyModels,
+  parseComfyPorts,
   probeComfyUi,
   turboUnetOf,
   TURBO_STEPS,
   type ComfyModels,
-  type ComfyOptions,
 } from './comfyui.ts'
 import type { GeneratedImage } from './images.ts'
 import { sanitizePrefix, writeImages, type WrittenImage } from './output.ts'
 import { makeItemId, recordItems } from './boards.ts'
+import { firstLine } from './studio-shared.ts'
 import { MAX_REFERENCES, loadReferenceImages, probeImageSize, resolveRatioFollow, type ReferenceImage } from './refs.ts'
 import {
   MAX_SIDE,
@@ -215,8 +216,7 @@ interface BoardRecording {
 
 /** First line of a failure, so the board note stays a note. */
 function reasonOf(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error)
-  return text.split(/\r?\n/, 1)[0] ?? text
+  return firstLine(error, error instanceof Error ? error.message : String(error))
 }
 
 /** Session id the host gave this call, when it gave one. */
@@ -254,6 +254,8 @@ async function recordRun(
     steps: number
     seed: number | undefined
     mode: 'generate' | 'edit'
+    /** Paths this run was edited from; resolved to board item ids on record. */
+    parentPaths?: readonly string[]
     sessionId: string | undefined
   },
 ): Promise<BoardRecording> {
@@ -274,6 +276,7 @@ async function recordRun(
       mode: meta.mode,
       backend: 'comfyui',
       parents: [],
+      parentPaths: meta.parentPaths,
       sessionId: meta.sessionId ?? null,
     })), { prompt: meta.prompt, sessionId: meta.sessionId ?? null })
     recorded.items.forEach((item, index) => { ids[index] = item.id })
@@ -433,33 +436,9 @@ export interface ForgeSettings {
   readonly turboSteps: number | undefined
 }
 
-/**
- * Parse the comma-separated `comfyPorts` value into candidate ports.
- *
- * Anything that is not a usable port number is ignored rather than rejected: a
- * typo in the config must not stop the plugin from loading, and the default list
- * is the documented behaviour.
- *
- * @param raw - config value, e.g. `8000,8188`.
- * @returns distinct valid ports, or the defaults when none survive.
- */
-function parseComfyPorts(raw: string): number[] {
-  const ports = new Set<number>()
-  for (const part of raw.split(/[,\s]+/)) {
-    const port = Number(part.trim())
-    if (part.trim().length > 0 && Number.isInteger(port) && port >= 1 && port <= 65535) ports.add(port)
-  }
-  return ports.size > 0 ? [...ports] : [...DEFAULT_COMFY_PORTS]
-}
-
 /** Everything the ComfyUI client needs from the resolved config. */
-function comfyOptions(settings: ForgeSettings, timeoutMs = settings.timeoutMs): ComfyOptions {
-  return {
-    endpoint: settings.comfyEndpoint,
-    ports: settings.comfyPorts,
-    modelsDir: settings.comfyModelsDir,
-    timeoutMs,
-  }
+function comfyOptions(settings: ForgeSettings, timeoutMs = settings.timeoutMs) {
+  return buildComfyOptions(settings, timeoutMs)
 }
 
 /**
@@ -485,6 +464,20 @@ export function resolveSettings(config: Config): ForgeSettings {
 /** Where a call's sampler-step count came from, for the result payload. */
 export type StepsSource = 'explicit' | 'backend' | 'default'
 
+/**
+ * Hard ceiling on any step count that reaches the sampler.
+ *
+ * The same clamp the Studio applies: 1 is a legal single-step draft, 200 is
+ * well past anything Qwen-Image benefits from, and an unclamped explicit value
+ * (a typo, a confused caller) would pin the GPU for hours. Shared by both
+ * resolvers below so the two front doors cannot drift.
+ */
+export const STEPS_LIMIT = 200
+
+function clampSteps(value: number): number {
+  return Math.min(STEPS_LIMIT, Math.max(1, Math.round(value)))
+}
+
 /** The resolved step count for one backend, and its provenance. */
 export interface StepsResolution {
   /** The count to send. */
@@ -497,16 +490,17 @@ export interface StepsResolution {
  * Resolve the sampler steps one call should use.
  *
  * Priority: the caller's explicit `steps` > the ComfyUI override
- * (`comfyuiSteps`) > `defaultSteps`.
+ * (`comfyuiSteps`) > `defaultSteps`. Every branch passes through
+ * {@link clampSteps}, so even an explicit 10000 arrives at the GPU as 200.
  *
  * @param explicit - the caller's `steps`, when it supplied one.
  * @param settings - the resolved plugin settings.
  * @returns the count and where it came from.
  */
 export function resolveSteps(explicit: number | undefined, settings: ForgeSettings): StepsResolution {
-  if (explicit !== undefined) return { steps: explicit, source: 'explicit' }
+  if (explicit !== undefined) return { steps: clampSteps(explicit), source: 'explicit' }
   if (typeof settings.comfyuiSteps === 'number' && Number.isFinite(settings.comfyuiSteps) && settings.comfyuiSteps >= 1) {
-    return { steps: Math.round(settings.comfyuiSteps), source: 'backend' }
+    return { steps: clampSteps(settings.comfyuiSteps), source: 'backend' }
   }
   return { steps: settings.defaultSteps, source: 'default' }
 }
@@ -517,17 +511,17 @@ export function resolveSteps(explicit: number | undefined, settings: ForgeSettin
  * Deliberately does **not** fall through to `defaultSteps` or `comfyuiSteps`:
  * those are tuned for the base checkpoint (25), and handing 25 steps to a
  * checkpoint distilled for 8 makes the picture worse, not better. An explicit
- * `steps` from the caller still wins, because that is how the turbo contract
- * gets checked on a real card.
+ * `steps` from the caller still wins (clamped), because that is how the turbo
+ * contract gets checked on a real card.
  *
  * @param explicit - the caller's `steps`, when it supplied one.
  * @param settings - the resolved plugin settings.
  * @returns the count and where it came from.
  */
 export function resolveTurboSteps(explicit: number | undefined, settings: ForgeSettings): StepsResolution {
-  if (explicit !== undefined) return { steps: explicit, source: 'explicit' }
+  if (explicit !== undefined) return { steps: clampSteps(explicit), source: 'explicit' }
   if (typeof settings.turboSteps === 'number' && Number.isFinite(settings.turboSteps) && settings.turboSteps >= 1) {
-    return { steps: Math.round(settings.turboSteps), source: 'backend' }
+    return { steps: clampSteps(settings.turboSteps), source: 'backend' }
   }
   return { steps: TURBO_STEPS, source: 'default' }
 }
@@ -592,7 +586,6 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       const size = chooseSize(args.wh_ratio, asInteger(args.width, 'width'), asInteger(args.height, 'height'))
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
-      if (steps !== undefined && steps < 1) throw new Error(`steps must be >= 1, got ${steps}`)
       const request = {
         prompt,
         width: size.width,
@@ -718,7 +711,6 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       )
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
-      if (steps !== undefined && steps < 1) throw new Error(`steps must be >= 1, got ${steps}`)
       const request = {
         prompt,
         width: size.width,
@@ -763,6 +755,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         steps: usedSteps.steps,
         seed: request.seed,
         mode: 'edit',
+        parentPaths: references.map((reference) => reference.source),
         sessionId: sessionOf(exec),
       })
       const followed = size.followed

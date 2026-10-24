@@ -95,6 +95,17 @@ export interface NewBoardItem {
   mode?: BoardItem['mode']
   backend?: string | null
   parents?: readonly string[]
+  /**
+   * Paths of the images this one was edited from, resolved against **this
+   * board's** items inside the write lock and turned into `parents` ids.
+   *
+   * The conversation path knows its reference images only as the paths the
+   * caller passed; the id of the item those paths belong to is decided here,
+   * where the board is already loaded. Paths that match nothing (a reference
+   * from another board, an untracked file) are dropped silently — a missing
+   * edge must never fail a generation that already succeeded.
+   */
+  parentPaths?: readonly string[]
   sessionId?: string | null
   batchId?: string
   /** Placement from a caller that already knows where it goes (never the tools). */
@@ -143,7 +154,24 @@ function stateFile(outputDir: string): string {
 
 /** One board's file path. */
 function boardFile(outputDir: string, id: string): string {
+  assertBoardId(id)
   return join(boardsDir(outputDir), `${id}.json`)
+}
+
+/**
+ * Refuse any id that did not come from {@link newBoardId}.
+ *
+ * Board ids are always generated (`b` + base36 clock + base36 entropy), so the
+ * allow-list is strict and costs nothing legitimate. It is the single choke
+ * point in front of `join(boardsDir, \`${id}.json\`)`: without it, a crafted
+ * id like `../victim` read out of a hostile board file — or handed to the
+ * board route's `board` parameter — would walk the path out of the boards
+ * directory and turn reads and deletes into a filesystem oracle.
+ */
+function assertBoardId(id: string): void {
+  if (!/^[a-z0-9]{1,64}$/.test(id)) {
+    throw new Error(`boards: invalid board id "${id.slice(0, 40)}" — ids are generated, never accepted from callers`)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,10 +185,13 @@ function boardFile(outputDir: string, id: string): string {
  * conversation run), and both do read-modify-write on one board file. Chaining
  * the writes per directory is enough: the work is small and single-process, and
  * a rejected task must not poison the chain, hence `.catch` on the stored tail.
+ *
+ * Shared with `output.ts`, which needs the same guarantee for its
+ * find-free-index-then-write sequence.
  */
 const queues = new Map<string, Promise<unknown>>()
 
-function serialized<T>(key: string, task: () => Promise<T>): Promise<T> {
+export function serialized<T>(key: string, task: () => Promise<T>): Promise<T> {
   const previous = queues.get(key) ?? Promise.resolve()
   const run = previous.then(task, task)
   queues.set(key, run.catch(() => undefined))
@@ -502,7 +533,7 @@ export async function recordItems(
         seed: incoming.seed ?? null,
         mode: incoming.mode ?? 'generate',
         backend: incoming.backend ?? null,
-        parents: [...(incoming.parents ?? [])],
+        parents: resolveParents(board.items, incoming),
         createdAt: existingIndex >= 0 ? board.items[existingIndex].createdAt : now,
         sessionId: incoming.sessionId ?? board.sessionId,
         batchId: incoming.batchId ?? batchId,
@@ -532,6 +563,28 @@ function gridSpot(index: number): { x: number; y: number } {
     x: GRID_ORIGIN + (index % GRID_COLUMNS) * GRID_PITCH_X,
     y: GRID_ORIGIN + Math.floor(index / GRID_COLUMNS) * GRID_PITCH_Y,
   }
+}
+
+/**
+ * Resolve `parentPaths` into item ids of **this board**.
+ *
+ * Matching is separator- and case-insensitive (Windows reports the same file
+ * with either), so the caller can pass the reference path exactly as it was
+ * handed to the tool. Explicit `parents` ids win when given; paths that match
+ * nothing are dropped without ceremony — see {@link NewBoardItem.parentPaths}.
+ */
+function resolveParents(existing: readonly BoardItem[], incoming: NewBoardItem): string[] {
+  if (incoming.parents !== undefined) return [...incoming.parents]
+  const paths = incoming.parentPaths ?? []
+  if (paths.length === 0) return []
+  const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase()
+  const byPath = new Map(existing.map((item) => [normalize(item.path), item.id]))
+  const ids: string[] = []
+  for (const path of paths) {
+    const id = byPath.get(normalize(path))
+    if (id !== undefined && !ids.includes(id)) ids.push(id)
+  }
+  return ids
 }
 
 /**

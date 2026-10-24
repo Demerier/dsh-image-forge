@@ -77,6 +77,9 @@ export default defineConfig([
       // grid fallback and the layout round-trip are asserted directly — the
       // filesystem is the contract here, so a mock would assert nothing.
       'src/boards.ts',
+      // Image persistence: the free-index skip and the directory-serialised
+      // write sequence are filesystem contracts, asserted on a real temp dir.
+      'src/output.ts',
       // The wire constants themselves: the panel's limits and the host's must be
       // the same numbers, so the test build exposes them rather than restating
       // the values in a test file.

@@ -326,3 +326,22 @@ export interface StudioAssetsResponse {
 export interface StudioErrorBody {
   error: string
 }
+
+/**
+ * First line of a failure, for any payload that must stay small.
+ *
+ * Shared by the route guards, the Studio pipeline and the tool layer: adapter
+ * messages are deliberately multi-line (they quote upstream tracebacks), but
+ * the wire copies carry only the headline. `fallback` replaces an empty first
+ * line — a tool's board note keeps the original text, an HTTP body says
+ * 未知错误.
+ *
+ * @param error - the thrown value.
+ * @param fallback - what to return when the first line is empty.
+ * @returns the first line, or the fallback.
+ */
+export function firstLine(error: unknown, fallback = '未知错误'): string {
+  const text = error instanceof Error ? error.message : String(error)
+  const line = text.split(/\r?\n/, 1)[0] ?? text
+  return line.length > 0 ? line : fallback
+}

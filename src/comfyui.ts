@@ -59,6 +59,58 @@ export interface ComfyOptions {
   readonly pollIntervalMs?: number
 }
 
+/** The resolved-config fields both front doors carry into one call's options. */
+export interface ComfySettingsFields {
+  /** `comfyEndpoint` as the settings resolver produced it. */
+  readonly comfyEndpoint: string
+  /** `comfyPorts` **already parsed** by {@link parseComfyPorts}. */
+  readonly comfyPorts: readonly number[]
+  /** `comfyModelsDir` as resolved. */
+  readonly comfyModelsDir: string
+  /** The configured per-call budget. */
+  readonly timeoutMs: number
+}
+
+/**
+ * Parse the comma-separated `comfyPorts` value into candidate ports.
+ *
+ * Anything that is not a usable port number is ignored rather than rejected: a
+ * typo in the config must not stop the plugin from loading, and the default list
+ * is the documented behaviour. Shared by the Agent tools and the Studio, so a
+ * typo cannot behave differently across the two front doors.
+ *
+ * @param raw - config value, e.g. `8000,8188`.
+ * @returns distinct valid ports, or the defaults when none survive.
+ */
+export function parseComfyPorts(raw: string): number[] {
+  const ports = new Set<number>()
+  for (const part of raw.split(/[,\s]+/)) {
+    const port = Number(part.trim())
+    if (part.trim().length > 0 && Number.isInteger(port) && port >= 1 && port <= 65535) ports.add(port)
+  }
+  return ports.size > 0 ? [...ports] : [...DEFAULT_COMFY_PORTS]
+}
+
+/**
+ * Derive one call's {@link ComfyOptions} from the settings both front doors share.
+ *
+ * The Agent tools' `ForgeSettings` and the Studio's `StudioSettings` both
+ * satisfy the structural argument, so the endpoint trimming and the timeout
+ * hand-off cannot drift apart between the two readers.
+ *
+ * @param settings - the resolved settings (ports already parsed).
+ * @param timeoutMs - per-call override; defaults to the configured budget.
+ * @returns the options the adapter functions take.
+ */
+export function comfyOptionsOf(settings: ComfySettingsFields, timeoutMs = settings.timeoutMs): ComfyOptions {
+  return {
+    endpoint: settings.comfyEndpoint.replace(/\/+$/, ''),
+    ports: settings.comfyPorts,
+    modelsDir: settings.comfyModelsDir,
+    timeoutMs,
+  }
+}
+
 /** One reachability attempt made while looking for ComfyUI. */
 export interface ComfyProbeAttempt {
   /** Endpoint that was tried. */
@@ -402,9 +454,13 @@ function pickModelFile(options: readonly string[], required: RegExp, bonuses: re
 
 /** Where a weight belongs, phrased for the machine that is running this plugin. */
 function folderHint(modelsDir: string, folder: string): string {
-  return modelsDir.trim().length > 0
-    ? `${modelsDir.trim().replace(/[\\/]+$/, '')}\\${folder}\\`
-    : `ComfyUI 的 models\\${folder}\\ 目录（桌面版/便携版的模型路径见 ComfyUI 设置或 extra_model_paths.yaml）`
+  // The separator follows the platform: joining a Windows path with `\` would
+  // read as garbage on Linux/macOS error text, and vice versa.
+  const separator = process.platform === 'win32' ? '\\' : '/'
+  if (modelsDir.trim().length > 0) {
+    return `${modelsDir.trim().replace(/[\\/]+$/, '')}${separator}${folder}${separator}`
+  }
+  return `ComfyUI 的 models${separator}${folder}${separator} 目录（桌面版/便携版的模型路径见 ComfyUI 设置或 extra_model_paths.yaml）`
 }
 
 /**

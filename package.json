@@ -53,7 +53,7 @@
   ],
   "scripts": {
     "build": "tsdown && tsdown -c tsdown.client.config.ts",
-    "test": "node test/ratio.test.mjs && node test/surface.test.mjs && node test/comfyui-e2e.test.mjs && node test/edit-e2e.test.mjs && node test/settings.test.mjs && node test/studio.test.mjs && node test/studio-canvas.test.mjs && node test/boards.test.mjs && node test/package-contents.test.mjs && node test/studio-file-route.test.mjs",
+    "test": "node test/ratio.test.mjs && node test/surface.test.mjs && node test/comfyui-e2e.test.mjs && node test/edit-e2e.test.mjs && node test/settings.test.mjs && node test/studio.test.mjs && node test/studio-canvas.test.mjs && node test/boards.test.mjs && node test/output.test.mjs && node test/package-contents.test.mjs && node test/studio-file-route.test.mjs",
     "test:live": "node test/live-generate-e2e.mjs",
     "test:live:edit": "node test/live-edit-e2e.mjs",
     "prepack": "pnpm run build",

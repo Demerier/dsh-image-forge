@@ -33,6 +33,14 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Check lib/ is fresh
+        # lib/ is committed on purpose: the `github:` install path loads it
+        # without building (a git dependency install runs `prepare`, not
+        # `prepack`, and `prepare` has no tsdown available). This step turns
+        # "src changed but lib/ not rebuilt" into a red run here instead of a
+        # silently stale artifact for GitHub users.
+        run: git diff --exit-code lib/
+
       - name: Test
         run: pnpm test
 

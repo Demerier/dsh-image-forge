@@ -36,12 +36,11 @@ export function defaultOutputDir(): string {
 /**
  * Where a ComfyUI install keeps its `models` directory, most likely first.
  *
- * The two `D:\Comfy-Desktop\…` entries are the layout the ComfyUI Desktop
- * installer produces on this machine and were confirmed present — Windows only;
- * the rest are the conventional per-user locations, with the Linux/macOS clone
- * and `/opt` spots added where those platforms actually put one. Ordering only
- * decides which one wins when several exist, and the value is shown on the
- * settings page so a wrong pick is visible and correctable.
+ * Conventional per-user locations only — no machine-specific entries: a
+ * published plugin must not ship one author's directory layout, and a wrong
+ * guess is visible (and correctable) on the settings page anyway. The
+ * Linux/macOS clone and `/opt` spots are added where those platforms actually
+ * put one. Ordering only decides which one wins when several exist.
  *
  * @returns candidate directories, whether or not they exist.
  */
@@ -50,11 +49,6 @@ export function comfyModelsCandidates(): readonly string[] {
   const roaming = process.env.APPDATA ?? ''
   const local = process.env.LOCALAPPDATA ?? ''
   return [
-    // ComfyUI Desktop's shared-models layout: one models tree reused by every
-    // installed instance, which is what the current installer offers.
-    ...(win
-      ? ['D:\\Comfy-Desktop\\ComfyUI-Shared\\models', 'D:\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\ComfyUI\\models']
-      : []),
     // `APPDATA` / `LOCALAPPDATA` only exist on Windows; reading them elsewhere
     // would invent a Windows-shaped path on a POSIX box.
     ...(roaming === '' || !win ? [] : [join(roaming, 'ComfyUI', 'models')]),

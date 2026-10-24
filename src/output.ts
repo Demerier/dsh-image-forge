@@ -2,13 +2,19 @@
  * Image persistence: `<outputDir>/<prefix>_<W>x<H>_<n>.png`.
  *
  * Numbering starts at 1 and skips names already on disk, so a second identical
- * call adds files instead of silently overwriting the first result. Writes are
- * staged through a temporary file and renamed, so an interrupted call never
- * leaves a half-written PNG under the final name.
+ * call adds files instead of silently overwriting the first result. The whole
+ * find-free-index-then-write sequence runs inside the directory's write queue
+ * (the same primitive the board store uses): two concurrent generations — the
+ * conversation tool and the Studio panel — would otherwise both probe the same
+ * free index and the second `rename` would silently overwrite the first image.
+ * Writes are staged through a per-call temporary file and renamed, so an
+ * interrupted call never leaves a half-written PNG under the final name.
  */
+import { randomUUID } from 'node:crypto'
 import { mkdir, rename, unlink, writeFile, access } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { join } from 'node:path'
+import { serialized } from './boards.ts'
 
 /** Extensions probed when deciding whether a name is already taken. */
 const KNOWN_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'] as const
@@ -83,6 +89,10 @@ export async function nextFreeIndex(
 /**
  * Write every generated image under the required naming scheme.
  *
+ * The queue key is the output directory itself, so any two callers writing
+ * images into one directory are serialised against each other regardless of
+ * which tool or panel they came from.
+ *
  * @param dir - output directory; created when missing.
  * @param prefix - sanitized filename prefix.
  * @param width - aligned width used in the file name.
@@ -90,35 +100,40 @@ export async function nextFreeIndex(
  * @param images - decoded images in backend order.
  * @returns one record per written file, with Markdown-ready absolute paths.
  */
-export async function writeImages(
+export function writeImages(
   dir: string,
   prefix: string,
   width: number,
   height: number,
   images: readonly { bytes: Uint8Array; mime: string }[],
 ): Promise<WrittenImage[]> {
-  await mkdir(dir, { recursive: true })
-  const first = await nextFreeIndex(dir, prefix, width, height)
-  const written: WrittenImage[] = []
-  let index = first
-  for (const image of images) {
-    const path = join(dir, `${prefix}_${width}x${height}_${index}.png`)
-    const staging = `${path}.partial-${process.pid}`
-    await writeFile(staging, image.bytes)
-    try {
-      await rename(staging, path)
-    } catch (error) {
-      await unlink(staging).catch(() => undefined)
-      throw error
+  return serialized(dir, async () => {
+    await mkdir(dir, { recursive: true })
+    const first = await nextFreeIndex(dir, prefix, width, height)
+    const written: WrittenImage[] = []
+    let index = first
+    for (const image of images) {
+      const path = join(dir, `${prefix}_${width}x${height}_${index}.png`)
+      // The staging name is per call, not per process: two concurrent calls
+      // that raced to the same final name would otherwise interleave writes
+      // into one shared `.partial-<pid>` file and corrupt both.
+      const staging = `${path}.partial-${process.pid}-${randomUUID().slice(0, 8)}`
+      await writeFile(staging, image.bytes)
+      try {
+        await rename(staging, path)
+      } catch (error) {
+        await unlink(staging).catch(() => undefined)
+        throw error
+      }
+      written.push({
+        index,
+        path,
+        markdownPath: path.replace(/\\/g, '/'),
+        bytes: image.bytes.byteLength,
+        mime: image.mime,
+      })
+      index += 1
     }
-    written.push({
-      index,
-      path,
-      markdownPath: path.replace(/\\/g, '/'),
-      bytes: image.bytes.byteLength,
-      mime: image.mime,
-    })
-    index += 1
-  }
-  return written
+    return written
+  })
 }

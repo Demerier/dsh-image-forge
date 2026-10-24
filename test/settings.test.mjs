@@ -752,6 +752,11 @@ test('resolveSteps follows explicit > comfyui override > default', async () => {
     ['an unset comfyui override falls through', undefined, withSteps(25, undefined), { steps: 25, source: 'default' }],
     ['the shipped defaults resolve to 25', undefined, withSteps(25, undefined), { steps: 25, source: 'default' }],
     ['a non-positive override is ignored', undefined, withSteps(25, 0), { steps: 25, source: 'default' }],
+    // An explicit value is clamped, not honoured: a typo (10000) or a confused
+    // caller must not pin the GPU for hours. Same contract as the Studio's
+    // resolveStudioSteps, which clamps 1–200.
+    ['an explicit 10000 arrives as the clamp ceiling', 10000, withSteps(25, 30), { steps: 200, source: 'explicit' }],
+    ['an explicit 0 clamps to 1 instead of throwing', 0, withSteps(25, 30), { steps: 1, source: 'explicit' }],
   ]
   for (const [label, explicit, settings, expected] of cases) {
     const actual = resolveSteps(explicit, settings)
@@ -773,6 +778,11 @@ test('resolveTurboSteps never borrows the base family\'s 25', async () => {
     resolveTurboSteps(undefined, { ...settings, turboSteps: 0 }),
     { steps: 8, source: 'default' },
     'a non-positive override must not be honoured',
+  )
+  assert.deepEqual(
+    resolveTurboSteps(10000, settings),
+    { steps: 200, source: 'explicit' },
+    'an explicit turbo value clamps like the base one',
   )
 })
 

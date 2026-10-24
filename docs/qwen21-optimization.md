@@ -242,7 +242,7 @@ Lightning LoRA 下正常，且依赖参考图内容。
 | 7 | **P2** | 单参考图编辑改自然指代（去 `<image1>`），多参考保留标签；保留描述抽象化写进 edit_rules | 〔官方契约〕guide_edit 明文 | 📋 改 `references/edit_rules.md` + skill |
 | 8 | **P2** | VAE 网格纹：文档指路 Nyquist Notch degrid 节点（不内置依赖） | 〔多源现象+双源方案〕halftone/diamond/crosshatch 纹；"extremely effective with pretty much no sharpness loss"；与超分链路有兼容性问题需注明 | 📋 docs 一段 |
 | 9 | **P3** | 文本编码器优先档增补 `w4a8`（比 int8_convrot TE 省 ~2.8 GiB，8GB offload 场景更稳） | 〔官方文件表〕TE 三档体积；插件现打分 `/int8/i` 会压过 w4a8，需给 8GB 用户更优默认 | 📋 调整 `MODEL_KINDS.clip.bonus` + 文档 |
-| 10 | **P3** | t2i 的 TextEncodeQwenImage21 `resolution` 1024 → 传画布面积等效值（与 edit 路径一致） | 影响不明（无参考图时该参数语义官方未说明），但对齐官方模板 ResolutionSelector 行为，成本低 | 📋 一行改动 + 盲测确认无回退 |
+| 10 | ~~P3~~ | ~~t2i 的 `resolution` 1024 → 传画布面积等效值~~ **核实后取消**：官方 t2i 模板的 encode 节点就是静态 1024（无连线、latent 输出未接），插件现状与官方完全一致 | 〔官方〕模板 JSON 逐字段核对（§一）；早前「与官方不一致」的怀疑不成立 | ✅ 无需改动 |
 | 11 | **P3** | RGBA 透明输出恢复：按官方 RGBA 提示词模板 + 检查 VAE alpha 通道输出 | 〔官方〕模型卡有原生路径；0.2.x 删掉的 `transparent` 是因为旧实现不处理而非模型不支持 | 🔬 需实验：VAE 解码 alpha 后 PNG 落盘链路 |
 | 12 | **P3** | 采样器高级档暴露（res_multistep / RES4LYF+beta_57+shift16 / er_sde+beta），默认保持 euler/simple | 替代组合全部〔孤证〕，无严格对照；默认合理性〔官方+双源〕 | 📋 可选参数，不做默认 |
 | 13 | **P3** | 改图 denoise<1 档（锁 ≈0.55）做「轻改」模式 | 〔孤证〕中文社区实测；需加 latent 注入接线 | 🔬 实验后定 |

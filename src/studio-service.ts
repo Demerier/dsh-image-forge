@@ -30,22 +30,23 @@ import { readFileSync, statSync } from 'node:fs'
 import { basename, extname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
-  DEFAULT_COMFY_PORTS,
+  comfyOptionsOf as buildComfyOptions,
   discoverComfyUi,
   generateViaComfyUi,
   generateViaComfyUiEdit,
   generateViaComfyUiTurbo,
   generateViaComfyUiTurboEdit,
   loadComfyModels,
+  parseComfyPorts,
   turboUnetOf,
   TURBO_STEPS,
   type ComfyModels,
-  type ComfyOptions,
   type ComfyTarget,
 } from './comfyui.ts'
 import type { GeneratedImage, ReferenceImagePayload } from './images.ts'
 import { activeBoardId, listBoards, makeItemId, recordItems } from './boards.ts'
 import { writeImages } from './output.ts'
+import { firstLine } from './studio-shared.ts'
 import { WH_RATIOS, resolveDefaultSize } from './ratio.ts'
 import type { Config } from './index.ts'
 import {
@@ -79,23 +80,8 @@ export interface StudioSettings {
 }
 
 /** ComfyUI options derived from the settings, in the shape the adapter expects. */
-export function comfyOptionsOf(settings: StudioSettings, timeoutMs = settings.timeoutMs): ComfyOptions {
-  return {
-    endpoint: settings.comfyEndpoint,
-    ports: settings.comfyPorts,
-    modelsDir: settings.comfyModelsDir,
-    timeoutMs,
-  }
-}
-
-/** Parse the comma-separated `comfyPorts` value, falling through to the defaults. */
-function parsePorts(raw: string): number[] {
-  const ports = new Set<number>()
-  for (const part of raw.split(/[,\s]+/)) {
-    const port = Number(part.trim())
-    if (part.trim().length > 0 && Number.isInteger(port) && port >= 1 && port <= 65535) ports.add(port)
-  }
-  return ports.size > 0 ? [...ports] : [...DEFAULT_COMFY_PORTS]
+export function comfyOptionsOf(settings: StudioSettings, timeoutMs = settings.timeoutMs) {
+  return buildComfyOptions(settings, timeoutMs)
 }
 
 /**
@@ -110,7 +96,7 @@ function parsePorts(raw: string): number[] {
 export function studioSettingsOf(config: Config): StudioSettings {
   return {
     comfyEndpoint: config.comfyEndpoint,
-    comfyPorts: parsePorts(config.comfyPorts),
+    comfyPorts: parseComfyPorts(config.comfyPorts),
     comfyModelsDir: config.comfyModelsDir,
     timeoutMs: config.timeoutMs,
     outputDir: config.outputDir,
@@ -237,13 +223,6 @@ export async function describeStudio(
     activeBoard: active,
     ...(boardsNote === undefined ? {} : { boardsNote }),
   }
-}
-
-/** First line of an error, for a body that must stay small. */
-function firstLine(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error)
-  const line = text.split(/\r?\n/, 1)[0] ?? text
-  return line.length > 0 ? line : '未知错误'
 }
 
 /** Decode canonical base64, rejecting anything that does not round-trip. */

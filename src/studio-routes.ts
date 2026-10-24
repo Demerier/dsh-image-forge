@@ -47,6 +47,7 @@ import {
   type StudioOptimizeRequest,
   type StudioOptimizeTurn,
   type StudioReferencePayload,
+  firstLine,
 } from './studio-shared.ts'
 import {
   activeBoardId,
@@ -561,12 +562,6 @@ async function readBody(req: IncomingMessage, maxBytes: number): Promise<string>
     chunks.push(buffer)
   }
   return Buffer.concat(chunks).toString('utf8')
-}
-
-function firstLine(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error)
-  const line = text.split(/\r?\n/, 1)[0] ?? text
-  return line.length > 0 ? line : '未知错误'
 }
 
 function json(res: ServerResponse, status: number, value: unknown): void {
