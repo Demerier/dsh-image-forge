@@ -40,11 +40,9 @@ import { StudioPanel } from './studio-view.ts'
  */
 const STUDIO_TAB_ID = 'studio'
 import {
-  SECRET_MASK,
   SETTINGS_TABS,
   advisoryAfterGroup,
   displayValue,
-  isSecretField,
   tabFields,
   type SettingsAdvisory,
   type SettingsField,
@@ -295,7 +293,7 @@ function checkCell(key: string, label: string, text: string, tone: 'ok' | 'warn'
 }
 
 /**
- * Status card: a four-cell digest of the health probe.
+ * Status card: a three-cell digest of the health probe.
  *
  * The full JSON stays in the tool result; this is the glanceable half.
  *
@@ -306,23 +304,7 @@ function StatusRow(props: ToolRowProps): ReactNode {
   try {
     const payload = payloadOf(props)
     const status = phaseLabel(props, '探测完成', '正在探测后端…')
-    const api = asRecord(payload?.['api'])
     const comfy = asRecord(payload?.['comfyui'])
-
-    const apiOk = api?.['reachable'] === true
-    const apiAuth = api?.['authenticated'] === true
-    const apiHasKey = api?.['keyPresent'] === true
-    const apiTone: 'ok' | 'warn' | 'bad' =
-      apiOk && apiAuth ? 'ok' : apiOk || (api?.['reachable'] === null && apiHasKey) ? 'warn' : 'bad'
-    const apiText = !apiHasKey && api?.['reachable'] !== true
-      ? '未配置 key'
-      : !apiOk
-        ? api?.['reachable'] === null
-          ? '未探测（无 key）'
-          : '不可达'
-        : apiAuth
-          ? '可达，key 被接受'
-          : '可达，但 key 被拒绝'
 
     const comfyOk = comfy?.['reachable'] === true
     const models = asRecord(comfy?.['models'])
@@ -348,18 +330,12 @@ function StatusRow(props: ToolRowProps): ReactNode {
     return createElement(CardShell, {
       title: '后端健康',
       status,
-      pills: [
-        pill(
-          'backend',
-          `配置后端 ${typeof payload?.['configured_backend'] === 'string' ? payload['configured_backend'] : '?'}`,
-        ),
-      ],
+      pills: [],
       children: [
         createElement(
           'div',
           { key: 'checks', className: 'dsh-image-forge-checklist' },
           [
-            checkCell('api', '云端 API', apiText, apiTone),
             checkCell('comfy', 'ComfyUI', comfyText, comfyTone),
             checkCell('vram', '显卡', gpuText, vramTotal === null ? 'warn' : 'neutral'),
             checkCell('output', '输出目录', outputWritable ? '可写' : '不可写', outputWritable ? 'ok' : 'bad'),
@@ -464,17 +440,6 @@ function FieldRow(props: ControlProps): ReactNode {
   } else if (saved) {
     status.push(
       createElement('span', { key: 'saved', className: 'dsh-image-forge-setting-saved', role: 'status' }, '已保存'),
-    )
-  }
-  // A secret's *stored* value is shown only as a mask, and only as an
-  // indication that something is set — never the value the Host sent.
-  if (isSecretField(field.key)) {
-    status.push(
-      createElement(
-        'span',
-        { key: 'stored', className: 'dsh-image-forge-setting-stored' },
-        displayValue(field.key, value) === '' ? '未设置' : `已设置 ${SECRET_MASK}`,
-      ),
     )
   }
 
@@ -593,29 +558,20 @@ function buildControl(
       ...unit,
     ]
   }
-  // Text-ish: `string`, `path` and `secret`. A secret is a password input whose
-  // value starts empty and is only ever sent, never echoed back.
-  const secret = field.kind === 'secret'
-  const storedPresent = secret && typeof value === 'string' && value.length > 0
+  // Text-ish: `string` and `path`.
   return [
     createElement('input', {
       key: 'input',
       id: controlId,
-      type: secret ? 'password' : 'text',
-      value: draft ?? (secret ? '' : typeof value === 'string' ? value : ''),
+      type: 'text',
+      value: draft ?? (typeof value === 'string' ? value : ''),
       disabled,
-      placeholder: storedPresent ? '已保存（留空表示不修改）' : (field.placeholder ?? ''),
-      autoComplete: secret ? 'off' : undefined,
+      placeholder: field.placeholder ?? '',
       onChange: (event: { target: { value: string } }) => {
         setDraft(event.target.value)
       },
       onBlur: () => {
         if (draft === null) return
-        // An untouched empty secret box means "leave the stored key alone".
-        if (secret && draft === '') {
-          setDraft(null)
-          return
-        }
         commit(draft)
         setDraft(null)
       },

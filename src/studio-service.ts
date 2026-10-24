@@ -43,7 +43,7 @@ import {
   type ComfyOptions,
   type ComfyTarget,
 } from './comfyui.ts'
-import type { GeneratedImage, ReferenceImagePayload } from './backend.ts'
+import type { GeneratedImage, ReferenceImagePayload } from './images.ts'
 import { activeBoardId, listBoards, makeItemId, recordItems } from './boards.ts'
 import { writeImages } from './output.ts'
 import { WH_RATIOS, resolveDefaultSize } from './ratio.ts'
@@ -364,7 +364,6 @@ export async function runStudioGeneration(
           count,
           steps,
           seed,
-          transparent: false,
           images: references,
         },
         options,
@@ -380,7 +379,6 @@ export async function runStudioGeneration(
           count,
           steps,
           seed,
-          transparent: false,
         },
         options,
         signal,

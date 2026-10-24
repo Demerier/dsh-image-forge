@@ -38,7 +38,7 @@
  * reference at a 32-aligned ~1.5 MP budget, which is what `ratio_follow` resolves to.
  */
 import { createHash } from 'node:crypto'
-import { sniffImageMime, type GeneratedImage, type GenerateRequest, type ReferenceImagePayload } from './backend.ts'
+import { sniffImageMime, type GeneratedImage, type GenerateRequest, type ReferenceImagePayload } from './images.ts'
 
 /** Ports probed when `comfyEndpoint` is empty, in order. */
 export const DEFAULT_COMFY_PORTS = [8000, 8188, 8189, 8190, 8191, 8192] as const
@@ -358,7 +358,8 @@ export async function discoverComfyUi(options: ComfyOptions, signal?: AbortSigna
   const tried = probed.map((attempt) => `  • ${attempt.endpoint} — ${attempt.note ?? 'no reason reported'}`).join('\n')
   throw new Error(
     `comfyui backend: 没找到在跑的 ComfyUI（已探测 ${probed.length} 个端口）：\n${tried}\n` +
-      '  启动 ComfyUI（桌面版/便携版都可以）后重试；如果它监听在别的端口，把该端口写进 comfyPorts 或直接写 comfyEndpoint。',
+      '  启动 ComfyUI（桌面版/便携版都可以）后重试；如果它监听在别的端口，把该端口写进 comfyPorts 或直接写 comfyEndpoint。\n' +
+      '  部署步骤（下载、放权重、校验）见 docs/comfyui-deployment.md；也可以先跑 qwen_image_status 看缺什么。',
   )
 }
 
@@ -682,11 +683,13 @@ export const QWEN_IMAGE_TURBO_WORKFLOW: Record<string, { class_type: string; inp
  * The Turbo edit graph: the turbo skeleton plus the edit encode node plus the
  * reference slots that {@link editTurboWorkflow} wires per call.
  *
- * One parameter differs from the turbo **text-to-image** template and it is not
- * a typo: the official `image_qwen_image_2_1_turbo_image_edit.json` runs
- * `CFGGuider` at **8**, while its t2i sibling runs at **1**. The edit path feeds
- * a condition built from the reference images, and the guidance scale is what
- * balances that condition against the prompt.
+ * `cfg` is **1**, the same as the turbo t2i graph. The official turbo edit
+ * template's JSON shows a stale `[8]` widget on `CFGGuider`, but that value is
+ * dead: the node's cfg is wired to the template's outer input, and the outer
+ * default — per docs.comfy.org, the Comfy-Org model card and the Turbo model
+ * card — is 1. At cfg 1 ComfyUI skips the negative conditioning pass entirely,
+ * so an elevated cfg with an empty negative prompt does not sharpen the edit;
+ * it degrades it.
  */
 export const QWEN_IMAGE_TURBO_EDIT_WORKFLOW: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
   ...QWEN_IMAGE_TURBO_WORKFLOW,
@@ -1215,9 +1218,9 @@ export async function generateViaComfyUiTurbo(
  * Run one Turbo reference-image edit.
  *
  * As with the base edit path, references are uploaded first and wired in as
- * `LoadImage` nodes. Two turbo-specific values differ from the t2i sibling:
- * `cfg` is 8 (the edit template's own value) and the step default is
- * {@link TURBO_STEPS}.
+ * `LoadImage` nodes. The turbo-specific values are the step default
+ * ({@link TURBO_STEPS}) and the manual sigma schedule; `cfg` stays 1, as in
+ * every official Qwen-Image 2.1 template.
  *
  * @param target - the endpoint that answered.
  * @param models - the three file names read from `/object_info`.
@@ -1257,7 +1260,7 @@ export async function generateViaComfyUiTurboEdit(
     batch_size: request.count,
     seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
     steps: request.steps ?? TURBO_STEPS,
-    cfg: 8,
+    cfg: 1,
     sampler_name: 'euler',
     scheduler: 'simple',
     sigmas: TURBO_SIGMAS,

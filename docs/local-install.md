@@ -2,6 +2,8 @@
 
 面向 `dsh-image-forge` 的本地构建与安装。已在本机 DSH Desktop `0.2.1-rc.2`（profile `desktop`）实测通过。
 
+> 普通用户不需要走这条路径：插件已发布到 npm，桌面版「插件 → 发现」里搜索或直接输入包名 `dsh-image-forge` 安装，或 `dsh plugin --profile <profile> add dsh-image-forge`。本页只面向改代码后本机验证的场景。
+
 ---
 
 ## 一、打包

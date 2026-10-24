@@ -7,8 +7,8 @@ pnpm build
 pnpm test
 ```
 
-**11 个文件 / 162 个用例**，全部不需要 GPU、ComfyUI 或任何权重
-（ratio 12 / surface 9 / api-e2e 8 / comfyui-e2e 9 / edit-e2e 9 / settings 56 / studio 28 / studio-canvas 9 / boards 15 / package-contents 4 / studio-file-route 3）。
+**10 个文件 / 154 个用例**，全部不需要 GPU、ComfyUI 或任何权重
+（ratio 12 / surface 9 / comfyui-e2e 9 / edit-e2e 9 / settings 53 / studio 28 / studio-canvas 9 / boards 15 / package-contents 3 / studio-file-route 3）。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——
@@ -20,7 +20,7 @@ pnpm test
 
 ## 每个文件钉住了什么
 
-### `test/settings.test.mjs`（56）
+### `test/settings.test.mjs`（53）
 
 设置分区的完整契约：
 
@@ -28,14 +28,13 @@ pnpm test
   返回的释放函数真的会解绑。
 - **入口 id 解析与镜像回绑**、`describe → 读 → 写` 往返、**revision 冲突被识别并重新读取而不是覆盖**、
   拒绝 / 不可写 / 同步抛错 / 传输失败四条失败路径、`mutateFields` 的 revision 透传。
-- **`apiKey` 的展示值与失败文案都不含明文**。
 - **「schema 里每个字段都有对应控件」的防漏测试**（新增配置字段却忘了补 UI 会在这里失败），
-  以及**反向**的一条：`RETIRED_FIELDS` 里 21 个已删除字段（`runtimeDir`、`pythonPath`、`minFreeVramMiB`、
-  `localReferenceBudget`…）**一个都不许回到 schema 或设置页**。
-- **步数解析**：`resolveSteps`（显式 > `comfyuiSteps` > `defaultSteps`，`api` 没有专属档）与
+  以及**反向**的一条：`RETIRED_FIELDS` 里 26 个已删除字段（`runtimeDir`、`pythonPath`、`minFreeVramMiB`、
+  `localReferenceBudget`、`backend`、`apiBaseUrl`、`apiKey`…）**一个都不许回到 schema 或设置页**。
+- **步数解析**：`resolveSteps`（显式 > `comfyuiSteps` > `defaultSteps`）与
   `resolveTurboSteps`（显式 > `turboSteps` > **8**，**绝不**继承 25）各自的分支。
-- **接线断言**：每个派发点都转发了解析后的步数（3 个 base + 2 个 turbo 解析点、5 个转发点，逐个计数）。
-- **tab / group 覆盖**：三页签且每个可见分组只出现在一页里；ComfyUI 页签必须指向
+- **接线断言**：每个派发点都转发了解析后的步数（2 个 base + 2 个 turbo 解析点、4 个派发转发 + 2 个记录点，逐个计数）。
+- **tab / group 覆盖**：配置两页签（工作台是第一个非配置页签）且每个可见分组只出现在一页里；ComfyUI 页签必须指向
   `docs/comfyui-deployment.md`，且该文档必须真的在包里。
 - **文案纪律**：字段 hint ≤ 40 字（带路径的 ≤ 110）、分组 hint ≤ 36 字、advisory ≤ 180 字、
   总字数上限贴着实测值设；**全块禁止任何修复承诺**；**被撤回或被证伪的数字**
@@ -48,27 +47,21 @@ pnpm test
 
 ### `test/surface.test.mjs`（9）
 
-`lib/index.js` 的四个导出、**三个**工具名、`backend` enum 恰好三档、`qwen_image_status` 只收 `timeoutMs`、
+`lib/index.js` 的四个导出、**三个**工具名、出图/改图**不带 `backend` 与 `transparent` 参数**、
+`qwen_image_status` 只收 `timeoutMs`、schema 里 9 个字段齐全且 5 个云端字段绝迹、
 `wh_ratio` enum 与它在 `skill.md` 里被引用的换算表、参考文件绝对路径、以及**compose 后的技能正文**：
-里面必须只剩两条后端、不许再提 `qwen_image_env` / `localReferenceBudget` / `freeComfyBeforeLocalStart` /
-`minFreeVramMiB` / `local_edit_budget`，并且必须写到 `comfyModel`、`turbo`、`8 步`、`turbo_fallback`
+里面必须只剩本机 ComfyUI 一条路、不许再提 `qwen_image_env` / `localReferenceBudget` / `freeComfyBeforeLocalStart` /
+`minFreeVramMiB` / `local_edit_budget` / `apiKey`，并且必须写到 `comfyModel`、`turbo`、`8 步`、`turbo_fallback`
 与部署文档的路径。
-
-### `test/api-e2e.test.mjs`（8）
-
-本地假端点端到端（请求体、响应解析、落盘字节一致）、编号不覆盖、显式 `width`/`height` 覆盖、
-**无 key / 无 ComfyUI 时的报错文本**（必须点名部署文档、且**不再**出现 `local:` 这条补救）、
-`backend: "api"` 缺 key 的专属文案、环境变量 key 与 401 上游的脱敏、
-`qwen_image_status` 的完整载荷形状（含 `version` / `devices` 为 `null`、`next_steps` 指向文档）与
-**lossless JSON**（无 `undefined`）。
 
 ### `test/comfyui-e2e.test.mjs`（9）
 
 假 ComfyUI 端到端（多端口探测 → `/object_info` 选权重 → `/prompt` 注入工作流 → 轮询 `/history` →
 `/view` 取图 → 落盘**逐字节一致**）、缺文件点名、没在跑时报出探过的端口、
 非回环端点拒绝且**一个请求都不发**、`node_errors` 与 traceback 原文回传、
-`auto` 的后端选择（有 key 走云端、无 key 走 ComfyUI、两边都没有时报错并指向文档）、
-以及 `qwen_image_status` 读到的 `version` / `devices`（来自 `/system_stats`，不是 `nvidia-smi`）。
+ComfyUI 没在跑时**永远走本机**这条唯一路径（报错点名探过的端口并指向部署文档，
+不再提供任何云端补救）、以及 `qwen_image_status` 读到的 `version` / `devices`
+（来自 `/system_stats`，不是 `nvidia-smi`）。
 
 ### `test/edit-e2e.test.mjs`（9）
 
@@ -80,10 +73,9 @@ pnpm test
 - `ratio_follow`（`image1` / 直接给路径 / 不传则默认第一张）换算出的画布与偏差。
 - `wh_ratio` + `ratio_follow` 同时给时**在碰后端之前**就报错。
 - 11 张 / 空表 / 缺文件 / 目录 / 相对路径 / 0 字节 / 非图片 / 非 base64 data URI / 空 base64 各自点名 `images[n]`。
-- `backend: "api"` 拒收参考图（报错里指向部署文档、不再提供 `local` 这条出路）；`auto` + 有 key 时
-  仍走 ComfyUI 并如实回报 `api_skipped`。
+- 改图只走 ComfyUI：没起来时报错点名探过的端口并指向部署文档，**不丢参考图**、
+  不再提供任何已删除的后端出路，返回里也没有 `api_skipped` / `transparent` 这些已删字段。
 - **满画布不设门**：1248×1248 的编辑照常出图，结果里**没有** `local_edit_budget` / `local_worker` 这两个键。
-- `auto` 在 ComfyUI 没起来时的错误只说缺什么 + 指向部署文档，不再描述「两个本地后端」。
 - **文生图不上传**：同一台假 ComfyUI 上先编辑（2 次上传、2 个 `LoadImage`），再文生图（上传数不变、
   图里没有 `LoadImage` 节点）。
 

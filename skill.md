@@ -24,7 +24,7 @@ Qwen-Image 的提示词规范给出的答案不是一段随便的描述，而是
 - 用户只是问「Qwen-Image 怎么用」「帮我写一段提示词」而**不要出图**：只做改写与讲解，不要调用生成工具（不要凭空消耗额度）
 - 用户要的是**像素级后处理**（抠图、放大、裁剪、去水印）：本插件只做生成与参考图编辑，不做后处理
 - 用户想指定别的模型（Midjourney / SD / 豆包等）：本插件只面向 Qwen-Image
-- 用户既没有 API key、本机 ComfyUI 也没起来：如实说明这两条前置条件（见下「后端」），不要反复重试
+- 用户本机 ComfyUI 没起来或没装权重：如实说明这条前置条件（见下「后端」），不要反复重试
 
 ## 意图路由（三步）
 
@@ -65,9 +65,9 @@ Edit：
 
 | 工具 | 职责 | 什么时候用 |
 |---|---|---|
-| `qwen_image_generate` | 出图主入口。收成品 `prompt`，`wh_ratio` 一等参数（官方 7 档），可选 `width`/`height` 覆盖、`steps`、`seed`、`count`、`transparent`、`backend`、`preset`、`board` | 用户要**从零出图**时 |
+| `qwen_image_generate` | 出图主入口。收成品 `prompt`，`wh_ratio` 一等参数（官方 7 档），可选 `width`/`height` 覆盖、`steps`、`seed`、`count`、`preset`、`board` | 用户要**从零出图**时 |
 | `qwen_image_edit` | **参考图编辑（图生图）**。收成品改图 `prompt` + `images`（1–10 张绝对路径或 data URI），`ratio_follow` 让画布跟随某张参考图（与 `wh_ratio` **互斥**，都可省略=跟随第一张），其余参数同上 | 用户给了**一张或多张参考图**、要按它们改图/融图时 |
-| `qwen_image_status` | **只读**体检：云 API 端点是否可达 / key 是否被接受（401/403 会点名）、本机 ComfyUI 是否在跑（探过哪几个端口、三个权重能不能被它的加载器枚举到、显卡型号与显存余量）、输出目录能不能写。不产图、不写盘、不改配置、不回显 key | 出图失败、或不确定后端是否就绪时**先跑它** |
+| `qwen_image_status` | **只读**体检：本机 ComfyUI 是否在跑（探过哪几个端口、三个权重能不能被它的加载器枚举到、显卡型号与显存余量）、输出目录能不能写。不产图、不写盘、不改配置 | 出图失败、或不确定后端是否就绪时**先跑它** |
 
 ## 画板：连续出图请复用 board
 
@@ -80,19 +80,14 @@ Edit：
 
 「出图后的收尾」里向用户报画板时用返回 `summary` 末尾那句（画板名 + id），不要自己编 id。
 
-## 后端：只有两条路
+## 后端：只有本机 ComfyUI 一条路
 
-本插件**不自带任何本地运行时**——不建 venv、不下权重、不拉进程。可选后端只有两档：
+本插件**不自带任何本地运行时**——不建 venv、不下权重、不拉进程，也不再提供云端 API：
+出图与改图都跑在**用户自己装好的 ComfyUI** 与三个 Qwen-Image 权重上，零下载、零转换、完全离线。
+没有别的后端档位，工具参数里也没有选后端的入口。
 
-- **云端 key**（`api`）：一次 HTTP 调用出一批图。**只有文生图通道，没有编辑通道。**
-- **本机 ComfyUI**（`comfyui`）：复用用户自己装好的 ComfyUI 与三个 Qwen-Image 权重，零下载、零转换。
-  文生图与编辑都走它。
-
-`backend` 留空（`auto`）时的取舍是**有 key 走 api，没 key 走 comfyui**。由此：
-
-- 编辑（`qwen_image_edit`）只有 `comfyui` 一条路。传 `backend: "api"` 会**明确报错**，而不是悄悄丢参考图。
-- `auto` 在编辑场景不看 key，直接走 ComfyUI。
-- 两条都不通时的报错会点名缺什么，并指向 `docs/comfyui-deployment.md`。
+- ComfyUI 没起来或缺权重时，报错会点名缺什么（探测过哪些端口、缺哪个文件、放进哪个目录），
+  并指向 `docs/comfyui-deployment.md`。此时**不要重试**，先让用户照文档把环境补齐。
 
 **用户问「我要把本地跑起来 / 怎么部署」时**：让他照 `docs/comfyui-deployment.md` 走——桌面版下载 →
 建实例 → 从 hf-mirror 下三个权重 → 放进 ComfyUI 的 `models/unet|clip|vae` → sha256 校验，逐步可执行。
@@ -154,12 +149,13 @@ Edit：
 - 一次调用里既给 `wh_ratio` 又给 `width`/`height` → 以 `width`/`height` 为准，但请不要自相矛盾地给两者
 - 改图时既给 `wh_ratio` 又给 `ratio_follow` → **工具会直接报错**（官方契约里这两者互斥），请只留一个
 - 把参考图路径写成相对路径 / 把图省掉 → 工具会点名 `images[n]` 报错；参考图必须**绝对路径**或 data URI
-- 出图失败就直接重试同一份参数 → 先 `qwen_image_status` 看清是 key、端点，还是 ComfyUI 没起来 / 权重没装
-- 编辑报「没有可用后端」→ 云 API **没有编辑通道**，改图必须有本机 ComfyUI；这不是重试能解决的，
+- 出图失败就直接重试同一份参数 → 先 `qwen_image_status` 看清是 ComfyUI 没起来，还是权重没装
+- 改图报「ComfyUI 不可用」→ 改图只有本机 ComfyUI 一条路；这不是重试能解决的，
   照 `docs/comfyui-deployment.md` 装好再跑，或如实告诉用户缺什么
 - 8GB 卡上连发 2K 改图 → 显存不够会 CUDA OOM；编辑走 ComfyUI 时它自己按画布缩放参考图，
   没有插件侧的可调档位，尺寸真的要压就传更小的 `width`/`height`
-- 以为传了 `backend: "local"` 能脱离 ComfyUI → 那个后端**已经不存在**了，只剩 `api` 与 `comfyui` 两档
+- 以为有云端 API 或免安装的出图通道 → **不存在**。本插件只有本机 ComfyUI 一条路，
+  没装 ComfyUI 就如实说明，不要许诺云端出图
 
 ## 参考文件
 

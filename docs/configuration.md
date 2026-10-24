@@ -2,22 +2,19 @@
 
 ## 配置
 
-在 profile 的插件配置里给出（全部有默认值，`Config` schema 见 `src/index.ts`）。**一共 14 个字段**，
-没有一个是「本地运行时」相关的——插件不拥有任何运行时。
+在 profile 的插件配置里给出（全部有默认值，`Config` schema 见 `src/index.ts`）。**一共 9 个字段**，
+没有一个是「本地运行时」相关的——插件不拥有任何运行时；云端 API 字段（`backend` / `apiBaseUrl` /
+`apiKey` / `apiModel` / `apiStyle`）已随该后端一起删除，出图与改图只跑本机 ComfyUI。
+旧 profile 里残留的这几个键会被忽略，不会报错。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `backend` | `auto` | `auto`（有 key 走 `api`，否则走 `comfyui`）/ `api` / `comfyui`。**改图只有 `comfyui`** |
-| `apiBaseUrl` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 云端点（OpenAI 兼容） |
-| `apiKey` | 空 | **建议留空**，改用环境变量，key 就不会进 profile 文件 |
-| `apiModel` | `qwen-image` | 模型 id——**以你的供应商文档为准** |
-| `apiStyle` | `openai` | `openai` 已实现；`dashscope`（原生异步任务 API）为扩展点，调用时会明确报未实现 |
-| `comfyEndpoint` | 空 | ComfyUI 地址，如 `http://127.0.0.1:8188`；**空 = 自动探测 `comfyPorts`**。非回环地址会被拒绝（见[后端](backends.md)） |
+| `comfyEndpoint` | 空 | ComfyUI 地址，如 `http://127.0.0.1:8188`；**空 = 自动探测 `comfyPorts`**。非回环地址会被拒绝（本后端只与本机通信） |
 | `comfyPorts` | `8000,8188,8189,8190,8191,8192` | `comfyEndpoint` 为空时依次尝试的端口（桌面版常见 8000/8188，便携版 8188） |
 | `comfyModelsDir` | **探测**：候选目录里第一个存在的 | ComfyUI 的 `models` 根目录，**只用于报错里写清「文件该放到哪」**；探测不到就留空，错误只说相对路径 |
 | `comfyModel` | `base` | `base`（25 步，官方全量）/ `turbo`（8 步，蒸馏版）。turbo 缺失时自动回落 base |
 | `turboSteps` | 空 | turbo 专用步数；**空 = 8**。它**不**继承 `defaultSteps`（把 25 递给蒸馏版会让画面变差） |
-| `defaultSteps` | `25` | **默认采样步数**。后端没单独指定时用它。25 = 官方 ComfyUI 2.1 模板口径 |
+| `defaultSteps` | `25` | **默认采样步数**。没有单独指定时用它。25 = 官方 ComfyUI 2.1 模板口径 |
 | `comfyuiSteps` | 空 | ComfyUI 专用步数（只对 base 那一支生效）；**空 = 用 `defaultSteps`** |
 | `outputDir` | `~/Pictures/dsh-image-forge` | 图片落盘目录 |
 | `timeoutMs` | `180000` | 单次调用预算（ComfyUI 首次冷加载模型很慢，可调到 `900000`） |
@@ -25,49 +22,41 @@
 **步数解析优先级**（两套，互不越界）：
 
 ```text
-base :  调用方显式 steps  >  comfyuiSteps（仅 comfyui 后端）  >  defaultSteps
-turbo:  调用方显式 steps  >  turboSteps                        >  8
+base :  调用方显式 steps  >  comfyuiSteps  >  defaultSteps
+turbo:  调用方显式 steps  >  turboSteps    >  8
 ```
 
 结果里恒带 `steps_used`（实际步数）与 `steps_source`（`explicit` / `backend` / `default`），
-所以「为什么这张不一样」可以直接从返回值回答。解析发生在**每次派发时**。
+所以「为什么这张不一样」可以直接从返回值回答。解析发生在**每次派发时**，
+设置页改完步数、权重档、端口，下一次调用立即生效（工具在每次调用时重新读取配置）。
 turbo 之所以不落回 `defaultSteps`：蒸馏按 8 步调，25 步在它身上是「更贵且更差」，不是「更精细」。
 
 **「更大不等于更好」的实测**：同提示词、同 seed 下 25 → 50 步，客观指标反而**变差**——
 lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = 没有更多细节），用户目视也说 25 步更好。
 所以默认值就是 25，`defaultSteps` **没有被锁死**，仍可自由配置。**要更多细节就把画布提上去，不是把步数堆上去。**
 
-**Key 的读取顺序**：`apiKey`（config）→ `QWEN_IMAGE_API_KEY` → `DASHSCOPE_API_KEY` → `OPENAI_API_KEY`。
-key 只存在于内存，随 `Authorization: Bearer` 发出；**不写盘、不进日志**，报错信息里会被 `<redacted-key>` 顶掉。
-
 ## 设置页（DSH Web GUI）
 
-**14 个字段全部可写，也全部在页面上**——没有隐藏项了，因为隐藏的那批（解释器、wheel 标签、镜像、端口段、
-venv/权重目录）随本地运行时一起删掉了。
+**9 个字段全部可写，也全部在页面上**——没有隐藏项。云端 API 标签页随该后端一起删除了。
 
 - 菜单位置：**设置 → 「Qwen 出图」**——和「通用设置 / 模式 / 插件 / Agent 预设」同级的**一级菜单项**
-  （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。
-- **三个标签页**，字段在宽栏下两列铺开：
+  （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。第一个页签是**图像工作台**（可直接出图）。
+- **两个配置标签页**，字段在宽栏下两列铺开：
 
   | 标签 | 内容 |
   |---|---|
-  | 出图 | `backend`、`defaultSteps` / `comfyuiSteps` / `comfyModel` / `turboSteps`、`outputDir` / `timeoutMs`，以及 turbo/base 说明 |
-  | 云端 API | `apiBaseUrl`、`apiKey`、`apiModel`、`apiStyle` |
+  | 出图 | `defaultSteps` / `comfyuiSteps` / `comfyModel` / `turboSteps`、`outputDir` / `timeoutMs`，以及 turbo/base 说明 |
   | ComfyUI | `comfyEndpoint`、`comfyPorts`、`comfyModelsDir`（+ 部署文档入口） |
 
-- **页面可见字段**（五块，每块都有标题与一行说明）：
+- **页面可见字段**（三块，每块都有标题与一行说明）：
 
   | 分区 | 字段 |
   |---|---|
-  | 后端选择 | `backend` |
   | 步数（画质与耗时） | `defaultSteps`、`comfyuiSteps`、`comfyModel`、`turboSteps` |
-  | 云端 API | `apiBaseUrl`、`apiKey`、`apiModel`、`apiStyle` |
   | ComfyUI | `comfyEndpoint`、`comfyPorts`、`comfyModelsDir` |
   | 输出与超时 | `outputDir`、`timeoutMs` |
 
-- **`apiKey` 只写不读**：输入框是密码框，已保存的密钥永远只显示成掩码（`••••••••`），
-  留空表示「不修改已保存的密钥」。保存失败时的提示里也不会出现密钥内容。
-- `backend` / `apiStyle` / `comfyModel` 是**下拉**，数值字段带默认值与上下限提示，其余是文本框（带说明文案）。
+- `comfyModel` 是**下拉**，数值字段带默认值与上下限提示，其余是文本框（带说明文案）。
 - `comfyuiSteps` / `turboSteps` 是**可留空**的：清空输入框并失焦 = 写回「未设置」，也就是回落到各自的默认值。
 
 **路径类字段要么给出探测到的真实值，要么在文案里说清「留空 = 什么」。** 页面上直接能看到实际会用哪个：
@@ -92,16 +81,16 @@ venv/权重目录）随本地运行时一起删掉了。
 
 ### 完整证据（页面上已不再出现）
 
-- 步数扫描拟合出的**斜率**（而不是「总时长 ÷ 步数」）——两个后端都在的时候量的：
+- 步数扫描拟合出的**斜率**（而不是「总时长 ÷ 步数」）——两个推理栈都在的时候量的：
 
-  | 后端 | 量化档 | 斜率 | 截距 |
+  | 推理栈 | 量化档 | 斜率 | 截距 |
   |---|---|---|---|
-  | `comfyui` | `int8-convrot` | **0.727 s/步**（复测 0.768） | 1.60 s |
+  | ComfyUI（现行） | `int8-convrot` | **0.727 s/步**（复测 0.768） | 1.60 s |
   | 受管 worker（v0.1，已删除） | bnb `nf4` | **2.014 s/步**（11 个稳态样本，2.012–2.016） | — |
 
-  ⇒ 每步倍率 **2.77×**（同机、同画布 992×992、同 prompt、seed 0，两侧都是 1 次前向/步）。
-  ⚠️ **两侧量化档不同**，所以 2.77× **不是纯「后端差异」**。这组对照的用处只有一个：说明为什么 v0.1 的
-  自建 worker 被删掉（见[后端 → 归档](backends.md#归档v01-的受管-worker已删除)）。
+  ⇒ 每步倍率 2.77×（同机、同画布 992×992、同 prompt、seed 0，两侧都是 1 次前向/步）。
+  ⚠️ 两侧量化档不同，所以这个倍率**不是纯「后端差异」**。这组对照的用处只有一个：说明为什么 v0.1 的
+  自建 worker 被删掉。
 
 - 端到端实测（不含权重加载）：
 

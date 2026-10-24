@@ -14,7 +14,7 @@
  */
 import { readFile, stat } from 'node:fs/promises'
 import { basename, isAbsolute } from 'node:path'
-import { sniffImageMime } from './backend.ts'
+import { sniffImageMime } from './images.ts'
 
 /** How many reference images one edit call may carry (the official contract's limit). */
 export const MAX_REFERENCES = 10

@@ -39,13 +39,8 @@ test('the built module exports exactly name / inject / Config / apply', () => {
 
 test('the config schema resolves every documented field', () => {
   const resolved = plugin.Config({})
-  console.log('resolved config:', JSON.stringify({ ...resolved, apiKey: resolved.apiKey === '' ? '<empty>' : '<set>' }))
+  console.log('resolved config:', JSON.stringify(resolved))
   for (const field of [
-    'backend',
-    'apiBaseUrl',
-    'apiKey',
-    'apiModel',
-    'apiStyle',
     'comfyEndpoint',
     'comfyPorts',
     'comfyModelsDir',
@@ -60,9 +55,10 @@ test('the config schema resolves every documented field', () => {
   }
   // The plugin owns no runtime of its own any more: the venv / weights / worker
   // knobs are gone, and a stray one coming back would mean the old local-worker
-  // path is being reintroduced under a different name.
-  for (const retired of ['localEndpoint', 'runtimeDir', 'modelsDir', 'pythonPath', 'workerScript', 'minFreeVramMiB', 'manageWorker']) {
-    assert.ok(!(retired in resolved), `Config must not expose the retired runtime field ${retired}`)
+  // path is being reintroduced under a different name. The cloud-API fields are
+  // gone with that backend: generation is local-only.
+  for (const retired of ['localEndpoint', 'runtimeDir', 'modelsDir', 'pythonPath', 'workerScript', 'minFreeVramMiB', 'manageWorker', 'backend', 'apiBaseUrl', 'apiKey', 'apiModel', 'apiStyle']) {
+    assert.ok(!(retired in resolved), `Config must not expose the retired field ${retired}`)
   }
 })
 
@@ -153,13 +149,17 @@ test('the wh_ratio description cites a document that really prints the conversio
     )
   }
 })
-test('both image tools offer exactly the three backends, and status needs no parameters', () => {
+test('the image tools carry no backend selector, and status needs no parameters', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-schema2-')) }))
+  // One backend remains (the local ComfyUI), so a per-call `backend` selector
+  // would be an always-loaded gun: a caller could ask for a backend that does
+  // not exist. Its absence from the schema is the contract.
   for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
-    const genNode = tools.get(tool).parameters
-    const backendNode = genNode?.properties?.backend ?? genNode?.backend
-    assert.deepEqual(backendNode.enum, ['auto', 'api', 'comfyui'], `${tool}.backend must offer exactly the surviving backends`)
+    const node = tools.get(tool).parameters
+    const property = (name) => node?.properties?.[name] ?? node?.[name]
+    assert.equal(property('backend'), undefined, `${tool} must not offer a backend parameter`)
+    assert.equal(property('transparent'), undefined, `${tool} must not offer a transparent parameter`)
   }
   // `qwen_image_env` is gone; the surviving status tool is read-only and takes
   // only an optional timeout budget.
@@ -204,9 +204,10 @@ test('the composed skill body describes only the two surviving backends', () => 
   assert.ok(mentions('qwen_image_status') >= 1, 'the skill must point at the surviving status tool')
   assert.equal(mentions('qwen_image_env'), 0, 'the skill still documents a tool that no longer exists')
 
-  // Two backends, named as such — and the retried `local` tier must not be offered.
-  assert.match(content, /可以选择的后端只有|可选后端只有两档/)
-  assert.match(content, /云 API \*\*没有编辑通道\*\*|只有文生图通道，没有编辑通道/)
+  // One backend, named as such — the cloud tier must not be offered either.
+  assert.match(content, /只有本机 ComfyUI 一条路|只有本机 ComfyUI/)
+  assert.ok(!/`backend`/.test(content), 'the skill still offers a backend parameter')
+  assert.ok(!/apiKey|API key/.test(content), 'the skill still talks about an API key')
   assert.ok(!/`local`（零下载|backend: "local"` 走/.test(content), 'the skill still offers the removed local backend')
 
   // Every retired knob is gone from the body: a config field the model would have

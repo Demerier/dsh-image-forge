@@ -14,7 +14,7 @@
  */
 
 /** The coarse buckets the settings page shows, in display order. */
-export type SettingsGroupId = 'backend' | 'steps' | 'api' | 'comfyui' | 'output'
+export type SettingsGroupId = 'steps' | 'comfyui' | 'output'
 
 /**
  * One tab of the settings page.
@@ -43,14 +43,8 @@ export const SETTINGS_TABS: readonly SettingsTab[] = [
   {
     id: 'generate',
     label: '出图',
-    hint: '后端怎么选、画质步数、图落到哪里。',
-    groupIds: ['backend', 'steps', 'output'],
-  },
-  {
-    id: 'api',
-    label: '云端 API',
-    hint: '自带 key 的云端端点。',
-    groupIds: ['api'],
+    hint: '画质步数、图落到哪里。',
+    groupIds: ['steps', 'output'],
   },
   {
     id: 'comfyui',
@@ -78,7 +72,7 @@ export interface SettingsGroup {
 }
 
 /** How a field is rendered and validated in the page. */
-export type FieldKind = 'enum' | 'string' | 'secret' | 'path' | 'number' | 'boolean'
+export type FieldKind = 'enum' | 'string' | 'path' | 'number' | 'boolean'
 
 /** One choice of an {@link FieldKind} `enum` field. */
 export interface SettingsFieldOption {
@@ -144,19 +138,9 @@ export function hintHasPath(hint: string): boolean {
 /** The blocks the page renders, in order. */
 export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   {
-    id: 'backend',
-    label: '后端选择',
-    hint: '一次出图交给谁执行：云端的 key，还是本机的 ComfyUI。',
-  },
-  {
     id: 'steps',
     label: '步数（画质与耗时）',
     hint: 'base 25 步；turbo 蒸馏版 8 步。',
-  },
-  {
-    id: 'api',
-    label: '云端 API',
-    hint: '云端端点与密钥。',
   },
   {
     id: 'comfyui',
@@ -172,18 +156,6 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
 
 /** Every configurable field, in page order. */
 export const SETTINGS_FIELDS: readonly SettingsField[] = [
-  {
-    key: 'backend',
-    group: 'backend',
-    label: '后端',
-    hint: 'auto：有 key 走云端，否则走 ComfyUI。改图只有 ComfyUI。',
-    kind: 'enum',
-    choices: [
-      { value: 'auto', label: 'auto（自动选择）' },
-      { value: 'api', label: 'api（云端 API）' },
-      { value: 'comfyui', label: 'comfyui（本机 ComfyUI）' },
-    ],
-  },
   {
     key: 'defaultSteps',
     group: 'steps',
@@ -226,41 +198,6 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     max: 50,
     unit: '步',
     nullable: true,
-  },
-  {
-    key: 'apiBaseUrl',
-    group: 'api',
-    label: 'API 地址',
-    hint: '兼容 OpenAI 协议的端点根地址。',
-    kind: 'string',
-    placeholder: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  },
-  {
-    key: 'apiKey',
-    group: 'api',
-    label: 'API Key',
-    hint: '只写不读：已保存的密钥不会回显。本机环境变量优先。',
-    kind: 'secret',
-    placeholder: '留空表示不修改已保存的密钥',
-  },
-  {
-    key: 'apiModel',
-    group: 'api',
-    label: '模型 ID',
-    hint: '请求体里的 model 字段。',
-    kind: 'string',
-    placeholder: 'qwen-image',
-  },
-  {
-    key: 'apiStyle',
-    group: 'api',
-    label: '协议风格',
-    hint: 'openai 已实现；dashscope 仅声明、v0.1 未实现。',
-    kind: 'enum',
-    choices: [
-      { value: 'openai', label: 'openai（已实现）' },
-      { value: 'dashscope', label: 'dashscope（未实现）' },
-    ],
   },
   {
     key: 'comfyEndpoint',
@@ -322,9 +259,6 @@ export function isFieldVisible(key: string): boolean {
   return fieldByKey(key)?.hidden !== true
 }
 
-/** The replacement shown wherever a secret's plaintext would otherwise go. */
-export const SECRET_MASK = '••••••••'
-
 /**
  * The keys a schema declares but the page has no control for.
  *
@@ -384,45 +318,16 @@ export function tabFields(tab: SettingsTab): { group: SettingsGroup; fields: Set
 }
 
 /**
- * Whether one config key is a secret that must never be rendered verbatim.
- *
- * @param key - the config key.
- * @returns true when the field is `kind: 'secret'`.
- */
-export function isSecretField(key: string): boolean {
-  return fieldByKey(key)?.kind === 'secret'
-}
-
-/**
  * The text a control may show for a stored value.
- *
- * A secret is masked unconditionally: the page never renders plaintext, even
- * when the value reaching it happens to be unredacted.
  *
  * @param key - the config key.
  * @param value - the value read from the settings snapshot.
  * @returns the display string, safe to put in the DOM.
  */
 export function displayValue(key: string, value: unknown): string {
-  if (isSecretField(key)) return value === undefined || value === null || value === '' ? '' : SECRET_MASK
   if (typeof value === 'boolean') return value ? '开' : '关'
   if (value === undefined || value === null) return ''
   return String(value)
-}
-
-/**
- * Redact a value for any diagnostic text the page may surface.
- *
- * Used for the messages that travel back to the user on a failed save, so a
- * rejected secret write can be reported without echoing what was typed.
- *
- * @param key - the config key.
- * @param value - the value involved in the write.
- * @returns a display-safe stand-in.
- */
-export function redactForLog(key: string, value: unknown): string {
-  if (isSecretField(key)) return value === undefined || value === '' ? '（空）' : SECRET_MASK
-  return displayValue(key, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -434,11 +339,11 @@ export function redactForLog(key: string, value: unknown): string {
  *
  * Deliberately **two lines**. The page's job is the actionable conclusion; the
  * measurements, the kernel profile and the ruled-out list belong in the shipped
- * prose (`docs/configuration.md`, `docs/backends.md`), where they can be as long
- * as the evidence requires. An earlier version carried
- * 2,561 characters of evidence here, and the user's first reaction to the live
- * page was that it "exposes a great deal of explanatory text that does not belong
- * in front of a user" — so the budget is now a test, not a convention.
+ * prose (`docs/configuration.md`), where they can be as long as the evidence
+ * requires. An earlier version carried 2,561 characters of evidence here, and
+ * the user's first reaction to the live page was that it "exposes a great deal
+ * of explanatory text that does not belong in front of a user" — so the budget
+ * is now a test, not a convention.
  */
 export interface SettingsAdvisory {
   /** Stable id, used as the block's DOM key. */

@@ -180,8 +180,6 @@ console.log('reference A (16:9):', describeReference(REF_16X9))
 console.log('reference B (wide):', describeReference(REF_WIDE))
 
 const forge = register({
-  backend: 'comfyui',
-  apiKey: '',
   comfyEndpoint: COMFY,
   outputDir: OUTPUT_DIR,
   timeoutMs: 900_000,

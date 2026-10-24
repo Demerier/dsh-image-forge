@@ -30,8 +30,6 @@ plugin.apply(
   },
   {
     ...plugin.Config({}),
-    backend: 'comfyui',
-    apiKey: '',
     comfyEndpoint: COMFY,
     comfyModel: MODEL,
     outputDir: OUTPUT_DIR,

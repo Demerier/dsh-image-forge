@@ -6,18 +6,14 @@
  * prompt contract already answers in `wh_ratio` terms, so the caller hands that
  * value straight to the tool instead of translating it into pixels by hand.
  * `width`/`height` remain available as an explicit override.
+ *
+ * There is exactly one backend: the user's own local ComfyUI. The cloud-API
+ * client was removed with its config fields — Qwen-Image editing only exists on
+ * the local graph, and a text-to-image-only cloud path doubled the surface for
+ * half the product. Every tool below talks to `comfyui.ts` and nothing else.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
-import {
-  API_KEY_ENV_VARS,
-  generateViaApi,
-  probeApi,
-  resolveApiKey,
-  sniffImageMime,
-  type ApiSettings,
-  type GeneratedImage,
-} from './backend.ts'
 import {
   DEFAULT_COMFY_PORTS,
   comfySystemStats,
@@ -33,6 +29,7 @@ import {
   type ComfyModels,
   type ComfyOptions,
 } from './comfyui.ts'
+import type { GeneratedImage } from './images.ts'
 import { sanitizePrefix, writeImages, type WrittenImage } from './output.ts'
 import { makeItemId, recordItems } from './boards.ts'
 import { MAX_REFERENCES, loadReferenceImages, probeImageSize, resolveRatioFollow, type ReferenceImage } from './refs.ts'
@@ -46,9 +43,6 @@ import {
   validateSize,
 } from './ratio.ts'
 import type { Config } from './index.ts'
-
-/** Backends a caller may force; `auto` picks by key availability. */
-const BACKENDS = ['auto', 'api', 'comfyui'] as const
 
 /** Everything `qwen_image_generate` accepts, as one schema reused by validation. */
 const GENERATE_PARAMETERS: ParameterSchemaSpec = {
@@ -83,23 +77,11 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   },
   seed: {
     type: 'integer',
-    description: '随机种子；同一 seed + 同一 prompt + 同一尺寸可复现同一张图（后端支持时）。省略即随机。',
+    description: '随机种子；同一 seed + 同一 prompt + 同一尺寸可复现同一张图。省略即随机。',
   },
   count: {
     type: 'integer',
     description: '出图张数，1–4，默认 1。多张按后端返回顺序编号落盘。',
-  },
-  transparent: {
-    type: 'boolean',
-    description: '要求带透明通道的输出（后端与模型支持时生效；不支持时后端可能忽略）。',
-  },
-  backend: {
-    type: 'string',
-    enum: BACKENDS,
-    description:
-      '强制后端：auto（默认，有 API key 走 api，否则走本机 ComfyUI）/ ' +
-      'api（云 API，需要 key）/ comfyui（复用本机已装好的 ComfyUI + Qwen-Image 权重，零下载、零转换）。' +
-      '本插件不再自带任何本地运行时：要么给 key，要么把 ComfyUI 起起来（部署见 docs/comfyui-deployment.md）。',
   },
   preset: {
     type: 'string',
@@ -167,23 +149,11 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
   },
   seed: {
     type: 'integer',
-    description: '随机种子；同一 seed + 同一 prompt + 同一参考图 + 同一尺寸可复现同一张图（后端支持时）。省略即随机。',
+    description: '随机种子；同一 seed + 同一 prompt + 同一参考图 + 同一尺寸可复现同一张图。省略即随机。',
   },
   count: {
     type: 'integer',
     description: '出图张数，1–4，默认 1。多张共用同一组参考图，按后端返回顺序编号落盘。',
-  },
-  transparent: {
-    type: 'boolean',
-    description: '要求带透明通道的输出（后端与模型支持时生效；ComfyUI 的改图工作流不带 alpha 处理，会忽略它）。',
-  },
-  backend: {
-    type: 'string',
-    enum: BACKENDS,
-    description:
-      '强制后端：auto（默认。**编辑场景跳过 api**——云后端没有编辑通道）/ ' +
-      'api（编辑不支持，会明确报错而不是丢掉参考图）/ comfyui（复用本机 ComfyUI + 官方 Qwen-Image 2.1 改图工作流）。' +
-      '改图只有 comfyui 一条路，所以它没起来时错误会直接说缺什么。',
   },
   preset: {
     type: 'string',
@@ -284,7 +254,6 @@ async function recordRun(
     steps: number
     seed: number | undefined
     mode: 'generate' | 'edit'
-    backend: 'api' | 'comfyui'
     sessionId: string | undefined
   },
 ): Promise<BoardRecording> {
@@ -303,7 +272,7 @@ async function recordRun(
       steps: meta.steps,
       seed: meta.seed ?? null,
       mode: meta.mode,
-      backend: meta.backend,
+      backend: 'comfyui',
       parents: [],
       sessionId: meta.sessionId ?? null,
     })), { prompt: meta.prompt, sessionId: meta.sessionId ?? null })
@@ -447,14 +416,8 @@ export function chooseEditSize(
   return { ...size, followed: null, followedByDefault: false }
 }
 
-/** Settings the tool body needs, resolved once from the plugin config. */
+/** Settings the tool bodies need, resolved from the plugin config. */
 export interface ForgeSettings {
-  readonly backend: (typeof BACKENDS)[number]
-  readonly apiBaseUrl: string
-  readonly apiKey: string
-  readonly apiModel: string
-  readonly apiStyle: 'openai' | 'dashscope'
-  readonly apiKeySource: string | undefined
   readonly comfyEndpoint: string
   readonly comfyPorts: readonly number[]
   readonly comfyModelsDir: string
@@ -503,18 +466,10 @@ function comfyOptions(settings: ForgeSettings, timeoutMs = settings.timeoutMs): 
  * Resolve everything the tool bodies need from the plugin config.
  *
  * @param config - the resolved plugin config.
- * @returns the subset the tools read, with the API key already resolved from
- *   config-or-environment.
+ * @returns the subset the tools read.
  */
 export function resolveSettings(config: Config): ForgeSettings {
-  const key = resolveApiKey(config.apiKey)
   return {
-    backend: config.backend,
-    apiBaseUrl: config.apiBaseUrl.replace(/\/+$/, ''),
-    apiKey: key.key ?? '',
-    apiKeySource: key.source,
-    apiModel: config.apiModel,
-    apiStyle: config.apiStyle,
     comfyEndpoint: config.comfyEndpoint.replace(/\/+$/, ''),
     comfyPorts: parseComfyPorts(config.comfyPorts),
     comfyModelsDir: config.comfyModelsDir,
@@ -542,23 +497,16 @@ export interface StepsResolution {
  * Resolve the sampler steps one call should use.
  *
  * Priority: the caller's explicit `steps` > the ComfyUI override
- * (`comfyuiSteps`) > `defaultSteps`. The cloud backend has no override because
- * its sampler defaults are the provider's business, not ours.
+ * (`comfyuiSteps`) > `defaultSteps`.
  *
  * @param explicit - the caller's `steps`, when it supplied one.
- * @param backend - the backend about to run.
  * @param settings - the resolved plugin settings.
  * @returns the count and where it came from.
  */
-export function resolveSteps(
-  explicit: number | undefined,
-  backend: 'api' | 'comfyui',
-  settings: ForgeSettings,
-): StepsResolution {
+export function resolveSteps(explicit: number | undefined, settings: ForgeSettings): StepsResolution {
   if (explicit !== undefined) return { steps: explicit, source: 'explicit' }
-  const override = backend === 'comfyui' ? settings.comfyuiSteps : undefined
-  if (typeof override === 'number' && Number.isFinite(override) && override >= 1) {
-    return { steps: Math.round(override), source: 'backend' }
+  if (typeof settings.comfyuiSteps === 'number' && Number.isFinite(settings.comfyuiSteps) && settings.comfyuiSteps >= 1) {
+    return { steps: Math.round(settings.comfyuiSteps), source: 'backend' }
   }
   return { steps: settings.defaultSteps, source: 'default' }
 }
@@ -584,88 +532,67 @@ export function resolveTurboSteps(explicit: number | undefined, settings: ForgeS
   return { steps: TURBO_STEPS, source: 'default' }
 }
 
-/** The "no backend could run this generation" error, naming both remedies. */
-function noBackendError(comfyReason: string | undefined, keyPresent: boolean): Error {
-  const cloud = keyPresent
-    ? 'a key is configured, but this call did not route to it — check the `backend` argument.'
-    : `no API key found — set \`apiKey\` in the plugin config, or one of ${API_KEY_ENV_VARS.join(' / ')}. ` +
-      'The key is read at call time and never written to disk.'
-  return new Error(
-    'qwen_image_generate: no backend is available.\n' +
-      `  • cloud: ${cloud}\n` +
-      `  • comfyui: ${comfyReason ?? 'not tried.'}\n` +
-      '  本机部署（ComfyUI 桌面版 + 三个权重，含下载地址）见 docs/comfyui-deployment.md。',
-  )
+/** The tool-output blocks shared by generate and edit: summary, markdown, JSON. */
+function renderResultBlocks(value: { markdown?: string; summary?: string }): { type: 'text'; text: string }[] {
+  const payload = value as { markdown?: string; summary?: string }
+  const blocks: { type: 'text'; text: string }[] = []
+  if (typeof payload.summary === 'string') blocks.push({ type: 'text', text: payload.summary })
+  if (typeof payload.markdown === 'string' && payload.markdown.length > 0) {
+    blocks.push({
+      type: 'text',
+      text: `已在对话里内联显示请**逐字复制**下面这几行到你的回复正文（客户端会把本地绝对路径渲染成图片）：\n${payload.markdown}`,
+    })
+  }
+  blocks.push({ type: 'text', text: JSON.stringify(value, null, 2) })
+  return blocks
 }
 
-/**
- * The edit path's "no backend" error.
- *
- * Editing has no cloud fallback, so the message must not suggest setting a key:
- * with a key configured it says outright that the key is not the problem.
- *
- * @param comfyReason - why ComfyUI could not serve the edit.
- * @param keyPresent - whether a cloud key is configured (to rule it out).
- * @returns the error to throw.
- */
-function noEditBackendError(comfyReason: string, keyPresent: boolean): Error {
-  return new Error(
-    'qwen_image_edit: 改图只能在本机 ComfyUI 上跑，而它现在不可用。\n' +
-      `  • comfyui: ${comfyReason}\n` +
-      (keyPresent
-        ? '  • cloud: 你配了 API key，但云后端没有编辑通道——它根本收不了参考图，所以这条路上 key 帮不上忙。\n'
-        : '') +
-      '  起好 ComfyUI（带 Qwen-Image 2.1 权重）再试；部署步骤见 docs/comfyui-deployment.md，' +
-      '也可以用 `qwen_image_status` 看它缺什么。',
-  )
+/** The ComfyUI run report shared by both tools. */
+interface ComfyRunReport {
+  endpoint: string
+  port: number
+  probed: unknown
+  models: ComfyModels
+  comfyModel: 'turbo' | 'base'
+  turbo_fallback?: string
+  references_uploaded?: string[]
+  elapsed_ms: number
 }
 
 /**
  * Register the tools on the tool registry.
  *
  * @param ctx - cordis context providing `tools`.
- * @param config - resolved plugin config.
+ * @param getConfig - reads the activation's config **per call**: a settings
+ *   save commits into the volatile references without re-running `apply`, so a
+ *   snapshot taken at registration time would ignore every later edit.
  */
-export function registerImageForgeTools(ctx: Context, config: Config): void {
-  const settings = resolveSettings(config)
-
+export function registerImageForgeTools(ctx: Context, getConfig: () => Config): void {
   ctx.tools.register(defineTool({
     name: 'qwen_image_generate',
     description:
-      '用 Qwen-Image 出图。`prompt` 收**成品**提示词（本工具不改写），`wh_ratio` 是**一等参数**：' +
+      '用 Qwen-Image 出图（本机 ComfyUI）。`prompt` 收**成品**提示词（本工具不改写），`wh_ratio` 是**一等参数**：' +
       `直接接受官方契约的 7 档画幅比（${WH_RATIOS.join(' / ')}），插件自己换算成 ${SIZE_MULTIPLE} 对齐的像素尺寸——` +
       '所以「契约输出 → 插件入参」不需要人工翻译。省略 wh_ratio 用 1:1，给了 width/height 则以它们为准。' +
-      '结果落盘到配置的 outputDir 并把绝对路径写进正文 Markdown，同时回传结构化字段。',
+      '结果落盘到配置的 outputDir 并把绝对路径写进正文 Markdown，同时回传结构化字段。' +
+      '需要本机 ComfyUI 已启动且装好三个 Qwen-Image 权重（部署见 docs/comfyui-deployment.md）。',
     parameters: GENERATE_PARAMETERS,
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => {
-        const payload = value as { markdown?: string; images?: { path: string }[]; summary?: string }
-        const blocks: { type: 'text'; text: string }[] = []
-        if (typeof payload.summary === 'string') blocks.push({ type: 'text', text: payload.summary })
-        if (typeof payload.markdown === 'string' && payload.markdown.length > 0) {
-          blocks.push({
-            type: 'text',
-            text: `已在对话里内联显示请**逐字复制**下面这几行到你的回复正文（客户端会把本地绝对路径渲染成图片）：\n${payload.markdown}`,
-          })
-        }
-        blocks.push({ type: 'text', text: JSON.stringify(value, null, 2) })
-        return blocks
-      },
+      render: (_args, value) => renderResultBlocks(value),
     },
-    // The per-generation budget covers ComfyUI's queue and sampling. Nothing is
-    // cold-started by this plugin any more, so there is no second budget to add.
-    timeoutMs: settings.timeoutMs,
+    // The per-generation budget covers ComfyUI's queue and sampling.
+    timeoutMs: getConfig().timeoutMs,
     // One generation is a heavy, rate-limited call; never overlap siblings.
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      const settings = resolveSettings(getConfig())
       const prompt = args.prompt.trim()
       if (prompt.length === 0) throw new Error('prompt must not be blank')
       const size = chooseSize(args.wh_ratio, asInteger(args.width, 'width'), asInteger(args.height, 'height'))
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
       if (steps !== undefined && steps < 1) throw new Error(`steps must be >= 1, got ${steps}`)
-      const requestedBackend = args.backend ?? settings.backend
       const request = {
         prompt,
         width: size.width,
@@ -673,81 +600,35 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         count,
         steps,
         seed: asInteger(args.seed, 'seed'),
-        transparent: args.transparent === true,
       }
       const startedAt = Date.now()
 
-      let usedBackend: 'api' | 'comfyui'
-      let backendLabel: string
-      let comfyUnet: string | null = null
-      let comfyRun: Record<string, unknown> | null = null
-      let images: GeneratedImage[]
-      // Set by whichever branch actually ran, so the result can report the count
-      // that was really used and where it came from (a fallback counts as a
-      // different backend, and so may resolve a different count).
-      let usedSteps: StepsResolution | undefined
-      if (requestedBackend === 'api' || (requestedBackend === 'auto' && settings.apiKey.length > 0)) {
-        if (settings.apiKey.length === 0) {
-          throw new Error(
-            'qwen_image_generate: backend "api" needs a key. Set `apiKey` in the plugin config or one of ' +
-              `${API_KEY_ENV_VARS.join(' / ')}; it is read at call time and never written to disk.`,
-          )
-        }
-        const apiSettings: ApiSettings = {
-          baseUrl: settings.apiBaseUrl,
-          apiKey: settings.apiKey,
-          model: settings.apiModel,
-          style: settings.apiStyle,
-        }
-        usedSteps = resolveSteps(steps, 'api', settings)
-        images = await generateViaApi(apiSettings, { ...request, steps: usedSteps.steps }, exec.signal)
-        usedBackend = 'api'
-        backendLabel = `后端 api / ${settings.apiModel}`
-      } else {
-        // `comfyui`, or `auto` without a key: the local ComfyUI — the only
-        // backend that needs no key and no runtime of ours.
-        const options = comfyOptions(settings)
-        try {
-          const target = await discoverComfyUi(options, exec.signal)
-          const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
-          const comfyStartedAt = Date.now()
-          // Which checkpoint family to run. `turbo` is a *request*, not a
-          // guarantee: it needs a turbo unet to be installed, and when only the
-          // base weights are present the run falls back rather than failing —
-          // the alternative is a config typo turning into "no images at all".
-          const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
-          const turboSkipped = settings.comfyModel === 'turbo' && !turbo
-          usedSteps = turbo
-            ? resolveTurboSteps(steps, settings)
-            : resolveSteps(steps, 'comfyui', settings)
-          images = turbo
-            ? await generateViaComfyUiTurbo(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
-            : await generateViaComfyUi(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
-          usedBackend = 'comfyui'
-          comfyUnet = models.unet
-          backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
-          comfyRun = {
-            endpoint: target.endpoint,
-            port: target.port,
-            probed: target.probed,
-            models,
-            comfyModel: turbo ? 'turbo' : 'base',
-            ...(turboSkipped
-              ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' }
-              : {}),
-            // The workflow has no alpha handling, so this backend ignores the
-            // flag rather than pretending it honoured it.
-            transparent_requested: request.transparent,
-            elapsed_ms: Date.now() - comfyStartedAt,
-          }
-        } catch (error) {
-          const comfyReason = error instanceof Error ? error.message : String(error)
-          // An explicit `comfyui` request keeps the original error: it already
-          // names the missing weight or the closed port.
-          if (requestedBackend === 'comfyui') throw error
-          throw noBackendError(comfyReason, settings.apiKey.length > 0)
-        }
+      // Resolve the step count before touching ComfyUI so no dispatch site can
+      // forward a request whose step count was never resolved.
+      const options = comfyOptions(settings)
+      const target = await discoverComfyUi(options, exec.signal)
+      const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
+      const comfyStartedAt = Date.now()
+      // Which checkpoint family to run. `turbo` is a *request*, not a
+      // guarantee: it needs a turbo unet to be installed, and when only the
+      // base weights are present the run falls back rather than failing —
+      // the alternative is a config typo turning into "no images at all".
+      const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
+      const turboSkipped = settings.comfyModel === 'turbo' && !turbo
+      const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings)
+      const images = turbo
+        ? await generateViaComfyUiTurbo(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+        : await generateViaComfyUi(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+      const comfyRun: ComfyRunReport = {
+        endpoint: target.endpoint,
+        port: target.port,
+        probed: target.probed,
+        models,
+        comfyModel: turbo ? 'turbo' : 'base',
+        ...(turboSkipped ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' } : {}),
+        elapsed_ms: Date.now() - comfyStartedAt,
       }
+      const backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
 
       const prefix = sanitizePrefix(args.preset)
       const written = await writeImages(settings.outputDir, prefix, size.width, size.height, images)
@@ -757,17 +638,16 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         width: size.width,
         height: size.height,
         ratio: size.whRatio,
-        steps: usedSteps?.steps ?? steps ?? 0,
+        steps: usedSteps.steps,
         seed: request.seed,
         mode: 'generate',
-        backend: usedBackend,
         sessionId: sessionOf(exec),
       })
 
       return jsonSafe({
         ok: true,
-        backend: usedBackend,
-        model: usedBackend === 'api' ? settings.apiModel : comfyUnet,
+        backend: 'comfyui',
+        model: models.unet,
         wh_ratio: size.whRatio,
         wh_ratio_requested: args.wh_ratio ?? null,
         size: { width: size.width, height: size.height },
@@ -776,17 +656,16 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         exact_ratio: size.exactRatio,
         count,
         steps: steps ?? null,
-        steps_used: usedSteps?.steps ?? null,
-        steps_source: usedSteps?.source ?? null,
+        steps_used: usedSteps.steps,
+        steps_source: usedSteps.source,
         seed: request.seed ?? null,
-        transparent: request.transparent,
         prompt_chars: prompt.length,
         output_dir: settings.outputDir,
         images: written.map((image) => ({
           index: image.index,
           path: image.path,
           bytes: image.bytes,
-          mime: sniffImageMime(images[image.index - 1]?.bytes ?? new Uint8Array()) ?? image.mime,
+          mime: image.mime,
         })),
         comfyui: comfyRun,
         board: recording.board,
@@ -807,35 +686,24 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'qwen_image_edit',
     description:
-      '用 Qwen-Image 2.1 做**参考图编辑（图生图）**：给 1 张或多张参考图 + 一段**成品修改指令**，出改好的图。' +
+      '用 Qwen-Image 2.1 做**参考图编辑（图生图）**，在本机 ComfyUI 的官方改图工作流上运行：' +
+      '给 1 张或多张参考图 + 一段**成品修改指令**，出改好的图。' +
       `\`images\` 收 1–${MAX_REFERENCES} 张参考图（绝对路径或 data:image/…;base64,…，按顺序对应提示词里的 \`<image1>\`…\`<imageN>\`），` +
       '`ratio_follow` 让画布**跟随某张参考图的宽高比**（写 `image1`…`image10`，或直接把 `images` 里的那一项再写一遍）；' +
       '它与 `wh_ratio` **互斥**（官方契约里一个非空另一个必须为空），两个都不给时**默认跟随第一张参考图**。' +
-      '编辑只在本机 ComfyUI 上跑：官方 Qwen-Image 2.1 改图工作流，参考图先上传进 ComfyUI 的 input/ 目录。' +
-      '云 API 没有编辑通道，强行指定时会明确报错，绝不静默丢掉参考图。' +
+      '参考图先上传进 ComfyUI 的 input/ 目录。' +
       '部署（ComfyUI 桌面版 + 三个权重）见 docs/comfyui-deployment.md。' +
       '结果落盘到 outputDir 并把绝对路径写进正文 Markdown。',
     parameters: EDIT_PARAMETERS,
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => {
-        const payload = value as { markdown?: string; images?: { path: string }[]; summary?: string }
-        const blocks: { type: 'text'; text: string }[] = []
-        if (typeof payload.summary === 'string') blocks.push({ type: 'text', text: payload.summary })
-        if (typeof payload.markdown === 'string' && payload.markdown.length > 0) {
-          blocks.push({
-            type: 'text',
-            text: `已在对话里内联显示请**逐字复制**下面这几行到你的回复正文（客户端会把本地绝对路径渲染成图片）：\n${payload.markdown}`,
-          })
-        }
-        blocks.push({ type: 'text', text: JSON.stringify(value, null, 2) })
-        return blocks
-      },
+      render: (_args, value) => renderResultBlocks(value),
     },
     // Same reasoning as `qwen_image_generate`.
-    timeoutMs: settings.timeoutMs,
+    timeoutMs: getConfig().timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      const settings = resolveSettings(getConfig())
       const prompt = args.prompt.trim()
       if (prompt.length === 0) throw new Error('prompt must not be blank')
       // Loaded before any backend is touched: a bad reference must fail here, where
@@ -851,7 +719,6 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
       if (steps !== undefined && steps < 1) throw new Error(`steps must be >= 1, got ${steps}`)
-      const requestedBackend = args.backend ?? settings.backend
       const request = {
         prompt,
         width: size.width,
@@ -859,62 +726,31 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         count,
         steps,
         seed: asInteger(args.seed, 'seed'),
-        transparent: args.transparent === true,
         images: references,
       }
       const startedAt = Date.now()
 
-      let usedBackend: 'comfyui'
-      let backendLabel: string
-      let comfyUnet: string | null = null
-      let comfyRun: Record<string, unknown> | null = null
-      let images: GeneratedImage[]
-      let usedSteps: StepsResolution | undefined
-      if (requestedBackend === 'api') {
-        throw new Error(
-          'qwen_image_edit: backend "api" 没有编辑通道，参考图不会被丢给一个用不了它们的后端。' +
-            '云 API 的编辑是另一种请求形态（multipart POST /images/edits，或 DashScope 的原生异步任务接口），本插件没有实现它。\n' +
-            '  改图只有一条路：backend "comfyui"（复用本机已装好的 ComfyUI + Qwen-Image 权重），' +
-            '部署步骤见 docs/comfyui-deployment.md。',
-        )
-      } else {
-        // `comfyui`, or `auto`: editing is local-only, so `auto` never tries the
-        // cloud endpoint even when a key is configured.
-        const options = comfyOptions(settings)
-        try {
-          const target = await discoverComfyUi(options, exec.signal)
-          const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
-          const comfyStartedAt = Date.now()
-          const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
-          const turboSkipped = settings.comfyModel === 'turbo' && !turbo
-          usedSteps = turbo
-            ? resolveTurboSteps(steps, settings)
-            : resolveSteps(steps, 'comfyui', settings)
-          images = turbo
-            ? await generateViaComfyUiTurboEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
-            : await generateViaComfyUiEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
-          usedBackend = 'comfyui'
-          comfyUnet = models.unet
-          backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
-          comfyRun = {
-            endpoint: target.endpoint,
-            port: target.port,
-            probed: target.probed,
-            models,
-            comfyModel: turbo ? 'turbo' : 'base',
-            ...(turboSkipped
-              ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' }
-              : {}),
-            references_uploaded: references.map((reference) => reference.label),
-            transparent_requested: request.transparent,
-            elapsed_ms: Date.now() - comfyStartedAt,
-          }
-        } catch (error) {
-          const comfyReason = error instanceof Error ? error.message : String(error)
-          if (requestedBackend === 'comfyui') throw error
-          throw noEditBackendError(comfyReason, settings.apiKey.length > 0)
-        }
+      const options = comfyOptions(settings)
+      const target = await discoverComfyUi(options, exec.signal)
+      const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
+      const comfyStartedAt = Date.now()
+      const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
+      const turboSkipped = settings.comfyModel === 'turbo' && !turbo
+      const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings)
+      const images = turbo
+        ? await generateViaComfyUiTurboEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+        : await generateViaComfyUiEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+      const comfyRun: ComfyRunReport = {
+        endpoint: target.endpoint,
+        port: target.port,
+        probed: target.probed,
+        models,
+        comfyModel: turbo ? 'turbo' : 'base',
+        ...(turboSkipped ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' } : {}),
+        references_uploaded: references.map((reference) => reference.label),
+        elapsed_ms: Date.now() - comfyStartedAt,
       }
+      const backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
 
       const prefix = sanitizePrefix(args.preset, 'edit')
       const written = await writeImages(settings.outputDir, prefix, size.width, size.height, images)
@@ -924,10 +760,9 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         width: size.width,
         height: size.height,
         ratio: size.whRatio,
-        steps: usedSteps?.steps ?? steps ?? 0,
+        steps: usedSteps.steps,
         seed: request.seed,
         mode: 'edit',
-        backend: usedBackend,
         sessionId: sessionOf(exec),
       })
       const followed = size.followed
@@ -935,8 +770,8 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
 
       return jsonSafe({
         ok: true,
-        backend: usedBackend,
-        model: comfyUnet,
+        backend: 'comfyui',
+        model: models.unet,
         wh_ratio: size.whRatio,
         wh_ratio_requested: args.wh_ratio ?? null,
         ratio_follow: followLabel,
@@ -960,10 +795,9 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         })),
         count,
         steps: steps ?? null,
-        steps_used: usedSteps?.steps ?? null,
-        steps_source: usedSteps?.source ?? null,
+        steps_used: usedSteps.steps,
+        steps_source: usedSteps.source,
         seed: request.seed ?? null,
-        transparent: request.transparent,
         prompt_chars: prompt.length,
         output_dir: settings.outputDir,
         images: written.map((image) => {
@@ -977,7 +811,6 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
             height: measured?.height ?? null,
           }
         }),
-        api_skipped: requestedBackend === 'auto' && settings.apiKey.length > 0 ? 'no edit path on the cloud backend' : null,
         comfyui: comfyRun,
         board: recording.board,
         board_note: recording.note,
@@ -1000,9 +833,8 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'qwen_image_status',
     description:
-      '后端健康探测：云 API 端点是否可达、key 是否被接受（401/403 会点名），**本机 ComfyUI 是否在跑**' +
-      '（含探测过哪几个端口、三个 Qwen-Image 权重能不能被它的加载器枚举到、显卡型号与显存余量），以及输出目录能不能写。' +
-      '不产生任何图片、不写盘、不改配置；**不会回显 key**。排障时先跑它。',
+      '后端健康探测：**本机 ComfyUI 是否在跑**（含探测过哪几个端口、三个 Qwen-Image 权重能不能被它的加载器枚举到、' +
+      '显卡型号与显存余量），以及输出目录能不能写。不产生任何图片、不写盘、不改配置。排障时先跑它。',
     parameters: {
       timeoutMs: {
         type: 'integer',
@@ -1016,16 +848,10 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
     timeoutMs: 30_000,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = resolveSettings(getConfig())
       const budget = Math.min(args.timeoutMs ?? settings.timeoutMs, 30_000)
-      const [api, comfyui] = await Promise.all([
-        probeApi(
-          { baseUrl: settings.apiBaseUrl, apiKey: settings.apiKey, model: settings.apiModel, style: settings.apiStyle },
-          budget,
-          exec.signal,
-        ),
-        // Passive on purpose: a status call must report, never start anything.
-        probeComfyUi(comfyOptions(settings, budget), exec.signal),
-      ])
+      // Passive on purpose: a status call must report, never start anything.
+      const comfyui = await probeComfyUi(comfyOptions(settings, budget), exec.signal)
       const endpoint = typeof comfyui.endpoint === 'string' ? comfyui.endpoint : undefined
       // VRAM comes from ComfyUI itself rather than from `nvidia-smi`: the card
       // that matters is the one ComfyUI loaded its weights onto, and it reports
@@ -1036,14 +862,6 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
       const reachable = comfyui.reachable === true
       return jsonSafe({
         checked_at: new Date().toISOString(),
-        configured_backend: settings.backend,
-        api: {
-          baseUrl: settings.apiBaseUrl,
-          model: settings.apiModel,
-          style: settings.apiStyle,
-          keySource: settings.apiKeySource ?? null,
-          ...api,
-        },
         comfyui: {
           modelsDir: settings.comfyModelsDir.length > 0 ? settings.comfyModelsDir : null,
           ...comfyui,
@@ -1054,8 +872,7 @@ export function registerImageForgeTools(ctx: Context, config: Config): void {
         output: { dir: settings.outputDir, writable: await ensureOutputDirWritable(settings.outputDir) },
         next_steps: reachable
           ? null
-          : 'ComfyUI 没在跑。按 docs/comfyui-deployment.md 装桌面版、把三个权重放进它能看到的位置，然后重跑本工具；' +
-            '云 API 只负责出图，改图必须有 ComfyUI。',
+          : 'ComfyUI 没在跑。按 docs/comfyui-deployment.md 装桌面版、把三个权重放进它能看到的位置，然后重跑本工具。',
       })
     },
   }))

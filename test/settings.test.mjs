@@ -44,20 +44,16 @@ import {
 import {
   BACKEND_PERF_ADVISORY,
   HIDDEN_FIELD_KEYS,
-  SECRET_MASK,
   SETTINGS_FIELDS,
   SETTINGS_FIELD_KEYS,
   SETTINGS_GROUPS,
   SETTINGS_TABS,
   VISIBLE_FIELD_KEYS,
   advisoryText,
-  displayValue,
   fieldByKey,
   groupedFields,
   hintHasPath,
-  isSecretField,
   missingFieldKeys,
-  redactForLog,
   staleFieldKeys,
   tabFields,
 } from '../testlib/settings-fields.js'
@@ -65,18 +61,22 @@ import {
 /** The built client bundle, as text — the only view of it this sandbox can get. */
 const CLIENT_SOURCE = readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8')
 
-/** A plaintext that must never surface in any display string or message. */
-const PLAINTEXT_KEY = 'sk-live-DO-NOT-LEAK-0123456789abcdef'
-
 /**
  * Every config field the plugin may not reintroduce.
  *
  * The plugin owns no local runtime any more: no venv, no weight cache, no managed
  * worker process. Each of these used to be a control on this page, so a
  * regression that brings one back shows up here as a name rather than as a
- * count that nobody can explain.
+ * count that nobody can explain. The cloud-API fields are retired the same way:
+ * generation is local-only, and a key field coming back would mean a second
+ * backend is being rebuilt.
  */
 const RETIRED_FIELDS = [
+  'backend',
+  'apiBaseUrl',
+  'apiKey',
+  'apiModel',
+  'apiStyle',
   'localEndpoint',
   'runtimeDir',
   'modelsDir',
@@ -271,7 +271,7 @@ test('with no configForms service the section props explain why, and never throw
 
 test('with a configForms service the section props carry the bound form', () => {
   const forms = fakeForms(['dsh-image-forge'])
-  forms.table.set('dsh-image-forge', fakeForm({ value: { backend: 'auto' }, revision: 3 }))
+  forms.table.set('dsh-image-forge', fakeForm({ value: { timeoutMs: 180000 }, revision: 3 }))
   const { slots, events } = fakeSlots()
   registerSettingsSection({ slots, get: (name) => (name === 'configForms' ? forms : undefined) }, function FakeSection() {
     return null
@@ -332,9 +332,9 @@ test('an unbound form still answers every call instead of throwing', async () =>
   const form = createResolvedEntryForm({ forms, entryIds: ['nope'] })
   assert.equal(form.boundEntryId(), undefined)
   assert.equal(form.getSnapshot().status, 'loading')
-  assert.equal(await form.set('backend', 'api'), false)
-  assert.equal(await form.unset('backend'), false)
-  assert.equal(await saveField(form, 'backend', 'api').then((outcome) => outcome.ok), false)
+  assert.equal(await form.set('outputDir', 'D:/pic'), false)
+  assert.equal(await form.unset('outputDir'), false)
+  assert.equal(await saveField(form, 'outputDir', 'D:/pic').then((outcome) => outcome.ok), false)
 })
 
 test('createResolvedEntryForm needs both a service and at least one candidate id', () => {
@@ -383,7 +383,7 @@ test('clearing a bound field goes through the bound form\'s unset', async () => 
 
 test('a write against an unwritable entry is refused before anything is sent', async () => {
   const inner = fakeForm({ writable: false })
-  const outcome = await saveField(inner, 'backend', 'api')
+  const outcome = await saveField(inner, 'outputDir', 'D:/pic')
   console.log('unwritable outcome:', JSON.stringify(outcome))
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'unwritable')
@@ -400,7 +400,7 @@ test('a revision that moved under us is reported as a conflict, and re-read rath
       return false
     },
   })
-  const outcome = await saveField(inner, 'backend', 'comfyui')
+  const outcome = await saveField(inner, 'outputDir', 'D:/pic')
   console.log('conflict outcome:', JSON.stringify(outcome))
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'conflict')
@@ -415,7 +415,7 @@ test('a revision that moved under us is reported as a conflict, and re-read rath
 
 test('a refusal that did not move the revision is reported as a plain refusal', async () => {
   const inner = fakeForm({ revision: 4, onSet: () => false })
-  const outcome = await saveField(inner, 'backend', 'comfyui')
+  const outcome = await saveField(inner, 'outputDir', 'D:/pic')
   console.log('refusal outcome:', JSON.stringify(outcome))
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'refused')
@@ -429,7 +429,7 @@ test('a rejecting transport is surfaced, never swallowed', async () => {
       throw new Error('transport down')
     },
   })
-  const outcome = await saveField(inner, 'backend', 'comfyui')
+  const outcome = await saveField(inner, 'outputDir', 'D:/pic')
   console.log('transport failure outcome:', JSON.stringify(outcome))
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'error')
@@ -441,7 +441,7 @@ test('a form whose set throws synchronously is reported too', async () => {
   inner.set = () => {
     throw new Error('sync boom')
   }
-  const outcome = await saveField(inner, 'backend', 'comfyui')
+  const outcome = await saveField(inner, 'outputDir', 'D:/pic')
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'error')
   assert.match(outcome.message, /sync boom/)
@@ -478,56 +478,6 @@ test('mutateFields says so when the adapter has no fenced write', async () => {
   assert.equal(outcome.ok, false)
   assert.equal(outcome.reason, 'error')
   assert.match(outcome.message, /mutate/)
-})
-
-// ---------------------------------------------------------------------------
-// Secret handling.
-// ---------------------------------------------------------------------------
-
-test('apiKey is a secret field and never renders its plaintext', () => {
-  assert.equal(isSecretField('apiKey'), true)
-  assert.equal(fieldByKey('apiKey').kind, 'secret')
-  // A non-secret must still render verbatim, or the masking is meaningless.
-  assert.equal(isSecretField('apiModel'), false)
-  assert.equal(displayValue('apiModel', 'qwen-image'), 'qwen-image')
-
-  const shown = displayValue('apiKey', PLAINTEXT_KEY)
-  console.log('apiKey display value:', JSON.stringify(shown))
-  assert.equal(shown, SECRET_MASK)
-  assert.ok(!shown.includes(PLAINTEXT_KEY), 'the display value must not contain the key')
-  assert.ok(!shown.includes('sk-live'), 'the display value must not even leak the prefix')
-  assert.equal(displayValue('apiKey', ''), '', 'an unset secret shows as unset, not as a mask')
-})
-
-test('no save failure for apiKey can carry the key it failed to write', async () => {
-  const cases = [
-    fakeForm({ writable: false }),
-    fakeForm({ onSet: () => false }),
-    fakeForm({
-      onSet: () => {
-        throw new Error('write rejected')
-      },
-    }),
-  ]
-  for (const inner of cases) {
-    const outcome = await saveField(inner, 'apiKey', PLAINTEXT_KEY)
-    assert.equal(outcome.ok, false)
-    const text = JSON.stringify(outcome)
-    console.log('apiKey failure text:', text)
-    assert.ok(!text.includes(PLAINTEXT_KEY), `the failure text leaked the key: ${text}`)
-  }
-})
-
-test('redactForLog masks a secret and keeps ordinary values readable', () => {
-  assert.equal(redactForLog('apiKey', PLAINTEXT_KEY), SECRET_MASK)
-  assert.equal(redactForLog('apiKey', ''), '（空）')
-  assert.ok(!redactForLog('apiKey', PLAINTEXT_KEY).includes(PLAINTEXT_KEY))
-  assert.equal(redactForLog('apiModel', 'qwen-image'), 'qwen-image')
-  assert.equal(redactForLog('timeoutMs', 180000), '180000')
-  // No boolean control survives on the page, but the renderer still knows how to
-  // show one: the next flag must not have to re-invent this.
-  assert.equal(redactForLog('someFutureFlag', true), '开')
-  assert.equal(redactForLog('someFutureFlag', false), '关')
 })
 
 // ---------------------------------------------------------------------------
@@ -573,18 +523,18 @@ test('unwrapConfigFields turns a mixed object into plain data', () => {
 })
 
 test('resolving over the defaults keeps falsy values instead of falling back', () => {
-  const defaults = { someFlag: true, timeoutMs: 180000, apiKey: 'default-key', backend: 'auto' }
+  const defaults = { someFlag: true, timeoutMs: 180000, comfyEndpoint: 'http://127.0.0.1:8188', outputDir: 'D:/pic' }
   const resolved = resolveConfigFields(defaults, {
     someFlag: { get: () => false },
     timeoutMs: { get: () => 1000 },
-    apiKey: { get: () => '' },
-    // `backend` is left out entirely and must keep its default.
+    comfyEndpoint: { get: () => '' },
+    // `outputDir` is left out entirely and must keep its default.
   })
   console.log('resolved over defaults:', JSON.stringify(resolved))
   assert.equal(resolved.someFlag, false, 'an explicit false must not fall back to the default')
   assert.equal(resolved.timeoutMs, 1000)
-  assert.equal(resolved.apiKey, '', 'an explicit empty string must not fall back to the default')
-  assert.equal(resolved.backend, 'auto', 'a missing field keeps its default')
+  assert.equal(resolved.comfyEndpoint, '', 'an explicit empty string must not fall back to the default')
+  assert.equal(resolved.outputDir, 'D:/pic', 'a missing field keeps its default')
 
   // A reference carrying undefined is an absent field, not an override.
   assert.equal(resolveConfigFields({ timeoutMs: 5 }, { timeoutMs: { get: () => undefined } }).timeoutMs, 5)
@@ -597,14 +547,12 @@ test('the real schema defaults survive a resolve round trip as plain data', () =
   const kinds = new Set(Object.values(resolved).filter((value) => value !== undefined).map((value) => typeof value))
   console.log('resolved value types:', JSON.stringify([...kinds]))
   assert.deepEqual([...kinds].sort(), ['number', 'string'], 'the surviving fields are strings and numbers only')
-  assert.equal(resolved.backend, 'auto')
-  assert.equal(resolved.apiStyle, 'openai')
   assert.equal(resolved.timeoutMs, 180000)
   assert.equal(resolved.defaultSteps, 25)
   assert.equal(resolved.comfyModel, 'base')
   // The two overrides are declared-but-unset, which is a real state: the key
   // exists and its value is undefined, so the resolver falls through.
-  assert.equal(Object.keys(resolved).length, 14, 'the documented field count')
+  assert.equal(Object.keys(resolved).length, 9, 'the documented field count')
   assert.ok('comfyuiSteps' in resolved, 'a nullable field must keep its key')
   assert.equal(resolved.comfyuiSteps, undefined)
   assert.equal(resolved.turboSteps, undefined)
@@ -631,12 +579,12 @@ test('every field in the config schema has a control on the settings page', () =
   assert.deepEqual(missing, [], 'these config fields have no control on the settings page')
   assert.deepEqual(stale, [], 'the settings page renders controls for fields the schema does not declare')
   assert.equal(SETTINGS_FIELD_KEYS.length, declared.length)
-  assert.equal(declared.length, 14, 'the documented field count')
+  assert.equal(declared.length, 9, 'the documented field count')
   // Nothing is hidden: the page shows every remaining field, because none of
   // them is plumbing any more.
   assert.deepEqual(HIDDEN_FIELD_KEYS, [], 'no surviving field is hidden')
   // The turbo pair is the newest thing on the page, so name it: a regression that
-  // drops one reads as "what is missing" rather than "14 !== 13".
+  // drops one reads as "what is missing" rather than "9 !== 8".
   for (const key of ['comfyModel', 'turboSteps', 'comfyEndpoint', 'comfyPorts', 'comfyModelsDir']) {
     assert.ok(declared.includes(key), `${key} must be a schema field`)
     assert.ok(SETTINGS_FIELD_KEYS.includes(key), `${key} must have a control`)
@@ -651,15 +599,15 @@ test('the retired local-runtime fields are gone from both the schema and the pag
   }
 })
 
-test('the backend control offers exactly the two surviving backends', () => {
-  const field = fieldByKey('backend')
-  console.log('backend control:', JSON.stringify(field))
-  assert.equal(field.kind, 'enum')
-  assert.deepEqual(field.choices.map((choice) => choice.value), ['auto', 'api', 'comfyui'])
-  // The hint has to say what auto means and that editing is ComfyUI-only, because
-  // those two facts decide which tab a user has to fill in.
-  assert.match(field.hint, /auto/)
-  assert.match(field.hint, /改图只有 ComfyUI/)
+test('no backend or API control remains on the page', () => {
+  // One backend remains (the local ComfyUI): a selector between one thing and
+  // itself is not a control, and the key fields died with the cloud client.
+  for (const retired of ['backend', 'apiBaseUrl', 'apiKey', 'apiModel', 'apiStyle']) {
+    assert.equal(fieldByKey(retired), undefined, `${retired} is still on the settings page`)
+  }
+  // The weight-family control survives, and the coverage test above already
+  // pins schema/table agreement on the removal.
+  assert.equal(fieldByKey('comfyModel').kind, 'enum')
 })
 
 test('the weight-family control states the trade and the fallback', () => {
@@ -703,12 +651,12 @@ test('the config keys really are volatile references, and resolve back to plain 
   const refs = Object.entries(resolved).filter(([, value]) => typeof value?.get === 'function')
   console.log('volatile reference count:', refs.length, 'of', Object.keys(resolved).length)
   assert.equal(refs.length, Object.keys(resolved).length, 'every field must be volatile for the Host to serve a form')
-  assert.equal(resolved.backend.get(), 'auto')
+  assert.equal(resolved.comfyModel.get(), 'base')
   assert.equal(resolved.timeoutMs.get(), 180000)
 })
 
 test('the settings tabs cover every visible group exactly once', () => {
-  assert.ok(SETTINGS_TABS.length >= 3, 'the page must be multi-tab')
+  assert.ok(SETTINGS_TABS.length >= 2, 'the page must be multi-tab')
   const seen = SETTINGS_TABS.flatMap((tab) => tabFields(tab).map(({ group }) => group.id))
   const visibleGroups = groupedFields().map(({ group }) => group.id)
   assert.deepEqual([...seen].sort(), [...visibleGroups].sort(), 'every visible group must live on exactly one tab')
@@ -761,7 +709,7 @@ test('every control carries a usable label, hint and kind-appropriate limits', (
     assert.ok(field.label.length > 0, `${field.key} has no label`)
     assert.ok(field.hint.length > 0, `${field.key} has no hint`)
     assert.ok(
-      ['enum', 'string', 'secret', 'path', 'number', 'boolean'].includes(field.kind),
+      ['enum', 'string', 'path', 'number', 'boolean'].includes(field.kind),
       `${field.key} has an unknown kind ${field.kind}`,
     )
     if (field.kind === 'enum') {
@@ -792,23 +740,21 @@ test('every enum control offers the value its schema field defaults to', () => {
 // The sampler-step policy.
 // ---------------------------------------------------------------------------
 
-test('resolveSteps follows explicit > comfyui override > default, and api has no override', async () => {
+test('resolveSteps follows explicit > comfyui override > default', async () => {
   const { resolveSteps } = await import('../testlib/tools.js')
   /** A settings stub carrying only the fields the resolver reads. */
   const withSteps = (defaultSteps, comfyuiSteps) => ({ defaultSteps, comfyuiSteps })
 
   const cases = [
-    // label, explicit, backend, settings, expected
-    ['explicit beats everything (comfyui)', 12, 'comfyui', withSteps(25, 30), { steps: 12, source: 'explicit' }],
-    ['explicit beats everything (api)', 20, 'api', withSteps(25, 30), { steps: 20, source: 'explicit' }],
-    ['comfyui takes its own override', undefined, 'comfyui', withSteps(25, 30), { steps: 30, source: 'backend' }],
-    ['api has no override, so it falls through', undefined, 'api', withSteps(25, 30), { steps: 25, source: 'default' }],
-    ['an unset comfyui override falls through', undefined, 'comfyui', withSteps(25, undefined), { steps: 25, source: 'default' }],
-    ['the shipped defaults resolve to 25', undefined, 'comfyui', withSteps(25, undefined), { steps: 25, source: 'default' }],
-    ['a non-positive override is ignored', undefined, 'comfyui', withSteps(25, 0), { steps: 25, source: 'default' }],
+    // label, explicit, settings, expected
+    ['explicit beats everything', 12, withSteps(25, 30), { steps: 12, source: 'explicit' }],
+    ['the comfyui override wins over the default', undefined, withSteps(25, 30), { steps: 30, source: 'backend' }],
+    ['an unset comfyui override falls through', undefined, withSteps(25, undefined), { steps: 25, source: 'default' }],
+    ['the shipped defaults resolve to 25', undefined, withSteps(25, undefined), { steps: 25, source: 'default' }],
+    ['a non-positive override is ignored', undefined, withSteps(25, 0), { steps: 25, source: 'default' }],
   ]
-  for (const [label, explicit, backend, settings, expected] of cases) {
-    const actual = resolveSteps(explicit, backend, settings)
+  for (const [label, explicit, settings, expected] of cases) {
+    const actual = resolveSteps(explicit, settings)
     console.log(`${label}: ${JSON.stringify(actual)}`)
     assert.deepEqual(actual, expected, label)
   }
@@ -833,9 +779,9 @@ test('resolveTurboSteps never borrows the base family\'s 25', async () => {
 test('the resolved step count is what reaches each backend, and the result says so', () => {
   // `resolveSteps` is unit-tested above; this asserts the *wiring* is present in
   // the bundle the Host loads. Whether "no explicit steps" really puts 25 on the
-  // wire is not covered by a test here — the e2e harnesses that could observe it
-  // (api-e2e / comfyui-e2e) exercise the explicit path, and they do assert those
-  // explicit values arrive unchanged.
+  // wire is not covered by a test here — the comfyui-e2e harness that could
+  // observe it exercises the explicit path, and it asserts those explicit values
+  // arrive unchanged.
   const source = readFileSync(fileURLToPath(new URL('../lib/index.js', import.meta.url)), 'utf8')
   for (const needle of ['steps_used', 'steps_source', 'resolveSteps', 'comfyuiSteps', 'defaultSteps', 'turboSteps']) {
     assert.match(source, new RegExp(needle), `${needle} must be present in the host bundle`)
@@ -846,7 +792,8 @@ test('the resolved step count is what reaches each backend, and the result says 
   const rawSites = [
     /await generateViaComfyUi\(target, models, request,/,
     /await generateViaComfyUiEdit\(target, models, request,/,
-    /await generateViaApi\(apiSettings, request,/,
+    /await generateViaComfyUiTurbo\(target, models, request,/,
+    /await generateViaComfyUiTurboEdit\(target, models, request,/,
   ]
   for (const pattern of rawSites) {
     assert.ok(!pattern.test(source), `a dispatch site still passes the unresolved request: ${pattern}`)
@@ -857,16 +804,16 @@ test('the resolved step count is what reaches each backend, and the result says 
   // through `resolveTurboSteps` (a distilled checkpoint must never borrow the
   // base family's 25), so both resolvers count.
   //
-  // Three base sites: generate-via-api, generate-via-comfyui, edit-via-comfyui.
-  // Two turbo sites: the same generate/edit pair. Five forwards: every call that
-  // actually reaches a backend.
-  const resolved = source.match(/resolveSteps\(steps, "/g) ?? []
+  // Two base sites (generate + edit via ComfyUI) and two turbo sites — the same
+  // pair — so four dispatch forwards, plus the two `recordRun` metadata writes
+  // that report the same resolved count: six markers in total.
+  const resolved = source.match(/resolveSteps\(steps, settings\)/g) ?? []
   const turboResolved = source.match(/resolveTurboSteps\(steps, settings\)/g) ?? []
   const forwarded = source.match(/steps: usedSteps\.steps/g) ?? []
   console.log('resolveSteps call sites:', resolved.length, '/ turbo sites:', turboResolved.length, '/ resolved-count forwards:', forwarded.length)
-  assert.equal(resolved.length, 3, 'all three base dispatch sites must resolve')
+  assert.equal(resolved.length, 2, 'both base dispatch sites must resolve')
   assert.equal(turboResolved.length, 2, 'both turbo dispatch sites (generate + edit) must resolve through the turbo resolver')
-  assert.equal(forwarded.length, 5, 'each of the five dispatch sites must forward the resolved count, not the raw request')
+  assert.equal(forwarded.length, 6, 'the four dispatch sites and two recordRun calls must carry the resolved count')
 })
 
 // ---------------------------------------------------------------------------
@@ -1092,8 +1039,10 @@ test('the built client entry wires the section and keeps the keyed tool view', (
   }
   // ...and the retired one must be gone, in the bundle as well as in the source.
   assert.ok(!CLIENT_SOURCE.includes('qwen_image_env'), 'the retired local-runtime tool is still wired into the client')
-  assert.match(CLIENT_SOURCE, /password/, 'a secret control must render as a password input')
-  assert.match(CLIENT_SOURCE, /SECRET_MASK|••••/, 'the secret mask must be reachable from the bundle')
+  // The secret machinery is retired with the API key field: no password input
+  // and no mask may come back without a field that needs it.
+  assert.ok(!CLIENT_SOURCE.includes('password'), 'a secret control is still wired into the client')
+  assert.ok(!CLIENT_SOURCE.includes('SECRET_MASK'), 'the secret mask is still in the bundle')
   console.log('lib/client.js bytes:', CLIENT_SOURCE.length)
 })
 

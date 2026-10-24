@@ -241,8 +241,6 @@ test('a fake ComfyUI edit: references uploaded, graph wired, image written', asy
     const widePath = fx.ref('wide.png', wide)
     const squarePath = fx.ref('square.png', square)
     const tools = register({
-      backend: 'comfyui',
-      apiKey: '',
       comfyEndpoint: comfy.endpoint,
       outputDir: fx.outputDir,
       timeoutMs: 20_000,
@@ -324,7 +322,7 @@ test('with neither ratio nor size the canvas follows the first reference by defa
   const fx = fixture('forge-edit-default')
   try {
     const path = fx.ref('exact.png', makePng(1664, 928))
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const result = await run(tools, 'qwen_image_edit', { prompt: '只把标题换成「夏日特惠」。', images: [path] })
     console.log('defaulted ratio_follow:', JSON.stringify({ ratio_follow: result.ratio_follow, defaulted: result.ratio_follow_defaulted, size: result.size, deviation: result.ratio_deviation_percent }))
     assert.equal(result.ratio_follow, 'image1')
@@ -350,7 +348,7 @@ test('ratio_follow also accepts the path (or data URI) that images[] carried', a
   try {
     const square = fx.ref('square.png', makePng(1200, 1200))
     const wide = fx.ref('wide.png', makePng(2048, 1152))
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const result = await run(tools, 'qwen_image_edit', { prompt: '把第二张图的天空换到第一张图上。', images: [square, wide], ratio_follow: wide.toUpperCase() })
     console.log('ratio_follow by path ->', JSON.stringify({ followed: result.ratio_follow_image, size: result.size }))
     assert.equal(result.ratio_follow, 'image2', 'the path resolves to the reference it matches, not to image1')
@@ -378,7 +376,7 @@ test('wh_ratio and ratio_follow together are refused before any backend is touch
   const comfy = await startFakeComfy()
   const fx = fixture('forge-edit-exclusive')
   try {
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const error = await failure(tools, 'qwen_image_edit', {
       prompt: '把背景换成雪夜。',
       images: [fx.ref('a.png', makePng(256, 256))],
@@ -399,7 +397,7 @@ test('wh_ratio and ratio_follow together are refused before any backend is touch
 test('every unusable reference is refused by position, never dropped', async () => {
   const fx = fixture('forge-edit-bad-refs')
   try {
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: 'http://127.0.0.1:1', outputDir: fx.outputDir })
+    const tools = register({ comfyEndpoint: 'http://127.0.0.1:1', outputDir: fx.outputDir })
     const good = fx.ref('good.png', makePng(256, 256))
     const cases = [
       { name: 'too many', images: Array.from({ length: 11 }, () => good), match: /carries 11 reference images, but at most 10/ },
@@ -432,33 +430,26 @@ test('every unusable reference is refused by position, never dropped', async () 
   }
 })
 
-test('backend "api" refuses to carry references instead of dropping them', async () => {
-  const fx = fixture('forge-edit-api')
+test('editing runs on ComfyUI only, and the failure names the remedy', async () => {
+  const fx = fixture('forge-edit-local-only')
   try {
-    const tools = register({ backend: 'api', apiKey: 'test-key', apiBaseUrl: 'http://127.0.0.1:1/v1', outputDir: fx.outputDir })
-    const error = await failure(tools, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('a.png', makePng(256, 256))] })
-    console.log('backend api error://n' + error.message)
-    assert.match(error.message, /backend "api" 没有编辑通道/)
-    // The one backend that can carry a reference, and the document that installs
-    // it. The removed `local` tier must not be offered as a third option.
-    assert.match(error.message, /comfyui/)
+    // No ComfyUI anywhere: the error must name what it probed and point at the
+    // deployment document, never at a backend that no longer exists.
+    const down = register({ comfyEndpoint: '', comfyPorts: '1', timeoutMs: 5000, outputDir: fx.outputDir })
+    const error = await failure(down, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('a.png', makePng(256, 256))] })
+    console.log('edit with ComfyUI down:\n' + error.message)
+    assert.match(error.message, /comfyui backend: 没找到在跑的 ComfyUI/)
     assert.match(error.message, /docs\/comfyui-deployment\.md/)
-    assert.ok(!/`local`/.test(error.message), 'the removed local backend is still offered')
-    // `backend: "auto"` with a key present still edits over ComfyUI, and says why
-    // it did not use the key.
+    assert.ok(!/`local`|backend "api"/.test(error.message), 'a removed backend is still offered')
+
     const comfy = await startFakeComfy({ rendered: makePng(992, 992) })
     try {
-      const auto = register({
-        backend: 'auto',
-        apiKey: 'test-key',
-        apiBaseUrl: 'http://127.0.0.1:1/v1',
-        comfyEndpoint: comfy.endpoint,
-        outputDir: fx.outputDir,
-      })
-      const result = await run(auto, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('b.png', makePng(600, 600))] })
-      console.log('auto + key ->', JSON.stringify({ backend: result.backend, api_skipped: result.api_skipped }))
-      assert.equal(result.backend, 'comfyui', 'auto must not route an edit to the cloud backend')
-      assert.equal(result.api_skipped, 'no edit path on the cloud backend')
+      const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
+      const result = await run(tools, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('b.png', makePng(600, 600))] })
+      console.log('edit ->', JSON.stringify({ backend: result.backend }))
+      assert.equal(result.backend, 'comfyui')
+      assert.equal(result.api_skipped, undefined, 'the removed cloud-routing note must not come back')
+      assert.equal(result.transparent, undefined, 'the removed transparent flag must not come back')
     } finally {
       await comfy.close()
     }
@@ -477,8 +468,6 @@ test('a full-size canvas edits fine over ComfyUI, with no gate in between', asyn
   const fx = fixture('forge-edit-fullsize')
   try {
     const tools = register({
-      backend: 'comfyui',
-      apiKey: '',
       comfyEndpoint: comfy.endpoint,
       outputDir: fx.outputDir,
     })
@@ -505,36 +494,11 @@ test('a full-size canvas edits fine over ComfyUI, with no gate in between', asyn
   }
 })
 
-test('an "auto" edit with no ComfyUI running names the deployment document', async () => {
-  const fx = fixture('forge-edit-auto-down')
-  try {
-    const tools = register({
-      backend: 'auto',
-      apiKey: '',
-      comfyEndpoint: '',
-      comfyPorts: '1',
-      outputDir: fx.outputDir,
-    })
-    const error = await failure(tools, 'qwen_image_edit', {
-      prompt: 'x',
-      images: [fx.ref('a.png', makePng(256, 256))],
-    })
-    console.log('auto edit with nothing running://n' + error.message)
-    // There is no `local` fallback left, so the only useful thing this message can
-    // do is name what is missing and where the fix is written down.
-    assert.match(error.message, /改图只能在本机 ComfyUI 上跑/)
-    assert.match(error.message, /docs\/comfyui-deployment\.md/)
-    assert.ok(!/neither local backend/.test(error.message), 'the removed local fallback is still described')
-  } finally {
-    fx.cleanup()
-  }
-})
-
 test('every reference is uploaded for an edit, and text-to-image uploads none', async () => {
   const comfy = await startFakeComfy({ rendered: makePng(992, 992) })
   const fx = fixture('forge-edit-upload')
   try {
-    const tools = register({ backend: 'comfyui', apiKey: '', comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const square = makePng(512, 512)
     const wide = makePng(2048, 1152)
     const result = await run(tools, 'qwen_image_edit', {

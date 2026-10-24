@@ -2,35 +2,77 @@
 
 ![dsh-image-forge：肥鱼女仆指着一张画布，画面上是「dsh-image-forge」标题与画板/素材库的功能示意](docs/images/repo-banner.png)
 
-[![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
+[![npm](https://img.shields.io/npm/v/dsh-image-forge)](https://www.npmjs.com/package/dsh-image-forge)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-image-forge)](https://www.npmjs.com/package/dsh-image-forge)
+[![CI](https://github.com/Demerier/dsh-image-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/Demerier/dsh-image-forge/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
 
 在 DeepSeek Harness 里用 Qwen-Image 出图、改图。
 
-说「画一张 16:9 的夏日饮料海报」，出图；丢一张客厅照片说「改成晚上的」，改图。比例、像素由插件换算，不用你查表。
+说「画一张 16:9 的夏日饮料海报」，出图；丢一张客厅照片说「改成晚上的」，改图。比例、像素由插件换算，不用你查表；成果按**画板**归档，工作台里能看、能摆、能接着改。
 
-后端二选一：**你自带的云端 key**，或**你本机装好的 ComfyUI**。插件不自带运行时，不下载权重。
+![图像工作台：左边写提示词、选画幅，右边画布上落着刚生成的图](docs/images/studio-workbench.png)
+
+**两个入口，一套后端**：对话里说一句话，模型按 Qwen 契约改写后调用工具；或者打开设置页的「图像工作台」点按钮。两边共用同一份配置、同一个输出目录、同一批画板。
+
+**目录**：[能不能用](#能不能用) · [快速开始](#快速开始) · [出图](#出图) · [改图](#改图) · [工作台](#工作台) · [工具](#工具) · [提示词怎么写](#提示词怎么写) · [后端](#后端) · [可能踩的坑](#可能踩的坑) · [许可](#许可) · [更多文档](#更多文档)
 
 ---
 
 ## 能不能用
 
-| 你手上有的 | 能做什么 |
-|---|---|
-| 只有云端 API key | 文生图。**改图不行**，云 API 没有编辑通道 |
-| 只有 ComfyUI（+ 三个权重） | 出图 + 改图，全离线 |
-| 两者都有 | 出图走 key，改图自动落到 ComfyUI |
-| 两者都没有 | 先看 [ComfyUI 部署指引](docs/comfyui-deployment.md) |
+需要**本机装好的 ComfyUI + 三个 Qwen-Image 2.1 权重**。文生图、改图（图生图）都跑在这台机器上，
+首次下载权重之后完全离线，不联网、不耗云端额度。
+
+- 显存 8 GB 起步（实测机型 RTX 4070 Laptop）。没有 ComfyUI 就照 [部署指引](docs/comfyui-deployment.md) 从零装。
+- 插件不自带运行时、不下载权重、不碰 ComfyUI 的配置；它没起来时插件只负责把缺什么说清。
 
 ---
 
-## 安装
+## 快速开始
+
+### 1. 安装
+
+插件已发布到 npm（包名 `dsh-image-forge`）。官方 DSH 桌面版内置插件管理器，两种装法任选：
+
+**桌面版界面安装**
+
+打开 DSH 桌面版的「插件」页 →「发现」标签 → 搜索 `dsh-image-forge` → 安装。市场索引源没有收录它也没关系：同页有**直接输入包名安装**的入口，填 `dsh-image-forge` 一样能装。
+
+**命令行安装（npm 包）**
+
+```bash
+dsh plugin --profile <profile> add dsh-image-forge
+```
+
+也可以装 GitHub 上的最新源码：
 
 ```bash
 dsh plugin --profile <profile> add github:Demerier/dsh-image-forge
 ```
 
-装完重启 DSH。对话里能看到 `qwen_image_generate` / `qwen_image_edit` / `qwen_image_status` 三个工具，设置页左侧出现「Qwen 出图」，第一页就是工作台。
+装完**完全退出 DSH 再打开**（不是刷新窗口，插件的 `cordis.yml` 在启动时加载）。
+
+> 别用 `npm install` 装它——这是 DSH 插件，脱离宿主跑不起来。
+> `pnpm build` 报 `Cannot find package 'ansis'` 时，删掉 `node_modules` 重装（本仓库用 `nodeLinker: hoisted` 绕开这个问题）。
+
+### 2. 把 ComfyUI 指给它
+
+什么都不用填：插件自动探测 8000 / 8188 / … 端口（非回环地址会被拒绝）。缺 Qwen-Image 权重时，
+照 [ComfyUI 部署指引](docs/comfyui-deployment.md) 把三个文件放进对应目录，`qwen_image_status` 会告诉你它缺哪个。
+
+9 个配置字段都有默认值，日常一个都不用碰；全部字段见 [docs/configuration.md](docs/configuration.md)。
+
+### 3. 出第一张图
+
+对话里直接说：
+
+> 画一张 16:9 的夏日饮料海报，清凉一点
+
+模型会把它改写成 Qwen 提示词契约再调工具，图片落盘并内联显示在回复里。也可以打开设置页「Qwen 出图」→「图像工作台」，手写提示词点「生成」。
+
+**验收标准**：对话里能看到 `qwen_image_generate` / `qwen_image_edit` / `qwen_image_status` 三个工具；设置页左侧出现「Qwen 出图」。跑不通先调 `qwen_image_status`，它会点名缺什么。
 
 本机改代码时：
 
@@ -40,27 +82,7 @@ pnpm build
 dsh plugin --profile <profile> add <本仓库绝对路径>
 ```
 
-> 别用 `npm install` 装它——这是 DSH 插件，脱离宿主跑不起来。
-> `pnpm build` 报 `Cannot find package 'ansis'` 时，删掉 `node_modules` 重装（本仓库用 `nodeLinker: hoisted` 绕开这个问题）。
-
----
-
-## 配置
-
-14 个字段都有默认值，日常只看这 6 个：其余见 [docs/configuration.md](docs/configuration.md)。
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `backend` | `auto` | `auto` / `api` / `comfyui`。**改图只能 `comfyui`** |
-| `apiKey` | 空 | 建议留空，改用环境变量，key 就不进 profile 文件 |
-| `comfyEndpoint` | 空 | 如 `http://127.0.0.1:8188`。留空自动探测端口；非回环地址会被拒绝 |
-| `comfyModelsDir` | 自动探测 | ComfyUI 的 `models` 目录，只影响报错信息里写的路径 |
-| `comfyModel` | `base` | `turbo`（8 步，快约 2.7×）或 `base`（25 步）。写实、中文文字、古典构图用 `base` |
-| `outputDir` | `~/Pictures/dsh-image-forge` | 图片存哪 |
-
-- Key 依次读 `apiKey` → `QWEN_IMAGE_API_KEY` → `DASHSCOPE_API_KEY` → `OPENAI_API_KEY`。不写盘、不进日志。
-- 步数优先级：调用时显式传的 > `comfyuiSteps` > `defaultSteps`。turbo 用自己的 `turboSteps`（默认 8）。
-- 设置页三个页签：出图、云端 API、ComfyUI。
+完整流程（打包、版本号、tarball 安装）见 [docs/local-install.md](docs/local-install.md)。
 
 ---
 
@@ -107,7 +129,6 @@ qwen_image_edit(prompt = <改图指令>, images = ["D:\\pictures\\room.png"], ra
 
 - 路径必须绝对；只认 PNG / JPEG / WebP。
 - `wh_ratio` 和 `ratio_follow` 同时传会直接报错，二选一。
-- 改图只走 ComfyUI。`backend: "api"` 会明确报错，不会把参考图丢掉。
 - 多张参考图时用 `<image1>` `<image2>` 指明用途，并说清哪张是画布。
 - 显存不够就先调小 `width` / `height`。
 
@@ -123,6 +144,8 @@ qwen_image_edit(prompt = <改图指令>, images = ["D:\\pictures\\room.png"], ra
 - **结果是一块画布**：拖空白处平移、滚轮缩放。选中一张点「用作参考」，下一轮就变成改图，新图会从原图拉一条虚线过来，改了哪几轮一眼看清。
 - **按画板归档**：顶部切换 / 新建 / 重命名，画布位置自动保存，重开页面回到上次的画板。「素材」页可以跨画板搜索，把图用作参考、定位回画布、或删掉。
 
+![工作台的「素材」页：画板栏 + 跨画板素材检索，每张图可「用作参考」「定位」或移除](docs/images/studio-assets.png)
+
 ComfyUI 没起来时面板照样打开，顶部会写清查了哪些端口、为什么失败。
 
 > 「优化提示词」需要宿主装了 `@deepseek-ai/dsh-llm`。没有的话只有这个按钮不可用，出图不受影响。
@@ -133,13 +156,13 @@ ComfyUI 没起来时面板照样打开，顶部会写清查了哪些端口、为
 
 | 工具 | 用途 | 主要参数 |
 |---|---|---|
-| `qwen_image_generate` | 出图 | `prompt`、`wh_ratio`、`width`/`height`、`steps`、`seed`、`count`、`transparent`、`backend`、`preset`、`board` |
+| `qwen_image_generate` | 出图 | `prompt`、`wh_ratio`、`width`/`height`、`steps`、`seed`、`count`、`preset`、`board` |
 | `qwen_image_edit` | 改图 | `prompt`、`images`（1–10 张）、`ratio_follow` 或 `wh_ratio`、`board` |
 | `qwen_image_status` | 检查环境 | 无 |
 
-不确定为什么跑不通时，先跑 `qwen_image_status`。它会告诉你云 API 通不通、ComfyUI 在不在、三个权重能不能识别、显卡剩多少显存、输出目录能不能写。不产图、不写盘。
+不确定为什么跑不通时，先跑 `qwen_image_status`。它会告诉你 ComfyUI 在不在、三个权重能不能识别、显卡剩多少显存、输出目录能不能写。不产图、不写盘。
 
-`board` 不传时会新建一块画板，把返回的 `board.id` 传回后续调用就能归到同一块。
+`board` 不传时会新建一块画板，把返回的 `board.id` 传回后续调用就能归到同一块。同一组图继续出图 / 改图时记得传——新图和它的来源才会落在同一块画布上。
 
 ---
 
@@ -159,21 +182,23 @@ ComfyUI 没起来时面板照样打开，顶部会写清查了哪些端口、为
 
 ---
 
-## 后端
+## 性能：base 与 turbo
 
-`auto` 的判断只有一步：有 key 走云 API，没有走 ComfyUI。
+唯一影响速度与画质的选择是权重家族（设置页 `comfyModel`）：
 
-- **云 API**：一次 HTTP 请求，不占本机显存。没有编辑通道，每张图都要联网。
-- **ComfyUI**：本机唯一能改图的路。8 GB 卡（RTX 4070 Laptop）实测，文生图 1312×736 约 2 s/步，1.5MP 的 8 步改图 19–23 s。
-- **turbo 不保证生效**：没装 turbo 权重会自动退回 `base`，结果里会有提示。盲测 5 题 base 3 : 2 turbo，单张 27–29 s → 9–11 s。turbo 氛围更强，但材质细节、中文小字、印章、古典构图会输给 base。
+- **base**：25 步，官方全量。写实、画面里的中文文字、古典构图用它。
+- **turbo**：8 步，快约 2.7×。**没装 turbo 权重会自动退回 `base`**，结果里会有提示。
+  盲测 5 题 base 3 : 2 turbo，单张 27–29 s → 9–11 s。turbo 氛围更强，但材质细节、中文小字、印章、古典构图会输给 base。
 
-部署见 [ComfyUI 部署指引](docs/comfyui-deployment.md)，两条路的详细取舍见 [docs/backends.md](docs/backends.md)。
+8 GB 卡（RTX 4070 Laptop）实测：文生图 1312×736 约 2 s/步，1.5MP 的 8 步改图 19–23 s。
+全部实测数据见 [docs/configuration.md](docs/configuration.md) 的证据一节。
+
+部署见 [ComfyUI 部署指引](docs/comfyui-deployment.md)。
 
 ---
 
 ## 可能踩的坑
 
-- **云 API 不能改图**。给了参考图又指定 `backend: "api"` 会报错，不会静默丢图。
 - 参考图只认 PNG / JPEG / WebP 的文件头，TIFF、AVIF 会被拒绝并说明原因。
 - 没有局部重绘、没有放大。素材页只做检索和整理，不做批量导出或调色。
 - 插件不会替你装 ComfyUI、不下权重、不改它的启动参数。
@@ -203,8 +228,8 @@ ComfyUI 后端与工作流占位符协议（`{{prompt}}` / `{{seed}}` / `{{image
 | [docs/comfyui-deployment.md](docs/comfyui-deployment.md) | 本机部署：下载、建实例、放权重、校验、排障 |
 | [docs/configuration.md](docs/configuration.md) | 14 个配置字段的默认值和边界 |
 | [docs/usage-reference.md](docs/usage-reference.md) | 像素怎么算、表外比例、`board` 用法、`status` 各字段 |
-| [docs/backends.md](docs/backends.md) | 两条后端的详细对比 |
 | [docs/license-and-limits.md](docs/license-and-limits.md) | 分发和商用前的注意事项 |
+| [docs/local-install.md](docs/local-install.md) | 开发：本机构建、打包、tarball 安装 |
 | [docs/testing.md](docs/testing.md) | 开发：怎么跑测试 |
 | [docs/client-bundle.md](docs/client-bundle.md) | 开发：改客户端和设置页 UI |
 | [docs/release-notes-0.2.0.md](docs/release-notes-0.2.0.md) | 0.2.0 改了什么，以及从 0.1.0 升上来要注意什么 |

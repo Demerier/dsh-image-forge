@@ -311,7 +311,6 @@ export const CLIENT_CSS = `
   display: none;
 }
 .dsh-image-forge-setting-control input[type="text"],
-.dsh-image-forge-setting-control input[type="password"],
 .dsh-image-forge-setting-control input[type="number"],
 .dsh-image-forge-setting-control select {
   box-sizing: border-box;
@@ -326,8 +325,7 @@ export const CLIENT_CSS = `
   font: inherit;
   font-size: 13px;
 }
-.dsh-image-forge-setting-control input[type="text"],
-.dsh-image-forge-setting-control input[type="password"] {
+.dsh-image-forge-setting-control input[type="text"] {
   /* Path and URL boxes need more than a stub: prefer filling the row. */
   flex: 1 1 220px;
 }

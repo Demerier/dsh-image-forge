@@ -55,7 +55,6 @@ const SHIPPED = [
   'references/edit_rules.md',
   'docs/comfyui-deployment.md',
   'docs/configuration.md',
-  'docs/backends.md',
   // The banner the README renders; a missing image is a broken first screen on
   // npm and GitHub both, and `docs/*.md` does not reach into a subdirectory.
   'docs/images/repo-banner.png',

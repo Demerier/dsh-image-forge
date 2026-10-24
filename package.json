@@ -1,7 +1,7 @@
 {
   "name": "dsh-image-forge",
   "version": "0.2.0",
-  "description": "DeepSeek Harness plugin: Qwen-Image 文生图 / 参考图编辑，把官方提示词契约的 wh_ratio 做成一等参数；后端 api（云端 key）/ comfyui（本机 ComfyUI），默认 auto；成果按画板归档。",
+  "description": "DeepSeek Harness plugin: Qwen-Image 文生图 / 参考图编辑，把官方提示词契约的 wh_ratio 做成一等参数；仅本机 ComfyUI 后端（零下载、零转换），成果按画板归档。",
   "license": "MIT",
   "author": "Demerier",
   "homepage": "https://github.com/Demerier/dsh-image-forge#readme",
@@ -53,7 +53,7 @@
   ],
   "scripts": {
     "build": "tsdown && tsdown -c tsdown.client.config.ts",
-    "test": "node test/ratio.test.mjs && node test/surface.test.mjs && node test/api-e2e.test.mjs && node test/comfyui-e2e.test.mjs && node test/edit-e2e.test.mjs && node test/settings.test.mjs && node test/studio.test.mjs && node test/studio-canvas.test.mjs && node test/boards.test.mjs && node test/package-contents.test.mjs && node test/studio-file-route.test.mjs",
+    "test": "node test/ratio.test.mjs && node test/surface.test.mjs && node test/comfyui-e2e.test.mjs && node test/edit-e2e.test.mjs && node test/settings.test.mjs && node test/studio.test.mjs && node test/studio-canvas.test.mjs && node test/boards.test.mjs && node test/package-contents.test.mjs && node test/studio-file-route.test.mjs",
     "test:live": "node test/live-generate-e2e.mjs",
     "test:live:edit": "node test/live-edit-e2e.mjs",
     "prepack": "pnpm run build",

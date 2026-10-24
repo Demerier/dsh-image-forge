@@ -171,7 +171,6 @@ test('a fake ComfyUI: port probe, graph injection, poll, /view, byte-exact write
   const closed = await deadPort()
   try {
     const tools = register({
-      backend: 'comfyui',
       comfyEndpoint: '',
       comfyPorts: `${closed},${comfy.port}`,
       comfyModelsDir: 'D:\\Comfy-Desktop\\ComfyUI-Shared\\models',
@@ -268,7 +267,6 @@ test('a ComfyUI without qwen weights is refused before /prompt, naming the file'
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-missing-'))
   try {
     const tools = register({
-      backend: 'comfyui',
       comfyEndpoint: comfy.endpoint,
       comfyModelsDir: 'D:\\Comfy-Desktop\\ComfyUI-Shared\\models',
       outputDir,
@@ -294,7 +292,6 @@ test('with no ComfyUI running the error lists every port probed and how to start
   const second = await deadPort()
   try {
     const tools = register({
-      backend: 'comfyui',
       comfyEndpoint: '',
       comfyPorts: `${first},${second}`,
       outputDir,
@@ -318,7 +315,6 @@ test('a non-loopback endpoint is refused before any socket opens', async () => {
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-remote-'))
   try {
     const tools = register({
-      backend: 'comfyui',
       comfyEndpoint: 'http://192.168.1.5:8188',
       // Present only to prove the refusal happens before probing: an auto probe
       // would have found this live server.
@@ -362,7 +358,7 @@ test('node_errors from /prompt are quoted verbatim', async () => {
   })
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-nodeerr-'))
   try {
-    const tools = register({ backend: 'comfyui', comfyEndpoint: comfy.endpoint, outputDir })
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir })
     const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.' })
     assert.ok(error instanceof Error)
     console.log('node_errors message:\n' + error.message)
@@ -407,7 +403,7 @@ test('an execution error carries the upstream message and traceback', async () =
   })
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-execerr-'))
   try {
-    const tools = register({ backend: 'comfyui', comfyEndpoint: comfy.endpoint, outputDir })
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir })
     const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.' })
     assert.ok(error instanceof Error)
     console.log('execution-error message:\n' + error.message)
@@ -422,53 +418,27 @@ test('an execution error carries the upstream message and traceback', async () =
   }
 })
 
-test('auto prefers the cloud key, and falls back to ComfyUI when there is none', async () => {
+test('generation always runs on ComfyUI, and the failure names the remedy', async () => {
   const comfy = await startFakeComfy()
-  const cloud = createServer((request, response) => {
-    let body = ''
-    request.on('data', (chunk) => {
-      body += chunk
-    })
-    request.on('end', () => {
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({ data: Array.from({ length: JSON.parse(body).n ?? 1 }, () => ({ b64_json: PNG_1X1 })) }))
-    })
-  })
-  await new Promise((resolve) => cloud.listen(0, '127.0.0.1', resolve))
-  const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-auto-'))
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-only-'))
   try {
-    const base = {
-      backend: 'auto',
-      comfyEndpoint: comfy.endpoint,
-      outputDir,
-      apiBaseUrl: `http://127.0.0.1:${cloud.address().port}/v1`,
-      apiModel: 'qwen-image',
-    }
-    const withKey = register({ ...base, apiKey: 'a-key' })
-    const viaApi = await run(withKey, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
-    console.log('auto with a key ->', viaApi.backend)
-    assert.equal(viaApi.backend, 'api')
-    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 0, 'a key wins; ComfyUI must not be used')
-
-    const noKey = register({ ...base, apiKey: '' })
-    const viaComfy = await run(noKey, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
-    console.log('auto without a key ->', viaComfy.backend, viaComfy.comfyui.endpoint)
-    assert.equal(viaComfy.backend, 'comfyui')
-    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 1)
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir })
+    const result = await run(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    console.log('generate ->', result.backend, result.comfyui.endpoint)
+    assert.equal(result.backend, 'comfyui')
+    assert.ok(comfy.seen.some((entry) => entry.path === '/prompt'), 'the generation must reach ComfyUI')
 
     const dead = await deadPort()
-    const nothing = register({ ...base, apiKey: '', comfyEndpoint: '', comfyPorts: String(dead), timeoutMs: 5000 })
-    const error = await failure(nothing, 'qwen_image_generate', { prompt: 'A cat.' })
-    console.log('auto with nothing available:\n' + error.message)
-    assert.match(error.message, /no backend is available/)
-    assert.match(error.message, /comfyui: comfyui backend: 没找到在跑的 ComfyUI/)
-    // With no runtime of ours left there is no third remedy to fall back to, so
-    // the message has to point at the deployment document instead.
+    const down = register({ comfyEndpoint: '', comfyPorts: String(dead), timeoutMs: 5000, outputDir })
+    const error = await failure(down, 'qwen_image_generate', { prompt: 'A cat.' })
+    console.log('generate with ComfyUI down:\n' + error.message)
+    assert.match(error.message, /comfyui backend: 没找到在跑的 ComfyUI/)
+    // There is no second backend to fall back to, so the message has to point
+    // at the deployment document instead of naming remedies that do not exist.
     assert.match(error.message, /docs\/comfyui-deployment\.md/)
-    assert.ok(!/local:/.test(error.message), 'the removed local backend is still offered as a remedy')
+    assert.ok(!/backend "api"|no backend is available/.test(error.message), 'the removed cloud backend is still offered')
   } finally {
     await comfy.close()
-    await new Promise((resolve) => cloud.close(resolve))
     rmSync(outputDir, { recursive: true, force: true })
   }
 })
@@ -477,7 +447,7 @@ test('qwen_image_status reports ComfyUI reachability and the weights it can see'
   const comfy = await startFakeComfy()
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-status-'))
   try {
-    const tools = register({ backend: 'auto', comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', apiKey: '', outputDir })
+    const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', apiKey: '', outputDir })
     const status = await run(tools, 'qwen_image_status', { timeoutMs: 5000 })
     console.log('status.comfyui:', JSON.stringify(status.comfyui, null, 1))
     assert.equal(status.comfyui.reachable, true)
@@ -510,7 +480,7 @@ test('qwen_image_status on a machine with nothing running still answers', async 
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-status-down-'))
   const dead = await deadPort()
   try {
-    const tools = register({ backend: 'auto', comfyEndpoint: '', comfyPorts: String(dead), apiKey: '', outputDir })
+    const tools = register({ comfyEndpoint: '', comfyPorts: String(dead), apiKey: '', outputDir })
     const status = await run(tools, 'qwen_image_status', { timeoutMs: 3000 })
     console.log('status.comfyui (nothing running):', JSON.stringify(status.comfyui, null, 1))
     assert.equal(status.comfyui.reachable, false)

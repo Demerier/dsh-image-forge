@@ -20,25 +20,6 @@ export const inject = ['tools', 'skills']
 
 /** Plugin configuration as written in the DSH profile. */
 export interface Config {
-  /**
-   * Backend policy.
-   *
-   * `auto` (the default) takes the cloud API when a key exists and otherwise
-   * talks to the local ComfyUI. There is no third option any more: the plugin
-   * owns no runtime of its own, so "local" always means *your* ComfyUI.
-   */
-  backend: 'auto' | 'api' | 'comfyui'
-  /** Cloud endpoint origin, e.g. `https://dashscope.aliyuncs.com/compatible-mode/v1`. */
-  apiBaseUrl: string
-  /**
-   * Bring-your-own API key. Prefer the environment over this field so the key
-   * never lands in the profile file; this plugin never writes it anywhere.
-   */
-  apiKey: string
-  /** Model id sent to the cloud endpoint. */
-  apiModel: string
-  /** Wire format: `openai` (implemented) or `dashscope` (declared, unimplemented in v0.1). */
-  apiStyle: 'openai' | 'dashscope'
   /** Directory generated PNGs are written to. */
   outputDir: string
   /** Cooperative per-call budget for one generation, in milliseconds. */
@@ -117,14 +98,11 @@ export type ConfigFields = { [K in keyof Config]?: ConfigField<Config[K]> }
  * schema the Host must be given.
  *
  * The plain shape is recovered by {@link resolveConfig} before anything
- * downstream sees it.
+ * downstream sees it. The cloud-API fields (`backend`, `apiBaseUrl`, `apiKey`,
+ * `apiModel`, `apiStyle`) were removed with that backend; a profile patch that
+ * still carries them has the extra keys ignored, not rejected.
  */
 export const Config = Schema.object({
-  backend: Schema.union(['auto', 'api', 'comfyui']).default('auto').volatile(),
-  apiBaseUrl: Schema.string().default('https://dashscope.aliyuncs.com/compatible-mode/v1').volatile(),
-  apiKey: Schema.string().default('').volatile(),
-  apiModel: Schema.string().default('qwen-image').volatile(),
-  apiStyle: Schema.union(['openai', 'dashscope']).default('openai').volatile(),
   outputDir: Schema.string().default(defaultOutputDir()).volatile(),
   timeoutMs: Schema.number().default(180_000).volatile(),
   comfyEndpoint: Schema.string().default('').volatile(),
@@ -176,11 +154,18 @@ function resolveConfig(config?: ConfigFields): Config {
  * registerStudioRoutesIfMounted}) so a host without a web server still gets the
  * Agent tools, and a host whose server mounts late gets the routes at all.
  *
+ * The tools do **not** get a resolved snapshot: they get the same
+ * {@link resolveConfig} closure the routes re-read per request, because a
+ * settings save commits into the field's volatile reference without re-running
+ * `apply` — a snapshot taken here would freeze `comfyEndpoint`, `comfyModel`
+ * and the step overrides at activation time and quietly ignore every later
+ * settings edit.
+ *
  * @param ctx - cordis context; `tools` and `skills` are injected above.
  * @param config - the activation's config, volatile references included.
  */
 export function apply(ctx: Context, config?: ConfigFields): void {
-  registerImageForgeTools(ctx, resolveConfig(config))
+  registerImageForgeTools(ctx, () => resolveConfig(config))
   registerImageForgeSkill(ctx)
   registerStudioRoutesIfMounted(ctx, config)
 }
