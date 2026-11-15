@@ -1194,7 +1194,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   disabled: optimizing || prompt.trim().length === 0 || config?.optimizeAvailable !== true,
                   title: config?.optimizeAvailable === true
                     ? `用当前对话模型（${config?.optimizeModel ?? '默认模型'}）改成${promptStyle === 'formula' ? '关键词公式' : '长散文'}`
-                    : '当前会话没有可用的对话模型',
+                    : (config?.optimizeNote ?? '当前会话没有可用的对话模型'),
                   onClick: () => { void optimize() },
                 },
                 optimizing ? '优化中…' : '优化提示词',

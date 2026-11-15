@@ -7,8 +7,8 @@ pnpm build
 pnpm test
 ```
 
-**11 个文件 / 158 个用例**，全部不需要 GPU、ComfyUI 或任何权重
-（ratio 12 / surface 9 / comfyui-e2e 11 / edit-e2e 8 / settings 53 / studio 28 / studio-canvas 9 / boards 18 / output 3 / package-contents 4 / studio-file-route 3）。
+**11 个文件 / 159 个用例**，全部不需要 GPU、ComfyUI 或任何权重
+（ratio 12 / surface 9 / comfyui-e2e 11 / edit-e2e 8 / settings 53 / studio 29 / studio-canvas 9 / boards 18 / output 3 / package-contents 4 / studio-file-route 3）。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——

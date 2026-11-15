@@ -60,7 +60,7 @@ import {
   type StudioRatio,
   type StudioReferencePayload,
 } from './studio-shared.ts'
-import { llmOf, optimizerAvailable, resolveOptimizerModel } from './studio-prompt.ts'
+import { optimizerAvailable, resolveOptimizerFor } from './studio-prompt.ts'
 
 /** Everything the pipeline reads off the resolved plugin config. */
 export interface StudioSettings {
@@ -176,8 +176,8 @@ export async function describeStudio(
   signal?: AbortSignal,
 ): Promise<StudioConfigResponse> {
   const sizes = studioSizeTable()
-  const optimizer = await resolveOptimizerModel(llmOf(ctx))
-  const optimizeAvailable = await optimizerAvailable(ctx)
+  const resolution = await resolveOptimizerFor(ctx)
+  const optimizeAvailable = resolution.ok && (await optimizerAvailable(ctx))
 
   let ready = false
   let endpoint: string | undefined
@@ -218,7 +218,7 @@ export async function describeStudio(
     outputDir: settings.outputDir,
     sizes,
     optimizeAvailable,
-    ...(optimizer === undefined ? {} : { optimizeModel: optimizer.model }),
+    ...(resolution.ok ? { optimizeModel: resolution.model } : { optimizeNote: `[${resolution.stage}] ${resolution.detail}` }),
     boards,
     activeBoard: active,
     ...(boardsNote === undefined ? {} : { boardsNote }),

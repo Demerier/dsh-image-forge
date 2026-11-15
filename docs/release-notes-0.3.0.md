@@ -22,6 +22,20 @@
   原因（`turbo_fallback`）。
   - 本机实测（RTX 4070 Laptop 8 GB，1248×1248）：base 25 步 **45–55 s**，turbo 8 步 **15.8 s**。
 
+## 修复（续）
+
+- **提示词优化（`/studio/optimize`）在装了 DSH 2.0.23-next 的机器上恒 502。** 旧探测要求 `llm` 同时有
+  `listModels` 和 `stream`，然后「扫第一个 provider 的第一个模型」；宿主真正的答案是
+  **`agentDefaultModel.currentSelection()`**（当前会话模型），而调用要走
+  `resolveCallConfig` → `prepareCall` → `prepared.stream`（直接 `stream` 会因「prepared LLM call config
+  changed before adapter dispatch」被拒）。改成：先读 `agentDefaultModel`，枚举只作兜底；
+  调用两套形状都支持（本地宿主 `prepareCall`，typert 远程门面只有 `stream`）。
+  实测：`optimizeAvailable: true`、`optimizeModel: deepseek-v4.1-flash`、一次改写 27 s。
+- 失败不再压成一句「没有可调用的对话模型」：`/studio/optimize` 的 502 body 现在带 `stage`
+  （`llm-missing` / `list-providers-failed` / `list-providers-empty` / `list-models-failed` /
+  `assembler-missing` / `call-config-failed` / `call-prepared-failed`），`/studio/config` 里
+  新增 `optimizeNote` 说明为什么按钮是灰的，设置面板的悬浮提示直接显示它。
+
 ## 文档
 
 - `docs/comfyui-deployment.md` 新增 §0.5「先跑一条命令」，§2 补无头启动，§6 用 `--doctor` 取代手工

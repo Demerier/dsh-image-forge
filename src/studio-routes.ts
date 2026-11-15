@@ -66,7 +66,7 @@ import {
   runStudioGeneration,
   type StudioSettings,
 } from './studio-service.ts'
-import { optimizeStudioPrompt } from './studio-prompt.ts'
+import { OptimizeUnavailableError, optimizeStudioPrompt } from './studio-prompt.ts'
 
 /** Heartbeat cadence while a long request is in flight; tests shrink it. */
 const HEARTBEAT_MS = 15_000
@@ -174,7 +174,12 @@ export function registerStudioRoutes(
           const output = await optimizeStudioPrompt(deps.ctx, input, controller.signal)
           json(res, 200, output)
         } catch (error) {
-          jsonError(res, 502, firstLine(error))
+          // The stage is the actionable half of this failure: llm-missing,
+          // list-providers-empty, list-models-failed and assembler-missing each
+          // need a different fix, and flattening them into one sentence is what
+          // made this look like "the optimiser is just broken".
+          const stage = error instanceof OptimizeUnavailableError ? error.stage : undefined
+          json(res, 502, { error: firstLine(error), ...(stage === undefined ? {} : { stage }) })
         }
       }),
     }),

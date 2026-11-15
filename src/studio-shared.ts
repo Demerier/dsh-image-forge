@@ -99,6 +99,14 @@ export interface StudioConfigResponse {
   optimizeAvailable: boolean
   /** Model the optimiser would use, e.g. `deepseek-chat`; absent when unavailable. */
   optimizeModel?: string
+  /**
+   * Why the optimiser is unavailable, as `[stage] detail`.
+   *
+   * Present instead of {@link optimizeModel} when resolution failed. The panel
+   * shows it on the greyed-out button, because "优化不可用" without the stage is
+   * the sentence that used to cost an hour of guessing.
+   */
+  optimizeNote?: string
   /** Every board under the output directory, newest first. */
   boards: BoardSummary[]
   /** Board the panel should open first; `null` when the library is empty. */

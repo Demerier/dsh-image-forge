@@ -73,8 +73,8 @@ async function loadAssembler(): Promise<(new () => AssemblerLike) | undefined> {
  * @returns true when a rewrite could be attempted.
  */
 export async function optimizerAvailable(ctx: Context): Promise<boolean> {
-  const model = await resolveOptimizerModel(llmOf(ctx))
-  if (model === undefined) return false
+  const resolution = await resolveOptimizerFor(ctx)
+  if (!resolution.ok) return false
   return (await loadAssembler()) !== undefined
 }
 
@@ -97,8 +97,78 @@ const MAX_CONTEXT_TURN_CHARS = 1200
 /** Shape of the `llm` service this module actually uses, kept structural. */
 interface LlmFace {
   listProviders(): Array<{ name?: string; id?: string; label?: string }>
-  listModels(provider: string): Promise<Array<{ id?: string; name?: string; model?: string }>>
+  /** Absent on the typert remote façade — see {@link resolveOptimizerFor}. */
+  listModels?(provider: string): Promise<Array<{ id?: string; name?: string; model?: string }>>
+  /** Materialises defaults (`maxTokens`, `reasoningEffort`); required before prepareCall. */
+  resolveCallConfig?(config: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>>
+  /** Binds one exact config to a dispatch-once stream entry point. */
+  prepareCall?(config: Record<string, unknown>, signal?: AbortSignal): Promise<PreparedCallFace>
+  /** Only usable when `prepareCall` is absent (remote façade). */
+  stream?(options: Record<string, unknown>): AsyncIterable<unknown>
+}
+
+/** What `prepareCall` hands back: the frozen config plus its stream. */
+interface PreparedCallFace {
+  readonly config?: Record<string, unknown>
   stream(options: Record<string, unknown>): AsyncIterable<unknown>
+}
+
+/** Shape of the host's `agentDefaultModel` service — the current conversation model. */
+interface DefaultModelFace {
+  currentSelection(): { provider?: string; model?: string }
+}
+
+/**
+ * Which step of "find a model, then call it" failed.
+ *
+ * Four different failures used to collapse into one sentence ("没有可调用的对话模型"),
+ * which is exactly the sentence that tells nobody what to fix. Each stage below
+ * is a distinct remedy: mount a service, configure a model, fix a provider, or
+ * install a package.
+ */
+export type OptimizeStage =
+  | 'llm-missing'
+  | 'list-providers-failed'
+  | 'list-providers-empty'
+  | 'list-models-failed'
+  | 'assembler-missing'
+  | 'call-config-failed'
+  | 'call-prepared-failed'
+
+/** Where the optimiser's model came from. */
+export type OptimizeVia = 'agentDefaultModel' | 'listModels'
+
+/** A usable provider/model pair, and how it was found. */
+export interface OptimizeTarget {
+  readonly ok: true
+  readonly provider: string
+  readonly model: string
+  readonly via: OptimizeVia
+}
+
+/** Why no model could be resolved. */
+export interface OptimizeUnavailable {
+  readonly ok: false
+  readonly stage: OptimizeStage
+  /** Human-readable, names the failing call and quotes upstream text verbatim. */
+  readonly detail: string
+}
+
+/** Resolution result: a target, or the exact stage that stopped it. */
+export type OptimizeResolution = OptimizeTarget | OptimizeUnavailable
+
+/**
+ * Thrown when optimisation cannot run. Carries {@link stage} so the route can
+ * put it in the JSON body instead of flattening it into prose.
+ */
+export class OptimizeUnavailableError extends Error {
+  readonly stage: OptimizeStage
+
+  constructor(failure: OptimizeUnavailable) {
+    super(`提示词优化不可用（${failure.stage}）：${failure.detail}`)
+    this.name = 'OptimizeUnavailableError'
+    this.stage = failure.stage
+  }
 }
 
 /** Just enough of the assembled block shape to read the text back out. */
@@ -222,30 +292,73 @@ export function systemPromptFor(style: StudioPromptStyle | undefined): string {
 }
 
 /**
- * Resolve a usable provider/model pair from the host's LLM service.
+ * Resolve a usable provider/model pair from the host.
  *
- * Model selection is the one genuinely ambiguous step: a host may mount several
- * providers and the list endpoint is async, so this probes the first provider
- * that advertises any model and takes its first entry. That is the same model
- * the conversation starts on, which is what "seamless" means here — no second
- * configuration surface for the user to keep in sync.
+ * Order matters, and it is the opposite of the old one:
  *
- * @param llm - the service, or `undefined` when the host mounts none.
- * @returns the pair to call, or `undefined` when nothing usable was found.
+ * 1. **`agentDefaultModel` first.** That service is the conversation's own
+ *    model selection (`currentSelection()` → `{provider, model}`), which is the
+ *    thing "seamless" means: no second configuration surface, and no guessing
+ *    which of several providers is the one the user is actually talking to.
+ * 2. **Enumerate only as a fallback.** `listProviders()` then each provider's
+ *    first named model, skipping ones that throw — a host with several
+ *    providers and one broken route is the normal case.
+ *
+ * Every exit names the stage that stopped it (see {@link OptimizeStage}); the
+ * caller turns that into an HTTP body instead of a shrug.
+ *
+ * @param ctx - host context; both services are looked up here, never injected.
+ * @returns a target, or the failure stage plus the upstream text.
  */
-export async function resolveOptimizerModel(
-  llm: LlmFace | undefined,
-): Promise<{ provider: string; model: string } | undefined> {
-  if (llm === undefined) return undefined
-  let providers: Array<{ name?: string; id?: string }>
+export async function resolveOptimizerFor(ctx: Context): Promise<OptimizeResolution> {
+  const llm = llmOf(ctx)
+  if (llm === undefined) {
+    const mounted = serviceOf(ctx, 'llm') === undefined ? 'ctx.get("llm") 拿不到服务' : 'llm 服务缺少可驱动的形状（listProviders + prepareCall/stream）'
+    return {
+      ok: false,
+      stage: 'llm-missing',
+      detail: `宿主没有挂载可用的 llm 服务：${mounted}。这个 profile 需要在 cordis.patch.yml 里配置至少一个 provider。`,
+    }
+  }
+
+  const selection = defaultSelectionOf(ctx)
+  if (selection !== undefined && selection.provider !== undefined && selection.model !== undefined) {
+    return { ok: true, provider: selection.provider, model: selection.model, via: 'agentDefaultModel' }
+  }
+  const selectionNote =
+    selection === undefined
+      ? 'agentDefaultModel 未挂载'
+      : `agentDefaultModel 的 selection 不完整（provider=${String(selection.provider)} / model=${String(selection.model)}）`
+
+  let providers: Array<{ name?: string; id?: string; label?: string }>
   try {
     providers = llm.listProviders()
-  } catch {
-    return undefined
+  } catch (error) {
+    return { ok: false, stage: 'list-providers-failed', detail: `${selectionNote}；llm.listProviders() 抛错：${firstLineOf(error)}` }
   }
+  if (!Array.isArray(providers) || providers.length === 0) {
+    return {
+      ok: false,
+      stage: 'list-providers-empty',
+      detail: `${selectionNote}；llm.listProviders() 返回 ${Array.isArray(providers) ? '0 条' : String(providers)}。没有注册任何 provider。`,
+    }
+  }
+
+  if (typeof llm.listModels !== 'function') {
+    return {
+      ok: false,
+      stage: 'list-models-failed',
+      detail: `${selectionNote}；llm.listModels 不可用（typert 远程门面只暴露 listProviders），无法枚举模型。`,
+    }
+  }
+
+  const problems: string[] = []
   for (const entry of providers) {
     const name = entry.name ?? entry.id
-    if (typeof name !== 'string' || name.length === 0) continue
+    if (typeof name !== 'string' || name.length === 0) {
+      problems.push(`<无名 provider>`)
+      continue
+    }
     try {
       const models = await llm.listModels(name)
       const first = models.find((candidate) => {
@@ -253,27 +366,58 @@ export async function resolveOptimizerModel(
         return typeof id === 'string' && id.length > 0
       })
       const id = first === undefined ? undefined : (first.id ?? first.model ?? first.name)
-      if (typeof id === 'string' && id.length > 0) return { provider: name, model: id }
-    } catch {
+      if (typeof id === 'string' && id.length > 0) return { ok: true, provider: name, model: id, via: 'listModels' }
+      problems.push(`${name}: 列出 0 个模型`)
+    } catch (error) {
       // A provider that cannot enumerate models is not necessarily broken, but
-      // without an id there is nothing to call, so move on to the next one.
+      // without an id there is nothing to call — keep the upstream words.
+      problems.push(`${name}: ${firstLineOf(error)}`)
     }
   }
-  return undefined
+  return {
+    ok: false,
+    stage: 'list-models-failed',
+    detail: `${selectionNote}；遍历 ${providers.length} 个 provider 都没拿到可用模型 —— ${problems.join(' | ')}`,
+  }
+}
+
+/** Read one host service, treating every failure — including a throwing `get` — as absent. */
+function serviceOf(ctx: Context, name: string): unknown {
+  try {
+    return (ctx as unknown as { get?: (key: string) => unknown }).get?.(name)
+  } catch {
+    return undefined
+  }
+}
+
+/** First line of an error-ish value, for messages that quote upstream text. */
+function firstLineOf(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  return text.split(/\r?\n/)[0]?.trim() || '（无信息）'
+}
+
+/** The conversation's own model selection, or `undefined` when the service is absent. */
+function defaultSelectionOf(ctx: Context): { provider?: string; model?: string } | undefined {
+  const candidate = serviceOf(ctx, 'agentDefaultModel') as Partial<DefaultModelFace> | undefined
+  if (candidate === undefined || typeof candidate.currentSelection !== 'function') return undefined
+  try {
+    return candidate.currentSelection()
+  } catch {
+    return undefined
+  }
 }
 
 /** Read the `llm` service off a context, treating every failure as "absent". */
 export function llmOf(ctx: Context): LlmFace | undefined {
-  try {
-    const candidate = (ctx as unknown as { get?: (name: string) => unknown }).get?.('llm')
-    if (candidate === undefined || candidate === null) return undefined
-    const face = candidate as Partial<LlmFace>
-    if (typeof face.listProviders !== 'function' || typeof face.stream !== 'function') return undefined
-    if (typeof face.listModels !== 'function') return undefined
-    return face as LlmFace
-  } catch {
-    return undefined
-  }
+  const candidate = serviceOf(ctx, 'llm')
+  if (candidate === undefined || candidate === null) return undefined
+  const face = candidate as Partial<LlmFace>
+  if (typeof face.listProviders !== 'function') return undefined
+  // Either call shape is enough: the local host has `prepareCall`, the typert
+  // remote façade only has `stream`. Requiring `prepareCall` would make this
+  // plugin blind on a remote host; requiring `listModels` did the same thing.
+  if (typeof face.prepareCall !== 'function' && typeof face.stream !== 'function') return undefined
+  return face as LlmFace
 }
 
 /** Clamp history to a bounded, well-formed block. */
@@ -335,6 +479,75 @@ export function stripWrappingQuotes(text: string): string {
 }
 
 /**
+ * Dispatch one bounded rewrite through whichever call shape the host exposes.
+ *
+ * The local host wants `resolveCallConfig` → `prepareCall` → `prepared.stream`,
+ * and the prepared stream **refuses an options object whose call-config keys
+ * differ from the resolved ones** (`prepared LLM call config changed before
+ * adapter dispatch`). Spreading the resolved config back in is what keeps that
+ * comparison honest — messages/system/signal are not compared, so they are the
+ * only things added. The typert remote façade has no `prepareCall` at all, so
+ * that shape (plain `stream`) stays as the fallback.
+ *
+ * @param llm - the service, already shape-checked by {@link llmOf}.
+ * @param target - provider/model pair.
+ * @param request - messages, system prompt, budgets and the caller's signal.
+ * @returns the chunk stream to feed the assembler.
+ */
+async function callOptimizer(
+  llm: LlmFace,
+  target: { provider: string; model: string },
+  request: {
+    messages: readonly unknown[]
+    system: string
+    maxTokens: number
+    temperature: number
+    signal: AbortSignal
+  },
+): Promise<AsyncIterable<unknown>> {
+  const base: Record<string, unknown> = {
+    provider: target.provider,
+    model: target.model,
+    maxTokens: request.maxTokens,
+    temperature: request.temperature,
+  }
+  const passThrough = { messages: request.messages, system: request.system, signal: request.signal }
+
+  if (typeof llm.prepareCall === 'function') {
+    let resolved = base
+    if (typeof llm.resolveCallConfig === 'function') {
+      try {
+        resolved = await llm.resolveCallConfig(base, request.signal)
+      } catch (error) {
+        throw new OptimizeUnavailableError({
+          ok: false,
+          stage: 'call-config-failed',
+          detail: `llm.resolveCallConfig(${target.provider}/${target.model}) 抛错：${firstLineOf(error)}`,
+        })
+      }
+    }
+    try {
+      const prepared = await llm.prepareCall(resolved, request.signal)
+      return prepared.stream({ ...resolved, ...passThrough })
+    } catch (error) {
+      if (error instanceof OptimizeUnavailableError) throw error
+      throw new OptimizeUnavailableError({
+        ok: false,
+        stage: 'call-prepared-failed',
+        detail: `llm.prepareCall(${target.provider}/${target.model}) 抛错：${firstLineOf(error)}`,
+      })
+    }
+  }
+
+  if (typeof llm.stream === 'function') return llm.stream({ ...base, ...passThrough })
+  throw new OptimizeUnavailableError({
+    ok: false,
+    stage: 'llm-missing',
+    detail: 'llm 服务既没有 prepareCall 也没有 stream，无法发起调用。',
+  })
+}
+
+/**
  * Ask the conversation model to rewrite one Studio prompt.
  *
  * @param ctx - host context; `llm` is looked up here, never injected statically.
@@ -349,25 +562,29 @@ export async function optimizeStudioPrompt(
   input: StudioOptimizeRequest,
   signal: AbortSignal,
 ): Promise<StudioOptimizeResponse> {
+  const resolution = await resolveOptimizerFor(ctx)
+  if (!resolution.ok) throw new OptimizeUnavailableError(resolution)
   const llm = llmOf(ctx)
-  const target = await resolveOptimizerModel(llm)
-  if (target === undefined || llm === undefined) {
-    throw new Error('提示词优化不可用：当前会话没有可调用的对话模型。')
+  if (llm === undefined) {
+    throw new OptimizeUnavailableError({ ok: false, stage: 'llm-missing', detail: 'llm 服务在解析目标之后变得不可用（宿主侧卸载？）' })
   }
   const Assembler = await loadAssembler()
   if (Assembler === undefined) {
-    throw new Error('提示词优化不可用：宿主没有安装 @deepseek-ai/dsh-llm。')
+    throw new OptimizeUnavailableError({
+      ok: false,
+      stage: 'assembler-missing',
+      detail: '宿主没有安装 @deepseek-ai/dsh-llm，取不到 BlockAssembler，无法拼装流式回复。',
+    })
   }
   const assembler = new Assembler()
-  for await (const chunk of llm.stream({
-    provider: target.provider,
-    model: target.model,
+  const stream = await callOptimizer(llm, { provider: resolution.provider, model: resolution.model }, {
     messages: [{ role: 'user', content: [{ type: 'text', text: buildOptimizeUserText(input) }] }],
     system: systemPromptFor(input.style),
     maxTokens: MAX_TOKENS,
     temperature: 0.7,
     signal,
-  })) {
+  })
+  for await (const chunk of stream) {
     // The assembler's chunk union and the structural `unknown` this module
     // consumes are the same wire vocabulary; the cast is the seam, not a lie.
     assembler.push(chunk as never)
@@ -393,7 +610,7 @@ export async function optimizeStudioPrompt(
   }
   return {
     prompt,
-    model: target.model,
+    model: resolution.model,
     ...(split.note === undefined ? {} : { note: split.note }),
   }
 }

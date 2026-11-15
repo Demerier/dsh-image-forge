@@ -36,7 +36,7 @@ import {
   buildOptimizeUserText,
   systemPromptFor,
   llmOf,
-  resolveOptimizerModel,
+  resolveOptimizerFor,
   splitOptimizerAnswer,
   stripWrappingQuotes,
 } from '../testlib/studio-prompt.js'
@@ -392,9 +392,16 @@ test('wrapping quotes are stripped only when they are the outer pair', () => {
   assert.equal(stripWrappingQuotes('""'), '""')
 })
 
-test('a host without the llm service reports no optimiser instead of throwing', async () => {
-  // Three shapes a context can take: no `get` at all, `get` returning nothing,
-  // and `get` returning something that is not an LLM. All mean "unavailable".
+/** A context whose `get` serves exactly the services a test names. */
+const ctxOf = (services) => ({ get: (name) => services[name] })
+
+/** The smallest `llm` face that passes the shape check. */
+const llmFace = (overrides = {}) => ({ listProviders: () => [], prepareCall: async () => ({}), ...overrides })
+
+test('a host without the llm service reports llm-missing instead of throwing', async () => {
+  // Every shape a context can take: no `get` at all, `get` returning nothing,
+  // `get` returning something that is not an LLM, and `get` itself throwing.
+  // All mean the same stage — and the stage is the point.
   for (const ctx of [
     {},
     { get: () => undefined },
@@ -403,36 +410,68 @@ test('a host without the llm service reports no optimiser instead of throwing', 
     { get: () => { throw new Error('service not mounted') } },
   ]) {
     assert.equal(llmOf(ctx), undefined)
-    assert.equal(await resolveOptimizerModel(llmOf(ctx)), undefined)
+    const resolution = await resolveOptimizerFor(ctx)
+    assert.equal(resolution.ok, false)
+    assert.equal(resolution.stage, 'llm-missing')
+    assert.ok(resolution.detail.length > 0, 'the failure has to say something')
   }
 })
 
-test('the optimiser takes the first provider that can name a model', async () => {
-  // A provider whose listing throws must not stop the search: a host with
-  // several providers is the normal case, not the exception.
-  const llm = {
-    listProviders: () => [{ name: 'broken' }, { id: 'second' }, { name: '' }],
-    listModels: async (provider) => {
-      if (provider === 'broken') throw new Error('nope')
-      return [{ id: 'qwen-max' }]
-    },
-    stream: () => {},
-  }
-  assert.deepEqual(await resolveOptimizerModel(llm), { provider: 'second', model: 'qwen-max' })
+test('agentDefaultModel wins over enumerating providers', async () => {
+  // The conversation's own selection is the answer even when a second provider
+  // would have enumerated fine: "seamless" means the model the chat is using.
+  const ctx = ctxOf({
+    agentDefaultModel: { currentSelection: () => ({ provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' }) },
+    llm: llmFace({ listProviders: () => [{ name: 'somebody-else' }], listModels: async () => [{ id: 'other-model' }] }),
+  })
+  assert.deepEqual(await resolveOptimizerFor(ctx), {
+    ok: true,
+    provider: 'dsh-opencode-go',
+    model: 'deepseek-v4.1-flash',
+    via: 'agentDefaultModel',
+  })
+})
 
-  // No provider lists a usable model → nothing to call.
-  assert.equal(await resolveOptimizerModel({
-    listProviders: () => [{ name: 'empty' }],
-    listModels: async () => [],
-    stream: () => {},
-  }), undefined)
+test('each resolution failure names its own stage, with the upstream words kept', async () => {
+  // 1. `listProviders` throws.
+  let resolution = await resolveOptimizerFor(ctxOf({
+    llm: llmFace({ listProviders: () => { throw new Error('registry exploded') } }),
+  }))
+  assert.equal(resolution.stage, 'list-providers-failed')
+  assert.match(resolution.detail, /registry exploded/)
 
-  // `listProviders` itself throwing is also just "unavailable".
-  assert.equal(await resolveOptimizerModel({
-    listProviders: () => { throw new Error('boom') },
-    listModels: async () => [{ id: 'x' }],
-    stream: () => {},
-  }), undefined)
+  // 2. It returns nothing at all.
+  resolution = await resolveOptimizerFor(ctxOf({ llm: llmFace({ listProviders: () => [] }) }))
+  assert.equal(resolution.stage, 'list-providers-empty')
+
+  // 3. Every provider fails to list models: each error is quoted, not merged.
+  resolution = await resolveOptimizerFor(ctxOf({
+    llm: llmFace({
+      listProviders: () => [{ name: 'alpha' }, { id: 'beta' }],
+      listModels: async () => { throw new Error('401 unauthorized') },
+    }),
+  }))
+  assert.equal(resolution.stage, 'list-models-failed')
+  assert.match(resolution.detail, /alpha: 401 unauthorized/)
+  assert.match(resolution.detail, /beta: 401 unauthorized/)
+
+  // 4. `listModels` absent — the typert remote façade only exposes listProviders.
+  resolution = await resolveOptimizerFor(ctxOf({ llm: llmFace({ listProviders: () => [{ name: 'alpha' }] }) }))
+  assert.equal(resolution.stage, 'list-models-failed')
+  assert.match(resolution.detail, /listModels 不可用/)
+
+  // 5. The old fallback still works when no default selection exists: one broken
+  //    provider must not stop the search for a working one.
+  resolution = await resolveOptimizerFor(ctxOf({
+    llm: llmFace({
+      listProviders: () => [{ name: 'broken' }, { id: 'second' }, { name: '' }],
+      listModels: async (provider) => {
+        if (provider === 'broken') throw new Error('nope')
+        return [{ id: 'qwen-max' }]
+      },
+    }),
+  }))
+  assert.deepEqual(resolution, { ok: true, provider: 'second', model: 'qwen-max', via: 'listModels' })
 })
 
 // ---------------------------------------------------------------------------
