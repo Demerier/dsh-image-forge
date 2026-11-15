@@ -452,13 +452,35 @@ function pickModelFile(options: readonly string[], required: RegExp, bonuses: re
   return best?.name
 }
 
+/**
+ * The separator a configured models path is joined with.
+ *
+ * Taken from the **path's own style**, not from `process.platform`: the two can
+ * disagree — a Windows path pasted into a POSIX host (WSL, a shared profile, a
+ * synced config) would otherwise be joined with `/` and read as
+ * `D:\Comfy-Desktop\ComfyUI-Shared\models/clip/`, i.e. a path no Windows shell
+ * would accept and no reader would trust. `test/comfyui-e2e.test.mjs` pins both
+ * styles on every host, which is what made the platform-only version fail on
+ * Linux CI while passing on Windows.
+ *
+ * A path that carries no separator at all gives no style to follow, so the
+ * platform decides there.
+ *
+ * @param modelsDir - the configured `comfyModelsDir`, already trimmed.
+ * @returns `\\` for a Windows-shaped path, `/` otherwise.
+ */
+function separatorFor(modelsDir: string): string {
+  if (modelsDir.includes('\\') || /^[A-Za-z]:/.test(modelsDir)) return '\\'
+  if (modelsDir.includes('/')) return '/'
+  return process.platform === 'win32' ? '\\' : '/'
+}
+
 /** Where a weight belongs, phrased for the machine that is running this plugin. */
 function folderHint(modelsDir: string, folder: string): string {
-  // The separator follows the platform: joining a Windows path with `\` would
-  // read as garbage on Linux/macOS error text, and vice versa.
-  const separator = process.platform === 'win32' ? '\\' : '/'
-  if (modelsDir.trim().length > 0) {
-    return `${modelsDir.trim().replace(/[\\/]+$/, '')}${separator}${folder}${separator}`
+  const trimmed = modelsDir.trim().replace(/[\\/]+$/, '')
+  const separator = trimmed.length > 0 ? separatorFor(trimmed) : process.platform === 'win32' ? '\\' : '/'
+  if (trimmed.length > 0) {
+    return `${trimmed}${separator}${folder}${separator}`
   }
   return `ComfyUI 的 models${separator}${folder}${separator} 目录（桌面版/便携版的模型路径见 ComfyUI 设置或 extra_model_paths.yaml）`
 }

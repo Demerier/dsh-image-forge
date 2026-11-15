@@ -7,8 +7,8 @@ pnpm build
 pnpm test
 ```
 
-**10 个文件 / 154 个用例**，全部不需要 GPU、ComfyUI 或任何权重
-（ratio 12 / surface 9 / comfyui-e2e 9 / edit-e2e 9 / settings 53 / studio 28 / studio-canvas 9 / boards 15 / package-contents 3 / studio-file-route 3）。
+**11 个文件 / 157 个用例**，全部不需要 GPU、ComfyUI 或任何权重
+（ratio 12 / surface 9 / comfyui-e2e 10 / edit-e2e 8 / settings 53 / studio 28 / studio-canvas 9 / boards 18 / output 3 / package-contents 4 / studio-file-route 3）。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——
@@ -54,16 +54,18 @@ pnpm test
 `minFreeVramMiB` / `local_edit_budget` / `apiKey`，并且必须写到 `comfyModel`、`turbo`、`8 步`、`turbo_fallback`
 与部署文档的路径。
 
-### `test/comfyui-e2e.test.mjs`（9）
+### `test/comfyui-e2e.test.mjs`（10）
 
 假 ComfyUI 端到端（多端口探测 → `/object_info` 选权重 → `/prompt` 注入工作流 → 轮询 `/history` →
 `/view` 取图 → 落盘**逐字节一致**）、缺文件点名、没在跑时报出探过的端口、
 非回环端点拒绝且**一个请求都不发**、`node_errors` 与 traceback 原文回传、
 ComfyUI 没在跑时**永远走本机**这条唯一路径（报错点名探过的端口并指向部署文档，
 不再提供任何云端补救）、以及 `qwen_image_status` 读到的 `version` / `devices`
-（来自 `/system_stats`，不是 `nvidia-smi`）。
+（来自 `/system_stats`，不是 `nvidia-smi`）、以及**权重缺失报错里的目录提示按「配置路径自己的风格」拼**——
+Windows 路径出 `…\models\clip\`、POSIX 路径出 `…/models/clip/`，两种风格在任意宿主上都成立
+（曾按 `process.platform` 拼，Windows 本地绿、Linux CI 红）。
 
-### `test/edit-e2e.test.mjs`（9）
+### `test/edit-e2e.test.mjs`（8）
 
 参考图编辑。参考 PNG 由测试自己生成（尺寸要真，所以不能拿假字节糊弄）：
 
@@ -94,7 +96,7 @@ ComfyUI 没在跑时**永远走本机**这条唯一路径（报错点名探过�
 引号剥离只在最外层成对时发生、**六条路由**确实注册在宿主上（客户端半边带它实际会调的五条）、
 以及画布（平移 / 缩放 / 适应 / 血缘连线）的纯函数。
 
-### `test/boards.test.mjs`（15）
+### `test/boards.test.mjs`（18）
 
 画板存储，全部打在**真实临时目录**上（契约是文件系统，mock 掉 `fs` 等于什么都没测）：
 省略 `board` 时**按提示词新建**、再省略再新建；按 id / 按名字（大小写不敏感）找到同一块；
@@ -108,6 +110,11 @@ active 画板的记忆与 `state.json` 的形状。
 ### `test/ratio.test.mjs`（12）
 
 7 档换算、32 对齐、确定性、显式尺寸校验。
+
+### `test/output.test.mjs`（3）
+
+落盘契约：`sanitizePrefix` 只留 ASCII 安全字符（纯多字节前缀塌回默认值）、空号查找在**每个已知扩展名**
+（`.png`/`.jpg`/`.jpeg`/`.webp`）上都不算空闲、一批多张按序编号且**永不覆盖**已存在的旧文件。
 
 ### `test/package-contents.test.mjs`（4）
 

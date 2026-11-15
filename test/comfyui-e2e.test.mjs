@@ -286,6 +286,42 @@ test('a ComfyUI without qwen weights is refused before /prompt, naming the file'
   }
 })
 
+test('the folder hint joins with the configured path’s own separator style', async () => {
+  const comfy = await startFakeComfy({
+    objectInfo: {
+      ...OBJECT_INFO,
+      CLIPLoader: { input: { required: { clip_name: [['dino_v3_vit_h.safetensors'], {}], type: [['stable_diffusion', 'qwen_image'], {}] } } },
+    },
+  })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-hint-'))
+  try {
+    // A Windows-shaped path keeps backslashes on every host: mixing them with
+    // `/` produces `…\models/clip/`, a path consumers cannot paste anywhere.
+    const windows = register({
+      comfyEndpoint: comfy.endpoint,
+      comfyModelsDir: 'D:\\Comfy-Desktop\\ComfyUI-Shared\\models',
+      outputDir,
+    })
+    const windowsError = await failure(windows, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    assert.match(windowsError.message, /放到：D:\\Comfy-Desktop\\ComfyUI-Shared\\models\\clip\\/)
+
+    // …and a POSIX path keeps forward slashes, with a trailing separator
+    // stripped first. This is the half that used to follow `process.platform`,
+    // so a Linux CI run joined the Windows fixture above with `/`.
+    const posix = register({
+      comfyEndpoint: comfy.endpoint,
+      comfyModelsDir: '/opt/ComfyUI/models/',
+      outputDir,
+    })
+    const posixError = await failure(posix, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    assert.match(posixError.message, /放到：\/opt\/ComfyUI\/models\/clip\//)
+    assert.doesNotMatch(posixError.message, /models\\clip/)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
 test('with no ComfyUI running the error lists every port probed and how to start it', async () => {
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-down-'))
   const first = await deadPort()
