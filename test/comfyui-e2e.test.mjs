@@ -340,7 +340,10 @@ test('with no ComfyUI running the error lists every port probed and how to start
     assert.match(error.message, new RegExp(`127\\.0\\.0\\.1:${first}`))
     assert.match(error.message, new RegExp(`127\\.0\\.0\\.1:${second}`))
     assert.match(error.message, /已探测 2 个端口/)
-    assert.match(error.message, /启动 ComfyUI/)
+    // The remedy has to name the one-command starter: "go read a 400-line
+    // deployment doc" is what made this step feel like manual work.
+    assert.match(error.message, /node scripts\/start-comfyui\.mjs/)
+    assert.match(error.message, /--doctor/)
   } finally {
     rmSync(outputDir, { recursive: true, force: true })
   }
@@ -523,6 +526,47 @@ test('qwen_image_status on a machine with nothing running still answers', async 
     assert.deepEqual(status.comfyui.candidatePorts, [dead])
     assert.match(status.comfyui.note, /没找到在跑的 ComfyUI/)
   } finally {
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is installed too', async () => {
+  // The documented deployment ships BOTH checkpoints. Name scoring ties on
+  // "image" + "2.1" + "int8", and a tie keeps the server's order — which lists
+  // base first — so without an explicit promotion `comfyModel: 'turbo'` fell
+  // through to base on every call and the turbo graph was unreachable.
+  const both = structuredClone(OBJECT_INFO)
+  both.UNETLoader.input.required.unet_name[0].push('qwen_image_2.1_turbo_int8_convrot.safetensors')
+  const turboComfy = await startFakeComfy({ objectInfo: both })
+  const baseComfy = await startFakeComfy({ objectInfo: both })
+  const fallbackComfy = await startFakeComfy() // base only
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-turbo-'))
+  const args = { prompt: 'A plain ceramic mug on a wooden desk, soft window light.', wh_ratio: '1:1', seed: 7 }
+  try {
+    const turboTools = register({ comfyEndpoint: turboComfy.endpoint, comfyModel: 'turbo', outputDir, timeoutMs: 30_000 })
+    const turbo = await run(turboTools, 'qwen_image_generate', args)
+    assert.equal(turbo.model, 'qwen_image_2.1_turbo_int8_convrot.safetensors')
+    assert.equal(turbo.comfyui.comfyModel, 'turbo')
+    assert.equal(turbo.steps_used, 8)
+    assert.equal(turbo.comfyui.turbo_fallback, undefined)
+    assert.equal(turboComfy.state.graph['1'].inputs.unet_name, 'qwen_image_2.1_turbo_int8_convrot.safetensors')
+
+    const baseTools = register({ comfyEndpoint: baseComfy.endpoint, comfyModel: 'base', outputDir, timeoutMs: 30_000 })
+    const base = await run(baseTools, 'qwen_image_generate', args)
+    assert.equal(base.model, 'qwen_image_2.1_int8_convrot.safetensors')
+    assert.equal(base.comfyui.comfyModel, 'base')
+    assert.equal(base.steps_used, 25)
+
+    // Asking for turbo on a base-only install still produces an image, and says why.
+    const fallbackTools = register({ comfyEndpoint: fallbackComfy.endpoint, comfyModel: 'turbo', outputDir, timeoutMs: 30_000 })
+    const fallback = await run(fallbackTools, 'qwen_image_generate', args)
+    assert.equal(fallback.model, 'qwen_image_2.1_int8_convrot.safetensors')
+    assert.equal(fallback.comfyui.comfyModel, 'base')
+    assert.match(String(fallback.comfyui.turbo_fallback), /没有 turbo 权重/)
+  } finally {
+    await turboComfy.close()
+    await baseComfy.close()
+    await fallbackComfy.close()
     rmSync(outputDir, { recursive: true, force: true })
   }
 })

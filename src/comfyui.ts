@@ -51,6 +51,18 @@ export interface ComfyOptions {
   readonly ports: readonly number[]
   /** Where this machine keeps ComfyUI's models; used in error text only. */
   readonly modelsDir: string
+  /**
+   * Which checkpoint family the caller asked for.
+   *
+   * Load-bearing at *selection* time, not just at graph time: when both the base
+   * and the turbo DiT are installed — which is the documented setup — the plain
+   * name scoring ties and keeps the server's order, i.e. always base, and the
+   * turbo graph could never run even with `comfyModel: 'turbo'` configured.
+   * `'turbo'` therefore promotes a `/turbo/i` unet above the rest; if no such
+   * file exists the pick falls back to base, which is what the caller reports as
+   * "turbo skipped".
+   */
+  readonly comfyModel?: 'base' | 'turbo'
   /** Budget for one whole generation, from `/prompt` to the last image byte. */
   readonly timeoutMs: number
   /** Per-port reachability budget during discovery. */
@@ -67,6 +79,8 @@ export interface ComfySettingsFields {
   readonly comfyPorts: readonly number[]
   /** `comfyModelsDir` as resolved. */
   readonly comfyModelsDir: string
+  /** Checkpoint family the caller configured; `'turbo'` promotes a turbo DiT. */
+  readonly comfyModel?: 'base' | 'turbo'
   /** The configured per-call budget. */
   readonly timeoutMs: number
 }
@@ -107,6 +121,7 @@ export function comfyOptionsOf(settings: ComfySettingsFields, timeoutMs = settin
     endpoint: settings.comfyEndpoint.replace(/\/+$/, ''),
     ports: settings.comfyPorts,
     modelsDir: settings.comfyModelsDir,
+    comfyModel: settings.comfyModel,
     timeoutMs,
   }
 }
@@ -410,7 +425,8 @@ export async function discoverComfyUi(options: ComfyOptions, signal?: AbortSigna
   const tried = probed.map((attempt) => `  • ${attempt.endpoint} — ${attempt.note ?? 'no reason reported'}`).join('\n')
   throw new Error(
     `comfyui backend: 没找到在跑的 ComfyUI（已探测 ${probed.length} 个端口）：\n${tried}\n` +
-      '  启动 ComfyUI（桌面版/便携版都可以）后重试；如果它监听在别的端口，把该端口写进 comfyPorts 或直接写 comfyEndpoint。\n' +
+      '  一条命令起来：node scripts/start-comfyui.mjs（仓库自带；不加参数就起+等就绪，--doctor 只体检）。\n' +
+      '  不敢用脚本就照旧手动启动，它监听在别的端口时把该端口写进 comfyPorts 或直接写 comfyEndpoint。\n' +
       '  部署步骤（下载、放权重、校验）见 docs/comfyui-deployment.md；也可以先跑 qwen_image_status 看缺什么。',
   )
 }
@@ -520,7 +536,8 @@ export async function loadComfyModels(target: ComfyTarget, options: ComfyOptions
           `请在 ComfyUI 里确认 ${spec.loader} 节点可用后重试。`,
       )
     }
-    const name = pickModelFile(optionsList, /qwen/i, spec.bonus)
+    const bonuses = kind === 'unet' && options.comfyModel === 'turbo' ? [/turbo/i, ...spec.bonus] : spec.bonus
+    const name = pickModelFile(optionsList, /qwen/i, bonuses)
     if (name === undefined) {
       const seen = optionsList.length === 0 ? '（空）' : optionsList.join(', ')
       throw new Error(

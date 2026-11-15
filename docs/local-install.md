@@ -139,4 +139,4 @@ dsh plugin --profile desktop remove dsh-image-forge
 | profile 目录 | `C:\Users\Demeri\.dsh\profiles\desktop` |
 | 已装版本 | `0.2.0-dev.2`（由 tarball 安装） |
 | tarball | `dsh-image-forge-0.2.0-dev.2.tgz`，41 文件，1.6 MB |
-| 测试结果 | 11 个文件 / 162 用例全通过（构建后运行） |
+| 测试结果 | 11 个文件 / 158 用例全通过（构建后运行） |

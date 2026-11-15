@@ -21,6 +21,51 @@
 
 ---
 
+## 0.5 先跑一条命令，别急着读下面的手工步骤
+
+仓库自带 `scripts/start-comfyui.mjs`，它把以前最费手的四步（找安装 → 拼启动参数 → 起进程 →
+等 `/system_stats` 应答）做成一条命令。**它不下载任何东西，也不改 ComfyUI 的任何配置**：启动参数是
+从 Comfy Desktop 自己的 `%APPDATA%\Comfy Desktop\installations.json`（`launchArgs` / `envVars` /
+`port`）和 `instance-model-paths\<id>.yaml`（模型树）里读出来的，也就是「桌面版点启动」会用的那一套。
+
+```bash
+node scripts/start-comfyui.mjs           # 发现 → 启动 → 等就绪 → 打印显卡/版本/下一步
+node scripts/start-comfyui.mjs --doctor  # 只体检，不启动：安装、torch、五个权重、显存
+node scripts/start-comfyui.mjs --stop    # 关掉它替你起的那个进程（记在 pid 文件里）
+node scripts/start-comfyui.mjs --print   # 只看它准备怎么起，不执行
+node scripts/start-comfyui.mjs --dir D:\path\to\ComfyUI   # 手动指定安装目录
+```
+
+本机实测输出（RTX 4070 Laptop / 8 GB，ComfyUI 0.45.3）：
+
+```text
+[discover] Comfy Desktop (ComfyUI v0.34.0)
+[discover] python   D:\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI\.venv\Scripts\python.exe
+[wait] /system_stats ..................................... ok
+[ready] http://127.0.0.1:8188 (started by this script)
+[ready] ComfyUI 0.45.3 · python 3.13.12 · win32
+[ready] cuda:0 NVIDIA GeForce RTX 4070 Laptop GPU : cudaMallocAsync 8188 MiB
+```
+
+`--doctor` 的输出直接替代了 §6 那套手工 `dir /s` + sha256 对表：
+
+```text
+[doctor] model dirs: D:\Comfy-Desktop\ComfyUI-Shared\models (37 个模型文件)
+  ✔ 基础 unet（25 步）            6.8 GiB  qwen_image_2.1_int8_convrot.safetensors
+  ✔ turbo unet（8 步）          6.8 GiB  qwen_image_2.1_turbo_int8_convrot.safetensors
+  ✔ VAE                      0.6 GiB  qwen_image_2.1_vae_bf16.safetensors
+  ✔ 文本编码器 t2i                8.8 GiB  qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors
+  ✔ 文本编码器 i2i（改图）            8.8 GiB  qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors
+[doctor] 结论：可以出图。pnpm run test:live 会真跑一张。
+```
+
+退出码：`0` 就绪 / `1` 没找到安装或缺权重 / `2` 进程起不来（会打日志最后 25 行）/ `3` 等超时。
+
+**你只需要读下面这些章节的情形**：脚本说「没找到 ComfyUI」（→ §1 装）、说缺权重（→ §4 下权重）。
+其余情况（起不来、端口不对、ComfyUI 看不见权重）先看它的报错原文，比照 §9 排障对照表。
+
+---
+
 ## 1. 装 ComfyUI 桌面版
 
 1. 打开官方下载页 **<https://www.comfy.org/download>**，下载 Windows 安装包（`.exe`）。
@@ -49,7 +94,17 @@
 ## 2. 建实例并启动
 
 桌面版首次启动会建一个实例（instance），然后自动拉起 ComfyUI。启动完成后浏览器会开一个界面；
-**不用管界面，只要它活着**。验证它监听在哪：
+**不用管界面，只要它活着**。
+
+不想开界面的话（无头、或只是想给插件一个可用的后端），直接跑仓库自带的启动器——它用的就是桌面版
+记在这台机器上的启动参数：
+
+```bash
+node scripts/start-comfyui.mjs            # 起 + 等就绪 + 报显卡
+node scripts/start-comfyui.mjs --print    # 先看它准备传什么参数
+```
+
+两种方式都行，任选其一，**别同时起两份**（会抢 8188）。验证它监听在哪：
 
 ```bash
 curl -s http://127.0.0.1:8188/system_stats
@@ -228,6 +283,10 @@ hf download Comfy-Org/Qwen-Image-2.1 --local-dir $MODELS `
 ---
 
 ## 6. 校验（别跳过，这一步能省掉几小时排障）
+
+**先跑 `node scripts/start-comfyui.mjs --doctor`**：它按角色列出五个权重（存在/大小/文件名）并问
+ComfyUI 自己能不能枚举到 Qwen 权重，一条命令覆盖 §6.1、§6.3。只有它报「大小不对」或你想核对
+`sha256` 时才需要往下看 §6.2 的手工命令。
 
 下面统一把 `$M` 当作 `D:\Comfy-Desktop\ComfyUI-Shared\models`（照你自己的 `base_path` 换）。
 

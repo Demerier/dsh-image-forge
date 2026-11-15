@@ -25,7 +25,7 @@
 需要**本机装好的 ComfyUI + 三个 Qwen-Image 2.1 权重**。文生图、改图（图生图）都跑在这台机器上，
 首次下载权重之后完全离线，不联网、不耗云端额度。
 
-- 显存 8 GB 起步（实测机型 RTX 4070 Laptop）。没有 ComfyUI 就照 [部署指引](docs/comfyui-deployment.md) 从零装。
+- 显存 8 GB 起步（实测机型 RTX 4070 Laptop）。**已经装过 ComfyUI**：`node scripts/start-comfyui.mjs` 一条命令起后端并等到就绪，`--doctor` 只体检（安装/torch/五个权重/显存）。**没装过**：照 [部署指引](docs/comfyui-deployment.md) 从零装。
 - 插件不自带运行时、不下载权重、不碰 ComfyUI 的配置；它没起来时插件只负责把缺什么说清。
 
 ---
@@ -59,8 +59,15 @@ dsh plugin --profile <profile> add github:Demerier/dsh-image-forge
 
 ### 2. 把 ComfyUI 指给它
 
-什么都不用填：插件自动探测 8000 / 8188 / … 端口（非回环地址会被拒绝）。缺 Qwen-Image 权重时，
-照 [ComfyUI 部署指引](docs/comfyui-deployment.md) 把三个文件放进对应目录，`qwen_image_status` 会告诉你它缺哪个。
+ComfyUI 没起来时，先跑一条命令（不用开桌面版界面）：
+
+```bash
+node scripts/start-comfyui.mjs           # 自动找安装、用它自己的启动参数起、等到 /system_stats 应答
+node scripts/start-comfyui.mjs --doctor  # 只看缺什么：安装、torch、五个权重、显存
+```
+
+起好之后**什么都不用填**：插件自动探测 8000 / 8188 / … 端口（非回环地址会被拒绝）。缺 Qwen-Image 权重时，
+`--doctor` 会点名缺哪个，照 [ComfyUI 部署指引](docs/comfyui-deployment.md) 把文件放进对应目录。
 
 9 个配置字段都有默认值，日常一个都不用碰；全部字段见 [docs/configuration.md](docs/configuration.md)。
 
