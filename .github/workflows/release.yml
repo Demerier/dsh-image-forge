@@ -88,7 +88,20 @@ jobs:
       - name: Publish to npm
         # --provenance signs the tarball with this run's OIDC identity, so the npm
         # page can show that exactly this commit built it (needs id-token: write).
-        run: npm publish --access public --provenance
+        #
+        # Skipped when this exact version is already on the registry. A tag can
+        # legitimately arrive after a manual `npm publish` (the 2FA/OTP path is
+        # browser-only, so publishing from a workstation is the normal fallback),
+        # and re-running a failed release must not turn into "403 cannot publish
+        # over the previously published versions" — that is a red run for a
+        # package that is in fact published.
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "dsh-image-forge@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::dsh-image-forge@${VERSION} is already on the registry — skipping npm publish."
+          else
+            npm publish --access public --provenance
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
