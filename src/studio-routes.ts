@@ -43,9 +43,13 @@ import {
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
   STUDIO_MAX_BODY_BYTES,
+  STUDIO_MAX_LAYOUT_CHARS,
+  STUDIO_MAX_PARENT_IDS,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
+  type BoardLayoutDraft,
+  type BoardTaskInfo,
   type StudioBoardRequest,
   type StudioGenerateRequest,
   type StudioImportRequest,
@@ -72,8 +76,11 @@ import {
   removeItem,
   renameBoard,
   saveLayout,
+  saveLayoutItem,
+  saveTaskItem,
   setActiveBoard,
 } from './boards.ts'
+import { parseMossLayout } from './model-profiles.ts'
 import { sanitizePrefix, writeImages } from './output.ts'
 import { probeImageSize } from './refs.ts'
 import {
@@ -318,6 +325,37 @@ export function registerStudioRoutes(
             if (result === undefined) return jsonError(res, 404, '这张图不在画板里')
             return json(res, 200, { ok: true, item: result.item, board: result.board })
           }
+          case 'save-task': {
+            if (action.task === undefined) return jsonError(res, 400, '缺少 task 参数')
+            // `board` may be absent on purpose: a run can fail before its first
+            // picture ever created a board, and losing the retryable failure
+            // because of that would be worse than creating an empty board.
+            const written = await saveTaskItem(outputDir, action.board, {
+              ...(action.item === undefined ? {} : { id: action.item }),
+              ...(action.x === undefined ? {} : { x: action.x }),
+              ...(action.y === undefined ? {} : { y: action.y }),
+              ...(action.parents === undefined ? {} : { parents: action.parents }),
+              task: action.task,
+            })
+            if (written === undefined) return jsonError(res, 400, '任务条目写入失败')
+            return json(res, 200, { ok: true, item: written.item, board: written.board })
+          }
+          case 'save-layout-node': {
+            if (action.draft === undefined || action.w === undefined || action.h === undefined) {
+              return jsonError(res, 400, '缺少布局草稿或显示尺寸')
+            }
+            const written = await saveLayoutItem(outputDir, action.board, {
+              ...(action.item === undefined ? {} : { id: action.item }),
+              ...(action.x === undefined ? {} : { x: action.x }),
+              ...(action.y === undefined ? {} : { y: action.y }),
+              ...(action.parents === undefined ? {} : { parents: action.parents }),
+              draft: action.draft,
+              w: action.w,
+              h: action.h,
+            })
+            if (written === undefined) return jsonError(res, 400, '布局条目写入失败')
+            return json(res, 200, { ok: true, item: written.item, board: written.board })
+          }
           case 'delete': {
             const id = await targetBoardId(outputDir, action.board)
             if (id === undefined) return jsonError(res, 404, '画板不存在')
@@ -549,6 +587,11 @@ export function parseGenerate(value: unknown): StudioGenerateRequest {
   const references = body.references === undefined ? undefined : parseReferences(body.references)
   const board = typeof body.board === 'string' && body.board.trim().length > 0 ? body.board.trim().slice(0, 80) : undefined
   const clientId = parseClientId(body.clientId)
+  // C14: layout is forwarded verbatim (T21's contract) and validated here with
+  // the same parser the tool boundary uses, so a malformed layout is a 400 with
+  // a named field instead of a run that fails after the weights load.
+  const layout = body.layout === undefined ? undefined : parseLayoutText(body.layout)
+  const parents = parseParentIds(body.parents)
   return {
     prompt,
     ratio,
@@ -558,11 +601,42 @@ export function parseGenerate(value: unknown): StudioGenerateRequest {
     ...(references === undefined || references.length === 0 ? {} : { references }),
     ...(board === undefined ? {} : { board }),
     ...(clientId === undefined ? {} : { clientId }),
+    ...(layout === undefined ? {} : { layout }),
+    ...(parents === undefined ? {} : { parents }),
   }
 }
 
+/**
+ * Validate one compiled MOSS layout prompt (T21's shape).
+ *
+ * The length cap comes first so an abusive string is refused before parsing;
+ * the shared parser then names the failing field (`bbox_coord_space`,
+ * `summary.caption`, …), exactly like the Agent tool does.
+ */
+function parseLayoutText(value: unknown): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error('layout 必须是布局编辑器导出的 compiled JSON 字符串')
+  }
+  if (value.length > STUDIO_MAX_LAYOUT_CHARS) {
+    throw new Error('layout 最多 ' + String(STUDIO_MAX_LAYOUT_CHARS) + ' 个字符')
+  }
+  parseMossLayout(value)
+  return value
+}
+
 /** Actions the board route accepts. */
-const BOARD_ACTIONS = ['create', 'rename', 'layout', 'remove-item', 'delete', 'active', 'copy-item', 'move-item'] as const
+const BOARD_ACTIONS = [
+  'create',
+  'rename',
+  'layout',
+  'remove-item',
+  'delete',
+  'active',
+  'copy-item',
+  'move-item',
+  'save-task',
+  'save-layout-node',
+] as const
 
 /**
  * Validate one board mutation.
@@ -601,6 +675,18 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
   }
   const x = parseCoordinate(body.x)
   const y = parseCoordinate(body.y)
+  const parents = parseParentIds(body.parents)
+  const task = body.task === undefined ? undefined : parseBoardTask(body.task)
+  const draft = body.draft === undefined ? undefined : parseBoardDraft(body.draft)
+  const w = parseCoordinate(body.w)
+  const h = parseCoordinate(body.h)
+  // C14's two terminal writers: a stored failure must not be a running task
+  // (DD6), and a layout node is useless without its draft or display box.
+  if (action === 'save-task' && task === undefined) throw new Error('缺少 task（失败/中断状态与参数快照）')
+  if (action === 'save-layout-node') {
+    if (draft === undefined) throw new Error('缺少 draft（布局草稿）')
+    if (w === undefined || h === undefined) throw new Error('缺少布局节点的显示尺寸（w / h）')
+  }
   return {
     action: action as StudioBoardRequest['action'],
     ...(board === undefined ? {} : { board }),
@@ -611,6 +697,11 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
     ...(camera === undefined ? {} : { camera }),
     ...(toBoard === undefined ? {} : { toBoard }),
     ...(x === undefined || y === undefined ? {} : { x, y }),
+    ...(parents === undefined ? {} : { parents }),
+    ...(task === undefined ? {} : { task }),
+    ...(draft === undefined ? {} : { draft }),
+    ...(w === undefined ? {} : { w }),
+    ...(h === undefined ? {} : { h }),
   }
 }
 
@@ -625,6 +716,47 @@ function parsePosition(value: unknown): { id: string; x: number; y: number } | u
 
 function isPosition(value: { id: string; x: number; y: number } | undefined): value is { id: string; x: number; y: number } {
   return value !== undefined
+}
+
+/** Canvas parent ids: strings only, capped, unknown ids are harmless downstream. */
+function parseParentIds(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) throw new Error('parents 必须是数组')
+  const ids = value
+    .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    .map((entry) => entry.trim().slice(0, 80))
+    .slice(0, STUDIO_MAX_PARENT_IDS)
+  return ids.length === 0 ? undefined : ids
+}
+
+/** One terminal task node: only failure/interruption are storable (DD6, §4.6). */
+function parseBoardTask(value: unknown): BoardTaskInfo {
+  const body = record(value)
+  if (body === undefined) throw new Error('task 格式无效')
+  const status = body.status
+  if (status !== 'failed' && status !== 'interrupted') {
+    throw new Error('task.status 只能是 failed 或 interrupted（运行中的任务不落盘）')
+  }
+  const params = record(body.params)
+  if (params === undefined || typeof params.prompt !== 'string' || params.prompt.trim().length === 0) {
+    throw new Error('task.params.prompt 必须是非空字符串')
+  }
+  return {
+    status,
+    params: params as unknown as BoardTaskInfo['params'],
+    ...(typeof body.error === 'string' ? { error: body.error.slice(0, 400) } : {}),
+  }
+}
+
+/** A layout draft as stored: shape only, deep validation happens at compile time. */
+function parseBoardDraft(value: unknown): BoardLayoutDraft {
+  const body = record(value)
+  if (body === undefined) throw new Error('draft 格式无效')
+  const { width, height } = body
+  if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0) throw new Error('draft.width 必须是正数')
+  if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) throw new Error('draft.height 必须是正数')
+  if (!Array.isArray(body.items)) throw new Error('draft.items 必须是数组')
+  return body as unknown as BoardLayoutDraft
 }
 
 function parseCamera(value: unknown): { x: number; y: number; zoom: number } | undefined {

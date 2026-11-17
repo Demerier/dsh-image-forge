@@ -40,12 +40,20 @@ import {
   loadComfyModels,
   parseComfyPorts,
   TURBO_STEPS,
+  type LayoutOverride,
   type ComfyModels,
   type ComfyOptions,
   type ComfyTarget,
 } from './comfyui.ts'
-import { presetSteps, resolveProfile, type ComfyModelId, type ModelProfile, type MossSamplingPreset } from './model-profiles.ts'
-import type { GeneratedImage, ReferenceImagePayload } from './images.ts'
+import {
+  parseMossLayout,
+  presetSteps,
+  resolveProfile,
+  type ComfyModelId,
+  type ModelProfile,
+  type MossSamplingPreset,
+} from './model-profiles.ts'
+import type { GeneratedImage, GenerateRequest, ReferenceImagePayload } from './images.ts'
 import { activeBoardId, listBoards, makeItemId, recordItems } from './boards.ts'
 import { writeImages } from './output.ts'
 import { firstLine } from './studio-shared.ts'
@@ -354,6 +362,39 @@ async function boardHintOf(outputDir: string, requested: string | undefined): Pr
 }
 
 /**
+ * The adapter request for one Studio text-to-image run (C14/T21).
+ *
+ * Exported so the "no layout regression" is testable at the seam the adapter
+ * actually consumes: without `layout` the returned object has exactly the
+ * pre-T21 keys, so the rendered graph is byte-identical; with it, the compiled
+ * string rides along verbatim and the renderer swaps the positive encoder text.
+ *
+ * @param input - the request fields that reach the graph.
+ * @param resolved - final canvas size, count, resolved step count and seed.
+ * @returns the adapter request, with `layout` only when one was supplied.
+ */
+export function studioTextToImageRequestOf(
+  input: { readonly prompt: string; readonly layout?: string },
+  resolved: {
+    readonly width: number
+    readonly height: number
+    readonly count: number
+    readonly steps: number
+    readonly seed: number
+  },
+): GenerateRequest & LayoutOverride {
+  return {
+    prompt: input.prompt.trim(),
+    width: resolved.width,
+    height: resolved.height,
+    count: resolved.count,
+    steps: resolved.steps,
+    seed: resolved.seed,
+    ...(input.layout === undefined ? {} : { layout: input.layout }),
+  }
+}
+
+/**
  * Run one Studio generation end to end.
  *
  * The order matters: canvas and prompt are validated **before** any socket
@@ -396,6 +437,28 @@ export async function runStudioGeneration(
     : Math.trunc(input.seed)
   const references = referencePayloads(input.references)
   const mode: 'generate' | 'edit' = references.length > 0 ? 'edit' : 'generate'
+
+  // C14/T21: layout is MOSS-only, never combines with references, and is
+  // validated here as well as at the route/tool boundary so a direct caller of
+  // this function gets the named reason before any backend work. The adapter
+  // parses it a third time at graph-build time — defence in depth for a value
+  // that changes what the model is conditioned on.
+  const layout = typeof input.layout === 'string' ? input.layout : undefined
+  if (layout !== undefined) {
+    if (mode === 'edit') {
+      throw new Error(
+        '布局（layout）只支持 MOSS 文生图；布局 + 参考图改图的叠加行为未定义（T21 边界），请去掉参考图或 layout。',
+      )
+    }
+    const requestedLayoutProfile = resolveProfile(settings.comfyModel)
+    if (requestedLayoutProfile.layoutTemplate === undefined) {
+      throw new Error(
+        '布局（layout）只对 MOSS-Image 生效——当前配置的 profile 是 ' + requestedLayoutProfile.label +
+          '；把 comfyModel 换成 moss-sft，或去掉 layout。',
+      )
+    }
+    parseMossLayout(layout)
+  }
 
   // Resolve where this run will be recorded **before** submitting: the `run`
   // SSE event carries the board id, so resolving it after the run (as the
@@ -479,14 +542,10 @@ export async function runStudioGeneration(
       : await (turbo ? generateViaComfyUiTurbo : generateViaComfyUi)(
         target,
         models,
-        {
-          prompt,
-          width: size.width,
-          height: size.height,
-          count,
-          steps,
-          seed,
-        },
+        studioTextToImageRequestOf(
+          { prompt, ...(layout === undefined ? {} : { layout }) },
+          { width: size.width, height: size.height, count, steps, seed },
+        ),
         submitOptions,
         signal,
       )
@@ -536,6 +595,11 @@ export async function runStudioGeneration(
       parentPaths: (input.references ?? []).flatMap((reference) => (
         typeof reference.path === 'string' && reference.path.length > 0 ? [reference.path] : []
       )),
+      // C14: the canvas knows its lineage as board item ids — including a layout
+      // node, which has no path for parentPaths to resolve. Explicit ids win in
+      // the board store, so they are only sent when there are some: an empty
+      // list must not shadow the reference-path resolution above (Bug1).
+      ...(input.parents === undefined || input.parents.length === 0 ? {} : { parents: input.parents }),
       sessionId: null,
     })), { prompt })
     board = recorded.board

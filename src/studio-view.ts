@@ -111,6 +111,7 @@ import {
   DEFAULT_LAYOUT_HEIGHT,
   DEFAULT_LAYOUT_WIDTH,
   LAYOUT_EDITOR_CLASS,
+  compileLayout,
   LAYOUT_NODE_DEFAULT_WIDTH,
   clampLayoutNodeWidth,
   draftToState,
@@ -129,12 +130,15 @@ import {
   STUDIO_GENERATE_ROUTE,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
+  STUDIO_LAYOUT_RATIO_TOLERANCE,
   STUDIO_MAX_COUNT,
+  STUDIO_MAX_LAYOUT_CHARS,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_MAX_REFERENCES,
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
   firstLine,
+  fitStudioRatio,
   studioFileUrl,
   type BoardDetail,
   type BoardItem,
@@ -316,6 +320,16 @@ const NUDGE_MERGE_MS = 700
  * less likely to be holding a key.
  */
 const DRAFT_EDIT_MERGE_MS = 500
+
+/**
+ * Debounce for writing a layout node's draft to its board (C14).
+ *
+ * Dragging a box fires one editor change per pointer move; the board should see
+ * one write per editing burst, not one per frame. Long enough to coalesce a
+ * drag, short enough that closing the tab mid-thought still keeps the draft
+ * (the unmount effect flushes it).
+ */
+const LAYOUT_PERSIST_DEBOUNCE_MS = 500
 
 /** One coalesced nudge session: the step on the stack, and the map it writes. */
 interface NudgeSession {
@@ -844,6 +858,7 @@ function taskParamsText(params: BoardTaskParams): string {
   parts.push(String(params.count ?? 1) + ' 张')
   const references = params.references?.length ?? 0
   if (references > 0) parts.push(String(references) + ' 张参考')
+  if (params.layout !== undefined) parts.push('布局')
   return parts.join(' · ')
 }
 
@@ -1088,7 +1103,14 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const controllersRef = useRef<Map<string, AbortController>>(new Map())
   // §4.5: "编辑参数重发" refills the form and marks the failed node; the next
   // form generation replaces that node in place instead of adding a second one.
-  const pendingReplaceRef = useRef<{ readonly id: string } | undefined>(undefined)
+  const pendingReplaceRef = useRef<{ readonly id: string; readonly layout?: string } | undefined>(undefined)
+  // C14 persistence: ids the board already stores (pictures always, task/layout
+  // nodes once their terminal/draft write landed), and the pending draft saves.
+  const persistedIdsRef = useRef<Set<string>>(new Set())
+  const layoutPersistTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // Filled in once the layout persistence callback exists (it is declared after
+  // the unmount effect); the cleanup calls it through the ref to flush drafts.
+  const layoutFlushRef = useRef<() => void>(() => {})
   // C12: the cross-board clipboard is memory-only (§6.3: never the system
   // clipboard), and a reveal request can wait for the canvas to be mounted.
   const clipboardRef = useRef<{ readonly boardId: string; readonly itemIds: readonly string[] } | undefined>(undefined)
@@ -1115,6 +1137,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setSelectedId(undefined)
       setSelection(new Set())
       setMenu(undefined)
+      persistedIdsRef.current = new Set()
+      for (const timer of layoutPersistTimersRef.current.values()) clearTimeout(timer)
+      layoutPersistTimersRef.current.clear()
       // The undo history is per board (§6.5: "session-scoped" and the stack holds
       // ids this board no longer has once another one is open).
       historyRef.current.clear()
@@ -1138,6 +1163,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setBoardName(board.name)
       setNodes(loaded)
       nodesRef.current = loaded
+      // Everything a board hands back is on disk by definition; a later failure
+      // or layout write is what adds to this set during the session.
+      persistedIdsRef.current = new Set(loaded.map((node) => node.id))
+      for (const timer of layoutPersistTimersRef.current.values()) clearTimeout(timer)
+      layoutPersistTimersRef.current.clear()
       const restored = batchesFromBoard(board.items)
       setBatches(restored)
       setSelectedId(restored[0]?.id)
@@ -1238,11 +1268,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     const error = await postBoard({
       action: 'layout',
       board: id,
-      // Pictures only: a task node is session state and is deliberately never
-      // persisted while it runs (DD6); its terminal state is a different write
-      // (deferred by scope to C12's board route work — see the C11 report).
+      // Pictures are board items; a task node is only a board item once its
+      // terminal state was stored (DD6: a running task is never persisted), and
+      // a layout node once its draft write landed. Everything else is session
+      // state that no reload should see.
       items: nodesRef.current
-        .filter(isImageNode)
+        .filter((node) => isImageNode(node) || persistedIdsRef.current.has(node.id))
         .map((node) => ({ id: node.id, x: node.x, y: node.y })),
       camera: cameraRef.current,
     })
@@ -1270,6 +1301,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       clearTimeout(layoutTimer.current)
       void persistLayout()
     }
+    // Drafts use their own debounce; a close must not lose a box the user drew.
+    layoutFlushRef.current()
   }, [persistLayout])
 
   /** Switch boards: read it, then remember the choice server-side. */
@@ -1491,6 +1524,112 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     return out
   }, [])
 
+  /** Adopt a board the host created or updated while we wrote a node (DD7/C14). */
+  const adoptBoard = useCallback((board: BoardSummary | undefined) => {
+    if (board === undefined) return
+    setBoards((current) => upsertBoard(current, board))
+    if (boardIdRef.current !== board.id) {
+      setBoardId(board.id)
+      setBoardName(board.name)
+      boardIdRef.current = board.id
+    }
+  }, [])
+
+  /**
+   * Store a terminal task node (§4.6, DD6).
+   *
+   * Only failure/interruption is written — a running task is session state, and
+   * a reload that restored "generating" would be lying. The write is
+   * best-effort: a broken metadata directory must not cost the user the retry
+   * button, so the node stays on the canvas either way.
+   */
+  const persistTerminalTask = useCallback(async (clientId: string) => {
+    const node = nodesRef.current.find((entry): entry is TaskCanvasNode => isTaskNode(entry) && entry.clientId === clientId)
+    if (node === undefined) return
+    if (node.status !== 'failed' && node.status !== 'interrupted') return
+    const { error, payload } = await postBoardRaw({
+      action: 'save-task',
+      ...(boardIdRef.current === undefined ? {} : { board: boardIdRef.current }),
+      item: node.id,
+      x: node.x,
+      y: node.y,
+      ...(node.parents.length === 0 ? {} : { parents: [...node.parents] }),
+      task: {
+        status: node.status,
+        params: node.params,
+        ...(node.error === undefined ? {} : { error: node.error }),
+      },
+    })
+    if (error !== undefined) {
+      setBoardError(error)
+      return
+    }
+    adoptBoard(payload?.board as BoardSummary | undefined)
+    const item = payload?.item as BoardItem | undefined
+    if (item === undefined) return
+    persistedIdsRef.current.add(item.id)
+    if (item.id !== node.id) {
+      writeNodes(nodesRef.current.map((entry) => (entry.id === node.id ? { ...entry, id: item.id } : entry)))
+    }
+  }, [adoptBoard, writeNodes])
+
+  /**
+   * Write one layout node's draft and display box (§8.1, C14).
+   *
+   * The draft is what a later generation compiles, so it has to survive a
+   * reload; the display box rides along because a resize is a user decision
+   * too. The node's own id is sent so the first write does not rename it and
+   * the edges drawn to it stay valid.
+   */
+  const persistLayoutNode = useCallback(async (id: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined || !isLayoutNode(node)) return
+    const { error, payload } = await postBoardRaw({
+      action: 'save-layout-node',
+      ...(boardIdRef.current === undefined ? {} : { board: boardIdRef.current }),
+      item: node.id,
+      x: node.x,
+      y: node.y,
+      draft: node.draft,
+      w: node.w,
+      h: node.h,
+      ...(node.parents.length === 0 ? {} : { parents: [...node.parents] }),
+    })
+    if (error !== undefined) {
+      setBoardError(error)
+      return
+    }
+    adoptBoard(payload?.board as BoardSummary | undefined)
+    const item = payload?.item as BoardItem | undefined
+    if (item === undefined) return
+    persistedIdsRef.current.add(item.id)
+    if (item.id !== id) {
+      writeNodes(nodesRef.current.map((entry) => (entry.id === id ? { ...entry, id: item.id } : entry)))
+    }
+  }, [adoptBoard, writeNodes])
+
+  // The unmount flush above runs before this callback is declared in source
+  // order, so hand it the implementation here (runs every render, cheap).
+  layoutFlushRef.current = () => {
+    for (const [id, timer] of layoutPersistTimersRef.current) {
+      clearTimeout(timer)
+      layoutPersistTimersRef.current.delete(id)
+      void persistLayoutNode(id)
+    }
+  }
+
+  /** Coalesce layout-node writes: a box drag fires one change per frame. */
+  const scheduleLayoutPersist = useCallback((id: string) => {
+    const timers = layoutPersistTimersRef.current
+    const existing = timers.get(id)
+    if (existing !== undefined) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      timers.delete(id)
+      void persistLayoutNode(id)
+    }, LAYOUT_PERSIST_DEBOUNCE_MS)
+    timers.set(id, timer)
+  }, [persistLayoutNode])
+
   /** Record a run failure on its task node; the node stays for retry (§4.5). */
   const failTask = useCallback((clientId: string, message: string, status: 'failed' | 'interrupted' = 'failed') => {
     let changed = false
@@ -1502,8 +1641,13 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       changed = true
       return { ...node, status, error: firstLine(message), progress: undefined }
     })
-    if (changed) writeNodes(next)
-  }, [writeNodes])
+    if (changed) {
+      writeNodes(next)
+      // C14: a terminal failure is the one task state worth persisting (DD6), so
+      // tomorrow's board shows why the run failed and can retry it in place.
+      void persistTerminalTask(clientId)
+    }
+  }, [persistTerminalTask, writeNodes])
 
   /**
    * DD5: the response replaces the task node with its pictures.
@@ -1534,14 +1678,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     // A run can create its board (first draw after an empty library), so the
     // header has to follow the host's answer rather than assume the one the
     // form was opened on.
-    if (result.board !== undefined) {
-      setBoards((current) => upsertBoard(current, result.board as BoardSummary))
-      if (boardIdRef.current !== result.board.id) {
-        setBoardId(result.board.id)
-        setBoardName(result.board.name)
-        boardIdRef.current = result.board.id
-      }
-    }
+    adoptBoard(result.board)
     const next = nodesRef.current.filter((node) => node.id !== taskNode.id)
     const created: ImageCanvasNode[] = []
     result.images.forEach((image: StudioImage, index: number) => {
@@ -1561,9 +1698,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       next.push(node)
     })
     writeNodes(next)
+    // The host recorded these items before answering, so they are on disk now:
+    // a later removal has to go through the board route.
+    for (const node of created) persistedIdsRef.current.add(node.id)
     scheduleLayout()
     if (created[0] !== undefined) setSelection(new Set([created[0].id]))
-  }, [failTask, scheduleLayout, writeNodes])
+  }, [adoptBoard, failTask, scheduleLayout, writeNodes])
 
   /**
    * §4.3 steps 1–2: mint the clientId, drop the task node where the result
@@ -1587,6 +1727,18 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     const previous = options.replaceId === undefined
       ? undefined
       : nodesRef.current.find((node) => node.id === options.replaceId)
+    // C14: a retry replaces the node in place. If the old failure was stored,
+    // that board entry has to go now — a running task is never persisted, and
+    // leaving yesterday's failure behind would show two nodes after a reload.
+    if (previous !== undefined && persistedIdsRef.current.has(previous.id)) {
+      persistedIdsRef.current.delete(previous.id)
+      const board = boardIdRef.current
+      if (board !== undefined) {
+        void postBoard({ action: 'remove-item', board, item: previous.id }).then((error) => {
+          if (error !== undefined) setBoardError(error)
+        })
+      }
+    }
     const clientId = makeClientId()
     const spot = previous === undefined
       ? nextNodeSpot(nodesRef.current.map(nodeRect))
@@ -1625,6 +1777,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
           ...(params.steps === undefined ? {} : { steps: params.steps }),
           count: params.count ?? 1,
           ...(wireReferences.length === 0 ? {} : { references: wireReferences }),
+          ...(params.layout === undefined ? {} : { layout: params.layout }),
+          // C14: the canvas parents ride along as board item ids so the recorded
+          // picture keeps the edge to a layout node (which has no path to resolve).
+          ...(taskNode.parents.length === 0 ? {} : { parents: [...taskNode.parents] }),
           ...(boardIdRef.current === undefined ? {} : { board: boardIdRef.current }),
           clientId,
         }),
@@ -1690,8 +1846,13 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       }
       return restored
     })
-    pendingReplaceRef.current = { id: node.id }
-    setNote('参数已回填表单；改完再点「生成」会替换这个失败节点。')
+    // The compiled layout is part of the request snapshot; a form edit must not
+    // silently drop the conditioning when the user re-sends.
+    pendingReplaceRef.current = {
+      id: node.id,
+      ...(node.params.layout === undefined ? {} : { layout: node.params.layout }),
+    }
+    setNote('参数已回填表单；改完再点「生成」会替换这个失败节点（布局参数保留）。')
   }, [])
 
   /** Abort one task node's own run (§4.2 lands it on `interrupted`). */
@@ -1718,20 +1879,22 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       if (typeof path !== 'string' || path.length === 0) continue
       requested.push({ path, name: entry.name, mediaType: entry.payload.mediaType })
     }
+    const replace = pendingReplaceRef.current
+    pendingReplaceRef.current = undefined
     const params: BoardTaskParams = {
       prompt: text,
       ratio,
       ...(parsedSteps === undefined || !Number.isFinite(parsedSteps) ? {} : { steps: parsedSteps }),
       count,
       ...(requested.length === 0 ? {} : { references: requested }),
+      // §4.5 / C14: editing a layout-derived failure must not drop its layout.
+      ...(replace?.layout === undefined ? {} : { layout: replace.layout }),
     }
     // Canvas-held references are the edge's source, exactly as before (§4.5):
     // the task node's parents become the picture's parents on conversion.
     const parents = references
       .map((entry) => entry.nodeId)
       .filter((id): id is string => typeof id === 'string')
-    const replace = pendingReplaceRef.current
-    pendingReplaceRef.current = undefined
     try {
       await startGeneration(params, {
         references: references.map((entry) => entry.payload),
@@ -1743,6 +1906,62 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setBusy(false)
     }
   }, [count, prompt, ratio, references, startGeneration, steps])
+  /**
+   * Generate from a layout node (§8.4, C14).
+   *
+   * The compiled export is the request's `layout` (T21's contract: it becomes
+   * MOSS's positive conditioning text verbatim), the draft's whole-image
+   * caption is the prompt, and the canvas ratio is the nearest official one —
+   * but only when the draft is within 1% of it. A draft composed at an
+   * unofficial aspect is refused with the nearest ratio named, because §8.4
+   * forbids silently stretching the drawn boxes.
+   */
+  const generateLayoutNode = useCallback((nodeId: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === nodeId)
+    if (node === undefined || !isLayoutNode(node)) return
+    if (node.draft.items.length === 0) {
+      setNote('布局至少需要一个画框：先在内嵌编辑器里拖出一个框，再生成。')
+      return
+    }
+    const caption = typeof node.draft.summary.caption === 'string' ? node.draft.summary.caption.trim() : ''
+    if (caption.length === 0) {
+      setNote('布局缺少整图描述（summary.caption）；MOSS 把它当布局 prompt 的语义锚点，先写上。')
+      return
+    }
+    let compiled: string
+    try {
+      compiled = compileLayout(node.draft as unknown as LayoutDraft)
+    } catch (error) {
+      setNote('布局还不能生成：' + (error instanceof Error ? error.message : String(error)))
+      return
+    }
+    if (compiled.length > STUDIO_MAX_LAYOUT_CHARS) {
+      setNote('布局 compiled 超过 ' + String(STUDIO_MAX_LAYOUT_CHARS) + ' 字符上限。')
+      return
+    }
+    const fit = fitStudioRatio(node.draft.width, node.draft.height)
+    if (fit === undefined) {
+      setNote('布局 draft 尺寸无效，无法映射到官方画幅比例。')
+      return
+    }
+    if (fit.deviation > STUDIO_LAYOUT_RATIO_TOLERANCE) {
+      setNote(
+        '布局 draft 比例 ' + String(node.draft.width) + '×' + String(node.draft.height) +
+          ' 不在官方七档内（最接近 ' + fit.ratio + '，偏差 ' + (fit.deviation * 100).toFixed(1) +
+          '%）；请把 draft 尺寸改到七档比例，不静默拉伸。',
+      )
+      return
+    }
+    const params: BoardTaskParams = {
+      prompt: caption,
+      ratio: fit.ratio,
+      count: 1,
+      layout: compiled,
+    }
+    setNote('已按布局 ' + fit.ratio + ' 提交 MOSS 生成（compiled 作为正向编码文本）。')
+    void startGeneration(params, { parents: [node.id] })
+  }, [startGeneration])
+
   const reuse = useCallback((batch: Batch) => {
     setPrompt(batch.response.prompt)
     setRatio(batch.response.ratio)
@@ -1974,16 +2193,31 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       return next
     })
     pushCommand(snapshotCommand('remove', before, after, (list) => { writeNodes([...list]) }))
+    // A pending layout-draft write must not resurrect a removed node.
+    for (const id of drop) {
+      const timer = layoutPersistTimersRef.current.get(id)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        layoutPersistTimersRef.current.delete(id)
+      }
+    }
     const board = boardIdRef.current
     if (board === undefined) return
-    // Only pictures are board items: removing a task node is a canvas-only
-    // action until its terminal state has a persistence path (C11 report).
-    for (const id of before.filter((node) => drop.has(node.id) && isImageNode(node)).map((node) => node.id)) {
+    // Pictures are board items by construction; a task/layout node is one only
+    // after its own write landed (C14). Anything else is canvas-only and must
+    // not produce a 404 "not on the board" alert.
+    for (const node of before) {
+      if (!drop.has(node.id)) continue
+      const stored = isImageNode(node) || persistedIdsRef.current.has(node.id)
+      if (!stored) continue
+      persistedIdsRef.current.delete(node.id)
       void postBoard({
         action: 'remove-item',
         board,
-        item: id,
-        ...(deleteFile ? { deleteFile: true } : {}),
+        item: node.id,
+        // Only a picture has a file; asking to delete a task/layout entry's PNG
+        // would be a no-op the store does not understand.
+        ...(deleteFile && isImageNode(node) ? { deleteFile: true } : {}),
       }).then((error) => {
         if (error !== undefined) setBoardError(error)
       })
@@ -2184,6 +2418,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       // which is the §8.2 invariant.
       pushCommand(snapshotCommand('layout-resize', gesture.before, nodesRef.current, (list) => { writeNodes([...list]) }))
       scheduleLayout()
+      // The display box is a stored field (§8.3); write it with the draft save.
+      scheduleLayoutPersist(gesture.id)
       return
     }
     if (gesture.kind === 'node' && pointer !== undefined) {
@@ -2207,7 +2443,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     // A drag moved node positions, a pan moved the camera — both are worth
     // keeping, and both go through the one debounced save.
     scheduleLayout()
-  }, [flushPointer, moveCommand, pushCommand, scheduleLayout])
+  }, [flushPointer, moveCommand, pushCommand, scheduleLayout, scheduleLayoutPersist])
 
   /* ------------------------------------------------------------------------ */
   /* Asset flow (C12 §7): cards → canvas, cross-board copy/move, OS drops      */
@@ -2266,6 +2502,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     }
     writeNodes([...nodesRef.current, node])
     if (board !== undefined) setBoards((current) => upsertBoard(current, board))
+    // An imported/copied picture is recorded on the board before the host answers.
+    persistedIdsRef.current.add(node.id)
     scheduleLayout()
     return node
   }, [scheduleLayout, writeNodes])
@@ -2476,7 +2714,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       pushCommand(command)
     }
     scheduleLayout()
-  }, [pushCommand, scheduleLayout, writeNodes])
+    // C14: the draft is what a later generation compiles — persist it (§8.1).
+    scheduleLayoutPersist(id)
+  }, [pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes])
 
   /** Create a layout node with the default 1536×1024 draft (C13 step 5). */
   const addLayoutNode = useCallback(() => {
@@ -2507,9 +2747,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     pushCommand(snapshotCommand('add-layout', before, after, (list) => { writeNodes([...list]) }))
     setSelection(new Set([node.id]))
     revealNodeId(node.id)
-    setNote('已新建布局节点：在节点里拖动画框；生成接线随 C14。')
+    setNote('已新建布局节点：在里面拖动画框、写 summary.caption，然后点标题栏「生成」。')
     scheduleLayout()
-  }, [pushCommand, revealNodeId, scheduleLayout, writeNodes])
+    // A new node is a board entry (§8.1); the debounce coalesces the first
+    // burst of drawing into one write.
+    scheduleLayoutPersist(node.id)
+  }, [pushCommand, revealNodeId, scheduleLayout, scheduleLayoutPersist, writeNodes])
 
   /**
    * Start dragging a layout node's resize handle (§8.3).
@@ -3628,9 +3871,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                         {
                           type: 'button',
                           className: 'dsh-forge-node-btn',
-                          disabled: true,
-                          title: '布局入参契约随 T21/C14；生成按钮在 C14 接线',
+                          title: '按布局生成：compiled 作为 MOSS 正向编码文本（仅 moss-sft）',
                           onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => { event.stopPropagation() },
+                          onClick: () => { generateLayoutNode(node.id) },
                         },
                         '生成',
                       ),

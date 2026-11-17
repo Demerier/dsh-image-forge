@@ -38,15 +38,17 @@ import {
 } from '../testlib/studio-routes.js'
 import {
   resolveStudioSteps,
+  studioSettingsOf,
   studioSize,
   studioSizeTable,
-  studioSettingsOf,
+  studioTextToImageRequestOf,
 } from '../testlib/studio-service.js'
 import {
   DEFAULT_MOSS_SAMPLING,
   MODEL_PROFILES,
   MOSS_SAMPLING_PRESETS,
   TURBO_SIGMAS,
+  renderTextToImage,
   TURBO_STEPS,
   effectiveProfile,
   presetSteps,
@@ -72,11 +74,17 @@ import {
   STUDIO_GENERATE_ROUTE,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
+  STUDIO_LAYOUT_RATIO_TOLERANCE,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_RATIOS,
+  fitStudioRatio,
   isStudioClientId,
 } from '../testlib/studio-shared.js'
+import { compileLayout } from '../src/layout-editor.ts'
+
+/** The authoritative compiled-layout sample (T21's format authority). */
+const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
 import { resolveDefaultSize } from '../testlib/ratio.js'
 
 // The published surface is exactly `Config, apply, inject, name` (asserted in
@@ -1239,17 +1247,58 @@ function installFakeNetwork(options) {
     }
   globalThis.fetch = async (input, init) => {
     const url = String(input)
-    calls.push({ url, method: init === undefined || init.method === undefined ? 'GET' : init.method })
+    calls.push({
+      url,
+      method: init === undefined || init.method === undefined ? 'GET' : init.method,
+      body: init === undefined ? undefined : init.body,
+    })
     if (url.indexOf(STUDIO_CONFIG_ROUTE) === 0) return fakeResponse(config, 200)
     if (url.indexOf(STUDIO_GENERATE_ROUTE) === 0) {
       if (generate === undefined) return fakeResponse({ error: 'no generate stub' }, 500)
       return generate(init === undefined ? {} : init)
     }
     if (url.indexOf(STUDIO_BOARD_ROUTE) === 0) {
-      if (board === undefined) return fakeResponse({ error: 'no board in this harness' }, 404)
       // A board mutation is accepted: the wiring section asserts the canvas, not
-      // the store, and the layout debounce fires after the test has moved on.
-      if (init !== undefined && init.method === 'POST') return fakeResponse({ ok: true }, 200)
+      // the store. C14's two node writers answer even without a fixture board —
+      // that is how the empty-library "a failure creates the board" path is
+      // exercised — and echo the item they would have stored, so the panel can
+      // adopt the id and later remove the right board entry.
+      if (init !== undefined && init.method === 'POST') {
+        let action
+        try {
+          action = JSON.parse(init.body)
+        } catch {
+          action = undefined
+        }
+        if (action !== undefined && (action.action === 'save-task' || action.action === 'save-layout-node')) {
+          const kind = action.action === 'save-task' ? 'task' : 'layout'
+          const id = typeof action.item === 'string' && action.item.length > 0
+            ? action.item
+            : kind === 'task' ? 'itask1' : 'ilayout1'
+          return fakeResponse({
+            ok: true,
+            item: {
+              id,
+              kind,
+              x: typeof action.x === 'number' ? action.x : 0,
+              y: typeof action.y === 'number' ? action.y : 0,
+              parents: Array.isArray(action.parents) ? action.parents : [],
+              ...(kind === 'task' ? { task: action.task } : { draft: action.draft, w: action.w, h: action.h }),
+            },
+            board: {
+              id: board === undefined ? 'cbrdauto' : board.id,
+              name: board === undefined ? '自动画板' : board.name,
+              itemCount: board === undefined ? 1 : board.items.length,
+              cover: null,
+              createdAt: '2026-11-17T00:00:00.000Z',
+              updatedAt: '2026-11-17T00:00:00.000Z',
+              sessionId: null,
+            },
+          }, 200)
+        }
+        return fakeResponse({ ok: true }, 200)
+      }
+      if (board === undefined) return fakeResponse({ error: 'no board in this harness' }, 404)
       return fakeResponse(board, 200)
     }
     return fakeResponse({ error: 'unstubbed fetch: ' + url }, 500)
@@ -1543,6 +1592,23 @@ function nodeElements(panel) {
   return nodes
 }
 
+/** Board-route POST bodies this panel sent, parsed (C14 persistence checks). */
+function boardMutations(network) {
+  return network.calls
+    .filter((call) => call.method === 'POST' && call.url.indexOf(STUDIO_BOARD_ROUTE) === 0 && typeof call.body === 'string')
+    .map((call) => JSON.parse(call.body))
+}
+
+/** Every rendered hint/note line, joined — the panel's user-facing copy. */
+function noteText(panel) {
+  const notes = []
+  fakeVisit(panel.tree, (entry) => {
+    if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-studio-hint') {
+      notes.push(fakeText(entry))
+    }
+  })
+  return notes.join('\n')
+}
 /** The ids of the nodes painted as selected. */
 function selectedIds(panel) {
   return nodeElements(panel)
@@ -2472,14 +2538,310 @@ test('C13: the toolbar creates a default layout node, and creation is undoable',
     await settle(panel)
     assert.equal(nodesOfKind(panel, 'layout').length, 0, 'Ctrl+Z takes the new node back')
 
-    // Deleting a layout node is canvas-only until the persistence action lands
-    // (C13 report): no board write may be attempted for it.
+    // C14: creation schedules a debounced board write, and an undo inside that
+    // window cancels it — an add-then-undo must leave no board entry behind.
     buttonWithText(panel, '新建布局').props.onClick()
     await settle(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodesOfKind(panel, 'layout').length, 0)
+    await new Promise((resolve) => setTimeout(resolve, 650))
+    await settle(panel)
+    assert.equal(
+      boardMutations(network).filter((call) => call.action === 'save-layout-node').length,
+      0,
+      'an undone creation never reaches the board',
+    )
+  } finally {
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// C14: the layout loop — ratio mapping, T21 request seam, generation from a
+// layout node, and the persisted task/layout entries (save-task /
+// save-layout-node). The adapter itself is exercised through the same graph
+// builder a real ComfyUI receives; a live GPU run is the manual evidence.
+// ---------------------------------------------------------------------------
+
+test('C14: a draft maps onto the official ratio ladder, and a stretched draft is detectable', () => {
+  // Exact drafts used by the layout editor's own presets.
+  assert.deepEqual(
+    (({ ratio, deviation }) => ({ ratio, deviation }))(fitStudioRatio(1536, 1024)),
+    { ratio: '3:2', deviation: 0 },
+    'the default 1536x1024 draft is exactly 3:2',
+  )
+  // Every official ratio resolves from a 16-aligned draft.
+  const cases = [
+    [1024, 1024, '1:1'],
+    [1024, 768, '4:3'],
+    [768, 1024, '3:4'],
+    [1024, 683, '3:2'],
+    [683, 1024, '2:3'],
+    [1024, 576, '16:9'],
+    [576, 1024, '9:16'],
+  ]
+  for (const [width, height, ratio] of cases) {
+    assert.equal(fitStudioRatio(width, height).ratio, ratio, String(width) + 'x' + String(height))
+  }
+
+  // An unofficial aspect maps to the nearest rung and reports how far off it is;
+  // §8.4's rule is that a deviation past the tolerance is prompted, not stretched.
+  const stretched = fitStudioRatio(1536, 1000)
+  assert.equal(stretched.ratio, '3:2')
+  assert.ok(stretched.deviation > STUDIO_LAYOUT_RATIO_TOLERANCE, 'a 1.536 aspect is not silently 3:2')
+  assert.equal(fitStudioRatio(0, 100), undefined)
+})
+
+test('C14: the layout request is T21-shaped, and the no-layout graph stays byte-identical', () => {
+  const resolved = { width: 1248, height: 832, count: 1, steps: 25, seed: 7 }
+  const plain = studioTextToImageRequestOf({ prompt: '  A minimalist poster.  ' }, resolved)
+  assert.deepEqual(
+    plain,
+    { prompt: 'A minimalist poster.', width: 1248, height: 832, count: 1, steps: 25, seed: 7 },
+    'without layout the adapter request has exactly the pre-T21 keys',
+  )
+  assert.equal('layout' in plain, false)
+
+  const withLayout = studioTextToImageRequestOf({ prompt: 'A minimalist poster.', layout: LAYOUT_SAMPLE }, resolved)
+  assert.equal(withLayout.layout, LAYOUT_SAMPLE, 'the compiled text is forwarded verbatim')
+
+  // The graph builder is the fake server here: no layout must not change a byte.
+  const control = renderTextToImage(MODEL_PROFILES['moss-sft'], MOSS_MODELS, {
+    prompt: 'A minimalist poster.',
+    width: 1248,
+    height: 832,
+    count: 1,
+    steps: 25,
+    seed: 7,
+  })
+  assert.equal(JSON.stringify(renderTextToImage(MODEL_PROFILES['moss-sft'], MOSS_MODELS, plain)), JSON.stringify(control))
+  const conditioned = renderTextToImage(MODEL_PROFILES['moss-sft'], MOSS_MODELS, withLayout)
+  assert.equal(conditioned['4'].inputs.text, LAYOUT_SAMPLE, 'MOSS positive encoder text = compiled layout')
+  assert.equal(JSON.stringify(conditioned['5']), JSON.stringify(control['5']), 'the negative prompt is untouched')
+  assert.deepEqual(Object.keys(conditioned).sort(), Object.keys(control).sort(), 'no extra nodes are injected')
+})
+
+test('C14: the generate route accepts layout and canvas parents, and refuses a bad layout', () => {
+  const parsed = parseGenerate({
+    prompt: '按布局出图',
+    ratio: '3:2',
+    layout: LAYOUT_SAMPLE,
+    parents: ['i1', 'i2', 3, '  '],
+  })
+  assert.equal(parsed.layout, LAYOUT_SAMPLE)
+  assert.deepEqual(parsed.parents, ['i1', 'i2'], 'only usable ids survive')
+
+  // Backwards compatibility: the plain body gains no new keys.
+  const plain = parseGenerate({ prompt: 'x', ratio: '1:1' })
+  assert.equal('layout' in plain, false)
+  assert.equal('parents' in plain, false)
+
+  assert.throws(
+    () => parseGenerate({ prompt: 'x', ratio: '1:1', layout: '{"bbox_coord_space":"abs"}' }),
+    /abs_centralized/,
+    'the shared MOSS parser names the failing field',
+  )
+  assert.throws(() => parseGenerate({ prompt: 'x', ratio: '1:1', layout: 'not json' }), /布局不是合法 JSON/)
+  assert.throws(() => parseGenerate({ prompt: 'x', ratio: '1:1', parents: 'i1' }), /parents 必须是数组/)
+})
+
+test('C14: the board action set reaches ten and the node writers validate their payloads', () => {
+  const actions = [
+    'create', 'rename', 'layout', 'remove-item', 'delete', 'active',
+    'copy-item', 'move-item', 'save-task', 'save-layout-node',
+  ]
+  const payloads = {
+    'save-task': { task: { status: 'failed', params: { prompt: 'p' } } },
+    'save-layout-node': { draft: { width: 1536, height: 1024, items: [] }, w: 480, h: 420 },
+  }
+  for (const action of actions) {
+    assert.equal(parseBoardAction({ action, toBoard: 'b2', ...(payloads[action] ?? {}) }).action, action)
+  }
+  assert.throws(() => parseBoardAction({ action: 'save-task' }), /缺少 task/)
+  assert.throws(
+    () => parseBoardAction({ action: 'save-task', task: { status: 'running', params: { prompt: 'p' } } }),
+    /failed 或 interrupted/,
+    'a running task is never stored (DD6)',
+  )
+
+  const task = parseBoardAction({
+    action: 'save-task',
+    item: 'ct1',
+    x: 10,
+    y: 20,
+    parents: ['i1'],
+    task: { status: 'failed', error: 'boom', params: { prompt: 'p', layout: '{"x":1}' } },
+  })
+  assert.deepEqual(task.task, { status: 'failed', error: 'boom', params: { prompt: 'p', layout: '{"x":1}' } })
+  assert.deepEqual(task.parents, ['i1'])
+
+  const layout = parseBoardAction({
+    action: 'save-layout-node',
+    item: 'il1',
+    draft: { width: 1536, height: 1024, items: [] },
+    w: 480,
+    h: 420,
+  })
+  assert.equal(layout.w, 480)
+  assert.throws(
+    () => parseBoardAction({ action: 'save-layout-node', draft: { width: 1536, height: 1024, items: [] } }),
+    /w \/ h/,
+  )
+  assert.throws(
+    () => parseBoardAction({ action: 'save-layout-node', draft: { width: 'x', items: [] }, w: 1, h: 1 }),
+    /draft.width/,
+  )
+})
+
+/** Mount a board holding exactly one layout node with `draft`. */
+function layoutBoard(draft, extra = {}) {
+  return {
+    id: 'cbrdloop',
+    name: '布局闭环板',
+    camera: { x: 0, y: 0, zoom: 1 },
+    items: [
+      {
+        id: 'ilayout1',
+        kind: 'layout',
+        x: 120,
+        y: 60,
+        parents: [],
+        w: 480,
+        draft,
+        ...extra,
+      },
+    ],
+  }
+}
+
+/** The layout node's own 生成 button (the form has a 生成 button too). */
+function layoutGenerateButton(panel) {
+  const node = nodesOfKind(panel, 'layout')[0]
+  assert.ok(node !== undefined, 'the layout node must render')
+  let found
+  fakeVisit(node, (entry) => {
+    if (found === undefined && entry.type === 'button' && fakeText(entry) === '生成') found = entry
+  })
+  return found
+}
+
+test('C14: a layout node generates with its compiled text, ratio and layout parent', async () => {
+  const draft = {
+    width: 1536,
+    height: 1024,
+    bbox_coord_space: 'abs',
+    bbox_format: 'xyxy',
+    summary: { caption: '黄昏的山谷' },
+    items: [{ label: 'object', caption: '山', bbox: [10, 20, 300, 400] }],
+  }
+  const pending = deferredResponse()
+  const { network, panel, requests } = await mountGeneration(() => pending.promise, layoutBoard(draft))
+  try {
+    const button = layoutGenerateButton(panel)
+    assert.ok(button !== undefined, 'a layout node must offer 生成')
+    button.props.onClick()
+    await settle(panel)
+
+    assert.equal(requests.length, 1, 'one MOSS request')
+    assert.equal(requests[0].layout, compileLayout(draft), 'compiled export goes out verbatim')
+    assert.equal(requests[0].prompt, '黄昏的山谷', 'summary.caption is the prompt')
+    assert.equal(requests[0].ratio, '3:2', 'the default draft is an exact official ratio')
+    assert.deepEqual(requests[0].parents, ['ilayout1'], 'the layout node is the result parent')
+    assert.equal(requests[0].count, 1)
+
+    const task = taskNodeElement(panel)
+    assert.ok(fakeText(task).includes('布局'), 'the task node says it is layout-conditioned')
+    pending.resolve(generateResult([resultImage('iimg9')]))
+    await settle(panel)
+    assert.ok(edgeKeys(panel).includes('ilayout1->iimg9'), 'the layout edge survives the conversion')
+  } finally {
+    network.restore()
+  }
+})
+
+test('C14: an empty, caption-less or stretched draft never submits a request', async () => {
+  const base = {
+    width: 1536,
+    height: 1024,
+    bbox_coord_space: 'abs',
+    bbox_format: 'xyxy',
+    summary: { caption: '黄昏的山谷' },
+    items: [{ label: 'object', caption: '山', bbox: [10, 20, 300, 400] }],
+  }
+  const variants = [
+    ['empty draft', { ...base, items: [] }, /画框/],
+    ['missing caption', { ...base, summary: { caption: '   ' } }, /summary\.caption/],
+    // 992 is a legal draft side (multiple of 16) but 1536/992 is 3.2% off 3:2.
+    ['stretched draft', { ...base, height: 992 }, /七档/],
+  ]
+  for (const [label, draft, expected] of variants) {
+    const { network, panel, requests } = await mountGeneration(() => Promise.resolve(fakeResponse({ error: 'no' }, 500)), layoutBoard(draft))
+    try {
+      layoutGenerateButton(panel).props.onClick()
+      await settle(panel)
+      assert.equal(requests.length, 0, label + ': nothing may be submitted')
+      assert.match(noteText(panel), expected, label + ': the refusal explains the fix')
+    } finally {
+      network.restore()
+    }
+  }
+})
+
+test('C14: a failed task is stored on the board and removed again when retried', async () => {
+  const retry = deferredResponse()
+  const { network, panel } = await mountGeneration((index) => (index === 0
+    ? fakeResponse({ error: 'CUDA out of memory' }, 500)
+    : retry.promise))
+  try {
+    await typePrompt(panel, '一只橘猫')
+    buttonWithText(panel, '生成').props.onClick()
+    await settle(panel)
+
+    const saves = boardMutations(network).filter((call) => call.action === 'save-task')
+    assert.equal(saves.length, 1, 'the terminal failure is written (§4.6)')
+    assert.equal(saves[0].task.status, 'failed')
+    assert.equal(saves[0].task.error, 'CUDA out of memory')
+    assert.equal(typeof saves[0].x, 'number')
+    assert.equal(typeof saves[0].y, 'number')
+    const storedId = taskNodeElement(panel).props['data-node-id']
+    assert.equal(saves[0].item, storedId, 'the node id is offered to the store')
+
+    // Retry removes the stored failure first: a running task is never persisted,
+    // so a reload after the retry must not show yesterday's node next to it.
+    buttonWithText(panel, '重试').props.onClick()
+    await settle(panel)
+    const removals = boardMutations(network).filter((call) => call.action === 'remove-item')
+    assert.ok(removals.some((call) => call.item === storedId), 'the stale board entry is removed before the retry')
+  } finally {
+    network.restore()
+  }
+})
+
+test('C14: a new layout node is written after the debounce and removed with its entry', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    buttonWithText(panel, '新建布局').props.onClick()
+    await settle(panel)
+    assert.equal(boardMutations(network).filter((call) => call.action === 'save-layout-node').length, 0, 'the write is debounced')
+
+    await new Promise((resolve) => setTimeout(resolve, 650))
+    await settle(panel)
+    const saves = boardMutations(network).filter((call) => call.action === 'save-layout-node')
+    assert.equal(saves.length, 1, 'one write per editing burst')
+    assert.equal(saves[0].draft.width, 1536)
+    assert.equal(saves[0].draft.height, 1024)
+    assert.equal(saves[0].w, 480)
+    assert.equal(saves[0].h, 420)
+    const nodeId = nodesOfKind(panel, 'layout')[0].props['data-node-id']
+    assert.equal(saves[0].item, nodeId, 'the first write keeps the canvas id')
+
+    // C14: removal now targets that stored entry (it is no longer canvas-only).
     canvasElement(panel).props.onKeyDown(keyEvent('Delete'))
     await settle(panel)
     assert.equal(nodesOfKind(panel, 'layout').length, 0)
-    assert.equal(network.calls.filter((call) => call.method === 'POST').length, 0, 'layout nodes are canvas-only for now')
+    const removals = boardMutations(network).filter((call) => call.action === 'remove-item')
+    assert.ok(removals.some((call) => call.item === nodeId), 'the stored layout entry is removed')
   } finally {
     network.restore()
   }

@@ -43,7 +43,14 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import type { BoardDetail, BoardItem, BoardSummary, StudioAsset } from './studio-shared.ts'
+import type {
+  BoardDetail,
+  BoardItem,
+  BoardLayoutDraft,
+  BoardSummary,
+  BoardTaskInfo,
+  StudioAsset,
+} from './studio-shared.ts'
 
 /** Directory name under `outputDir` that holds every board artifact. */
 export const BOARDS_DIR_NAME = '.dsh-image-forge'
@@ -430,7 +437,14 @@ function isLayoutItem(item: Record<string, unknown>): boolean {
 
 /** Summary projection, so a list request never carries every prompt. */
 function summarize(board: BoardFile): BoardSummary {
-  const newest = board.items[board.items.length - 1]
+  // C14: task/layout entries carry no file. The cover is the newest **picture**
+  // (the last one in write order), not simply the last entry — a stored failure
+  // must not blank the board thumbnail.
+  const newest = [...board.items].reverse().find((item) => (
+    (item.kind ?? 'image') === 'image'
+    && typeof item.markdownPath === 'string'
+    && item.markdownPath.length > 0
+  ))
   return {
     id: board.id,
     name: board.name,
@@ -753,7 +767,7 @@ export async function saveLayout(
   })
 }
 
-/** Where an item landed after a cross-board write. */
+/** Where an item landed after a board write. */
 export interface BoardTransfer {
   /** The item as it now lives on the destination board. */
   item: BoardItem
@@ -895,6 +909,181 @@ export async function moveItem(
   })
 }
 
+/** One terminal task node on its way onto a board (§4.6). */
+export interface TaskItemWrite {
+  /** Existing board item to update; absent mints a new id. */
+  readonly id?: string
+  readonly x?: number | null
+  readonly y?: number | null
+  /** Canvas parents, as board item ids; explicit ids win, perishable ones drop on render. */
+  readonly parents?: readonly string[]
+  /** Terminal state plus the request snapshot a retry needs. */
+  readonly task: BoardTaskInfo
+  readonly sessionId?: string | null
+}
+
+/** One layout node on its way onto a board (§8.1). */
+export interface LayoutItemWrite {
+  readonly id?: string
+  readonly x?: number | null
+  readonly y?: number | null
+  readonly parents?: readonly string[]
+  /** The editable draft, in draft pixels; never touched by a node resize. */
+  readonly draft: BoardLayoutDraft
+  /** Display width/height in world units (§8.3: width-driven, height proportional). */
+  readonly w: number
+  readonly h: number
+  readonly sessionId?: string | null
+}
+
+/** Refuse anything the read side would drop anyway, with a message the panel can show. */
+function assertTerminalTask(task: BoardTaskInfo): void {
+  if (task.status !== 'failed' && task.status !== 'interrupted') {
+    throw new Error('task.status 只能是 failed 或 interrupted——运行中的任务不落盘（DD6）')
+  }
+  if (typeof task.params !== 'object' || task.params === null || typeof task.params.prompt !== 'string') {
+    throw new Error('task.params 必须是带 prompt 的请求快照')
+  }
+  if (task.error !== undefined && typeof task.error !== 'string') throw new Error('task.error 必须是字符串')
+}
+
+/** Mirror the read side's layout check so a stored draft is always reopenable. */
+function assertLayoutDraft(draft: BoardLayoutDraft, w: number, h: number): void {
+  if (typeof draft !== 'object' || draft === null) throw new Error('draft 必须是对象')
+  if (!Number.isFinite(draft.width) || draft.width <= 0 || !Number.isFinite(draft.height) || draft.height <= 0) {
+    throw new Error('draft.width / draft.height 必须是正数')
+  }
+  if (!Array.isArray(draft.items)) throw new Error('draft.items 必须是数组')
+  if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) throw new Error('w / h 必须是正数')
+}
+
+/**
+ * Store one terminal task node (§4.6, C14).
+ *
+ * Running tasks are deliberately not storable: a reload must never show a node
+ * that claims to be generating a run whose result has already been recorded.
+ * Only a failure/interrupt is bookkeeping with value — the user can see why
+ * yesterday's run failed and retry it from the same canvas position.
+ *
+ * @param outputDir - the configured output directory.
+ * @param ref - board id/name, or blank for a new board (the canvas may not have
+ *   one yet when a task fails before its first picture).
+ * @param entry - the terminal state, position and request snapshot.
+ * @returns the stored item and the board, or `undefined` when the board is gone.
+ */
+export async function saveTaskItem(
+  outputDir: string,
+  ref: string | undefined,
+  entry: TaskItemWrite,
+): Promise<BoardTransfer | undefined> {
+  assertTerminalTask(entry.task)
+  return serialized(boardsRoot(outputDir), async () => {
+    const { board } = await ensureBoardLocked(outputDir, ref, {})
+    const now = new Date().toISOString()
+    const index = entry.id === undefined ? -1 : board.items.findIndex((item) => item.id === entry.id)
+    const existing = index < 0 ? undefined : board.items[index]
+    const spot = gridSpot(board.items.length)
+    // The canvas already keys its node — and any edge to it — by the id it sent.
+    // Honour a free one so the first save does not rename the node; a taken id
+    // falls back to a fresh one and the caller adopts the answer.
+    const requestedId = typeof entry.id === 'string' && entry.id.length > 0 && !board.items.some((item) => item.id === entry.id)
+      ? entry.id
+      : undefined
+    const item: BoardItem = {
+      id: existing?.id ?? requestedId ?? makeItemId(),
+      kind: 'task',
+      // A task node has no file; the three picture strings stay empty and the
+      // read side's kind check ignores them.
+      path: '',
+      markdownPath: '',
+      width: 0,
+      height: 0,
+      bytes: 0,
+      mediaType: '',
+      prompt: '',
+      ratio: null,
+      steps: null,
+      seed: null,
+      mode: 'generate',
+      backend: 'studio',
+      parents: [...(entry.parents ?? existing?.parents ?? [])],
+      createdAt: existing?.createdAt ?? now,
+      sessionId: entry.sessionId ?? board.sessionId,
+      batchId: existing?.batchId ?? 't' + Date.now().toString(36),
+      x: entry.x ?? existing?.x ?? spot.x,
+      y: entry.y ?? existing?.y ?? spot.y,
+      task: entry.task,
+    }
+    if (index >= 0) board.items[index] = item
+    else board.items.push(item)
+    capItems(board)
+    board.updatedAt = now
+    await saveBoard(outputDir, board)
+    return { item, board: summarize(board) }
+  })
+}
+
+/**
+ * Store one layout node's draft and display box (§8.1, C14).
+ *
+ * The draft is stored verbatim (pixels are independent of the display size —
+ * that is the §8.2 invariant), so resizing a node and reopening the board never
+ * changes what a later generation would compile.
+ *
+ * @param outputDir - the configured output directory.
+ * @param ref - board id/name, or blank for a new board.
+ * @param entry - draft, display size, position and parents.
+ * @returns the stored item and the board, or `undefined` when the board is gone.
+ */
+export async function saveLayoutItem(
+  outputDir: string,
+  ref: string | undefined,
+  entry: LayoutItemWrite,
+): Promise<BoardTransfer | undefined> {
+  assertLayoutDraft(entry.draft, entry.w, entry.h)
+  return serialized(boardsRoot(outputDir), async () => {
+    const { board } = await ensureBoardLocked(outputDir, ref, {})
+    const now = new Date().toISOString()
+    const index = entry.id === undefined ? -1 : board.items.findIndex((item) => item.id === entry.id)
+    const existing = index < 0 ? undefined : board.items[index]
+    const spot = gridSpot(board.items.length)
+    const requestedId = typeof entry.id === 'string' && entry.id.length > 0 && !board.items.some((item) => item.id === entry.id)
+      ? entry.id
+      : undefined
+    const item: BoardItem = {
+      id: existing?.id ?? requestedId ?? makeItemId(),
+      kind: 'layout',
+      path: '',
+      markdownPath: '',
+      width: 0,
+      height: 0,
+      bytes: 0,
+      mediaType: '',
+      prompt: '',
+      ratio: null,
+      steps: null,
+      seed: null,
+      mode: 'generate',
+      backend: 'studio',
+      parents: [...(entry.parents ?? existing?.parents ?? [])],
+      createdAt: existing?.createdAt ?? now,
+      sessionId: entry.sessionId ?? board.sessionId,
+      batchId: existing?.batchId ?? 'l' + Date.now().toString(36),
+      x: entry.x ?? existing?.x ?? spot.x,
+      y: entry.y ?? existing?.y ?? spot.y,
+      draft: entry.draft,
+      w: entry.w,
+      h: entry.h,
+    }
+    if (index >= 0) board.items[index] = item
+    else board.items.push(item)
+    capItems(board)
+    board.updatedAt = now
+    await saveBoard(outputDir, board)
+    return { item, board: summarize(board) }
+  })
+}
+
 /** True when `target` is the root itself or lives under it. */
 function isInside(root: string, target: string): boolean {
   if (!isAbsolute(target)) return false
@@ -936,7 +1125,13 @@ export async function removeItem(
     await saveBoard(outputDir, board)
     let fileDeleted = false
     const sharedWith: string[] = []
-    if (options.deleteFile === true && isInside(outputDir, removed.path)) {
+    // Task/layout entries have no file to delete; only a picture can opt in.
+    if (
+      options.deleteFile === true
+      && typeof removed.path === 'string'
+      && removed.path.length > 0
+      && isInside(outputDir, removed.path)
+    ) {
       // copy-item makes two boards share one PNG (§7.2). Unlinking it here would
       // blank the picture on every other board, so the shared case only
       // unplaces: refusal must never be silent, hence the board list in the
@@ -1034,6 +1229,9 @@ export async function listAssets(outputDir: string, query: AssetQuery = {}): Pro
   for (const board of boards) {
     if (boardFilter !== undefined && board.id !== boardFilter) continue
     for (const item of board.items) {
+      // The asset page lists pictures: a task/layout node has no file to show
+      // and would otherwise appear as an empty card.
+      if ((item.kind ?? 'image') !== 'image') continue
       if (needle.length > 0) {
         const haystack = `${item.prompt}\n${item.path}\n${board.name}`.toLowerCase()
         if (!haystack.includes(needle)) continue

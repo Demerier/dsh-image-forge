@@ -106,6 +106,67 @@ export const STUDIO_MAX_COUNT = 4
 export const STUDIO_MAX_PROMPT_CHARS = 4000
 /** Upper bound on one request body, before base64 inflation. */
 export const STUDIO_MAX_BODY_BYTES = 48 * 1024 * 1024
+/** Longest compiled layout prompt the Studio forwards, in characters. */
+export const STUDIO_MAX_LAYOUT_CHARS = 64 * 1024
+/** Most parent item ids one Studio request may carry. */
+export const STUDIO_MAX_PARENT_IDS = 32
+
+/** Aspect of every official ratio, kept beside {@link STUDIO_RATIOS}. */
+const STUDIO_RATIO_ASPECTS: ReadonlyArray<{ readonly ratio: StudioRatio; readonly aspect: number }> = [
+  { ratio: '1:1', aspect: 1 },
+  { ratio: '4:3', aspect: 4 / 3 },
+  { ratio: '3:4', aspect: 3 / 4 },
+  { ratio: '3:2', aspect: 3 / 2 },
+  { ratio: '2:3', aspect: 2 / 3 },
+  { ratio: '16:9', aspect: 16 / 9 },
+  { ratio: '9:16', aspect: 9 / 16 },
+]
+
+/** How a draft's aspect maps onto the official canvas-ratio ladder (§8.4). */
+export interface StudioRatioFit {
+  /** Nearest official ratio. */
+  readonly ratio: StudioRatio
+  /** Draft aspect (width / height). */
+  readonly aspect: number
+  /** The official ratio's aspect. */
+  readonly target: number
+  /** Relative deviation `|aspect - target| / target`; 0 is an exact match. */
+  readonly deviation: number
+}
+
+/**
+ * Nearest official ratio for a draft canvas (§8.4).
+ *
+ * The layout draft is arbitrary (its sides are multiples of 16), while a
+ * generation canvas is one of seven ratios. The mapping is explicit and
+ * testable here instead of living in the panel, and a caller must still decide
+ * what a large deviation means — §8.4 says "prompt, never stretch silently".
+ *
+ * @returns the fit, or `undefined` for a degenerate draft size.
+ */
+export function fitStudioRatio(width: number, height: number): StudioRatioFit | undefined {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return undefined
+  const aspect = width / height
+  let best = STUDIO_RATIO_ASPECTS[0]
+  let deviation = Number.POSITIVE_INFINITY
+  for (const entry of STUDIO_RATIO_ASPECTS) {
+    const candidate = Math.abs(aspect - entry.aspect) / entry.aspect
+    if (candidate < deviation) {
+      best = entry
+      deviation = candidate
+    }
+  }
+  return { ratio: best.ratio, aspect, target: best.aspect, deviation }
+}
+
+/**
+ * Largest draft↔official deviation one-click layout generation tolerates.
+ *
+ * One percent: enough for a 16-aligned draft that rounds to an official ratio,
+ * far too little for a deliberately stretched composition (which §8.4 refuses
+ * rather than silently letterboxing the drawn boxes).
+ */
+export const STUDIO_LAYOUT_RATIO_TOLERANCE = 0.01
 
 /**
  * What the panel needs to render before the first request: which ComfyUI it
@@ -237,6 +298,24 @@ export interface StudioGenerateRequest {
    * this run, which is how a task node knows an event is its own.
    */
   clientId?: string
+  /**
+   * Compiled MOSS layout prompt (T21's contract: the layout editor's compiled
+   * export, `bbox_coord_space:'abs_centralized'`, `bbox_format:'yxyx'`).
+   *
+   * Only the `moss-sft` profile has a layout path; the host refuses it on any
+   * other profile and refuses a malformed layout before touching ComfyUI. Absent
+   * means the plain text-to-image request, byte-identical to before T21.
+   */
+  layout?: string
+  /**
+   * Canvas parents of the result, as **board item ids** (§8.4).
+   *
+   * The conversation path knows its references only as paths, but the canvas
+   * knows the ids it drew edges from — including a layout node, which has no
+   * file path a `parentPaths` lookup could resolve. Explicit ids win over path
+   * resolution in the board store; unknown ids are simply not drawn.
+   */
+  parents?: string[]
 }
 
 /** Longest accepted `clientId`, including its `c` prefix. */
@@ -400,6 +479,11 @@ export interface BoardTaskParams {
   count?: number
   seed?: number
   references?: Array<{ path?: string; name?: string; mediaType?: string }>
+  /**
+   * Compiled MOSS layout prompt the run carried (T21/C14), kept so a retry
+   * re-sends the exact same conditioning text.
+   */
+  layout?: string
 }
 
 /** A task node that reached a terminal state; only terminal states are stored. */
@@ -466,10 +550,12 @@ export interface StudioBoardsResponse {
 /**
  * One action on a board, discriminated by `action`.
  *
- * The closed set grew from six to eight in C12 (§7.2): `copy-item` /
- * `move-item` are the only cross-board verbs. Importing an image is **not** a
- * board action — it writes a file before it records an item, so it has its own
- * route ({@link STUDIO_IMPORT_ROUTE}).
+ * The closed set grew from six to eight in C12 (§7.2: `copy-item` /
+ * `move-item`) and to ten in C14, which gives the non-picture node kinds a
+ * terminal write: `save-task` stores a failed/interrupted task node (§4.6) and
+ * `save-layout-node` stores a layout draft (§8.1), so both survive a reload.
+ * Importing an image is **not** a board action — it writes a file before it
+ * records an item, so it has its own route ({@link STUDIO_IMPORT_ROUTE}).
  */
 export interface StudioBoardRequest {
   action:
@@ -481,6 +567,8 @@ export interface StudioBoardRequest {
     | 'active'
     | 'copy-item'
     | 'move-item'
+    | 'save-task'
+    | 'save-layout-node'
   /** Target board; absent means the active board. */
   board?: string
   /** New name, for `create` and `rename`. */
@@ -497,7 +585,18 @@ export interface StudioBoardRequest {
   toBoard?: string
   /** Landing position on the destination board, when the caller knows it. */
   x?: number
+  /** Vertical landing position; always paired with `x`. */
   y?: number
+  /** Canvas parents of a saved task/layout node, as board item ids. */
+  parents?: string[]
+  /** Terminal state to store, for `save-task` (§4.6: only failed/interrupted). */
+  task?: BoardTaskInfo
+  /** Draft to store, for `save-layout-node`. */
+  draft?: BoardLayoutDraft
+  /** Display width in world units, for `save-layout-node` (§8.3). */
+  w?: number
+  /** Display height in world units, for `save-layout-node`. */
+  h?: number
 }
 
 /**

@@ -34,6 +34,8 @@ import {
   removeItem,
   renameBoard,
   saveLayout,
+  saveLayoutItem,
+  saveTaskItem,
   sanitizeBoardName,
   setActiveBoard,
 } from '../testlib/boards.js'
@@ -501,6 +503,115 @@ test('deleting a file another board shares is refused, and the item still leaves
     assert.equal(last.fileDeleted, true)
     assert.deepEqual(last.sharedWith, [])
     assert.equal(existsSync(path), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a terminal task node is stored as a v2 entry and updated in place', async () => {
+  const dir = makeDir()
+  try {
+    const first = await recordItems(dir, undefined, [item(dir, 'keep')], { prompt: '画板' })
+    const params = { prompt: '一只橘猫', ratio: '3:2', steps: 25, count: 1, layout: '{"summary":{"caption":"x"}}' }
+    const failed = { status: 'failed', error: 'CUDA out of memory\nTraceback (most recent call last): ...', params }
+    const written = await saveTaskItem(dir, first.board.id, { id: 'ctask1', x: 120, y: 40, parents: [], task: failed })
+    assert.equal(written.item.id, 'ctask1', 'the canvas id is honoured on the first write')
+    assert.equal(written.item.kind, 'task')
+    assert.equal(written.item.task.status, 'failed')
+    assert.equal(written.item.path, '', 'a task node has no file behind it')
+
+    const reread = await readBoard(dir, first.board.id)
+    const stored = reread.items.find((entry) => entry.id === 'ctask1')
+    assert.deepEqual(stored.task.params, params, 'the retry snapshot survives the round trip')
+
+    // Re-saving the same id updates one entry and keeps its creation time.
+    const again = await saveTaskItem(dir, first.board.id, {
+      id: 'ctask1',
+      x: 200,
+      y: 8,
+      parents: ['ilayout1'],
+      task: { ...failed, status: 'interrupted' },
+    })
+    assert.equal(again.item.id, 'ctask1')
+    assert.equal(again.item.createdAt, stored.createdAt)
+    assert.equal(again.item.task.status, 'interrupted')
+    assert.deepEqual(again.item.parents, ['ilayout1'])
+    assert.equal((await readBoard(dir, first.board.id)).items.filter((entry) => entry.id === 'ctask1').length, 1)
+
+    // Running states are refused: only a terminal task may be bookkeeping (DD6).
+    await assert.rejects(
+      () => saveTaskItem(dir, first.board.id, { task: { status: 'running', params } }),
+      /failed 或 interrupted/,
+    )
+    // A blank ref means "the canvas had no board yet": create one rather than lose the retry.
+    const fresh = await saveTaskItem(dir, undefined, { task: failed })
+    assert.equal(fresh.board.itemCount, 1)
+    assert.equal(fresh.created ?? true, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a layout node stores its draft and display box, and resizing keeps the draft', async () => {
+  const dir = makeDir()
+  try {
+    const draft = {
+      width: 1536,
+      height: 1024,
+      bbox_coord_space: 'abs',
+      bbox_format: 'xyxy',
+      summary: { caption: '黄昏的山谷' },
+      items: [{ label: 'object', caption: '山', bbox: [0, 0, 100, 100] }],
+    }
+    const written = await saveLayoutItem(dir, undefined, { id: 'ilayout1', x: 30, y: 60, parents: [], draft, w: 480, h: 420 })
+    assert.equal(written.item.kind, 'layout')
+    assert.equal(written.item.id, 'ilayout1')
+    assert.deepEqual(written.item.draft, draft, 'the draft is stored verbatim')
+    assert.equal(written.item.w, 480)
+
+    // §8.2: a resize changes the display box only; the draft — what later
+    // compiles — is byte-identical.
+    const resized = await saveLayoutItem(dir, written.board.id, { id: 'ilayout1', draft, w: 900, h: 700 })
+    assert.equal(resized.item.w, 900)
+    assert.equal(resized.item.h, 700)
+    assert.deepEqual(resized.item.draft, draft)
+
+    await assert.rejects(() => saveLayoutItem(dir, written.board.id, { draft, w: 0, h: 10 }), /正数/)
+    await assert.rejects(
+      () => saveLayoutItem(dir, written.board.id, { draft: { ...draft, items: 'nope' }, w: 480, h: 420 }),
+      /items/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('non-picture nodes never become the board cover or an asset card', async () => {
+  const dir = makeDir()
+  try {
+    const picture = await recordItems(dir, undefined, [item(dir, 'cover')])
+    const draft = {
+      width: 1536,
+      height: 1024,
+      bbox_coord_space: 'abs',
+      bbox_format: 'xyxy',
+      summary: { caption: '黄昏' },
+      items: [],
+    }
+    await saveTaskItem(dir, picture.board.id, { task: { status: 'failed', params: { prompt: '失败的那次' } } })
+    await saveLayoutItem(dir, picture.board.id, { draft, w: 480, h: 420 })
+
+    const boards = await listBoards(dir)
+    assert.equal(boards[0].cover, picture.items[0].markdownPath, 'the cover stays the newest picture')
+    const assets = await listAssets(dir, {})
+    assert.deepEqual(assets.assets.map((entry) => entry.id), [picture.items[0].id], 'only pictures are assets')
+
+    // A file-less node removed with deleteFile: true must be an unplace, not a crash.
+    const board = await readBoard(dir, picture.board.id)
+    const taskItem = board.items.find((entry) => entry.kind === 'task')
+    const removed = await removeItem(dir, picture.board.id, taskItem.id, { deleteFile: true })
+    assert.equal(removed.fileDeleted, false)
+    assert.deepEqual(removed.sharedWith, [])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
