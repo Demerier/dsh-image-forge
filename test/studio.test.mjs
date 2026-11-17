@@ -63,6 +63,7 @@ import {
   STUDIO_CLIENT_ID_MAX_CHARS,
   STUDIO_CONFIG_ROUTE,
   STUDIO_EVENTS_ROUTE,
+  STUDIO_GENERATE_ROUTE,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_RATIOS,
@@ -1211,6 +1212,9 @@ function installFakeNetwork(options) {
   // lets the interaction section mount a canvas with nodes on it. Without one the
   // harness serves exactly what it always did: an empty library and a 404.
   const board = options === undefined ? undefined : options.board
+  // C11: generation is stubbed per test — the panel's POST is the conversion
+  // authority, so a test owns when (and whether) the response arrives.
+  const generate = options === undefined ? undefined : options.generate
   const config = board === undefined
     ? HARNESS_CONFIG
     : {
@@ -1228,6 +1232,10 @@ function installFakeNetwork(options) {
     const url = String(input)
     calls.push({ url, method: init === undefined || init.method === undefined ? 'GET' : init.method })
     if (url.indexOf(STUDIO_CONFIG_ROUTE) === 0) return fakeResponse(config, 200)
+    if (url.indexOf(STUDIO_GENERATE_ROUTE) === 0) {
+      if (generate === undefined) return fakeResponse({ error: 'no generate stub' }, 500)
+      return generate(init === undefined ? {} : init)
+    }
     if (url.indexOf(STUDIO_BOARD_ROUTE) === 0) {
       if (board === undefined) return fakeResponse({ error: 'no board in this harness' }, 404)
       // A board mutation is accepted: the wiring section asserts the canvas, not
@@ -1838,6 +1846,398 @@ test('right-click offers the §6.4 menu for blank canvas and for an image node',
     assert.ok(!selectedIds(panel).includes('ibbb2'))
   } finally {
     restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// C11: task nodes — generate drops one, SSE drives it, the response converts it.
+//
+// The panel's generate is a fetch whose response the test resolves by hand:
+// that is what makes the "done frame before the response" race observable, and
+// it is C11's stop-condition plan asserted rather than hoped for. What still
+// needs a browser: pointer capture, paint, and a live ComfyUI run.
+// ---------------------------------------------------------------------------
+
+/** A response the test resolves when it chooses (the POST outlives the run). */
+function deferredResponse() {
+  let settleResponse
+  const promise = new Promise((resolve) => { settleResponse = resolve })
+  return {
+    promise,
+    resolve(payload, status = 200) { settleResponse(fakeResponse(payload, status)) },
+  }
+}
+
+/** One generated image in the shape the panel expects back. */
+function resultImage(id, overrides = {}) {
+  return {
+    id,
+    path: `C:/out/${id}.png`,
+    markdownPath: `C:/out/${id}.png`,
+    width: 1024,
+    height: 1024,
+    bytes: 2048,
+    mediaType: 'image/png',
+    ...overrides,
+  }
+}
+
+/** A full `StudioGenerateResponse` with one or more pictures. */
+function generateResult(images, overrides = {}) {
+  return {
+    images,
+    prompt: '一只橘猫坐在窗台上',
+    ratio: '1:1',
+    width: 1024,
+    height: 1024,
+    steps: 8,
+    seed: 7,
+    elapsedMs: 1200,
+    endpoint: 'http://127.0.0.1:8188',
+    mode: 'generate',
+    turboFallback: false,
+    ...overrides,
+  }
+}
+
+/** Every painted node of one kind. */
+function nodesOfKind(panel, kind) {
+  return nodeElements(panel).filter((entry) => entry.props['data-node-kind'] === kind)
+}
+
+/** The single task node on the canvas. */
+function taskNodeElement(panel) {
+  const tasks = nodesOfKind(panel, 'task')
+  assert.equal(tasks.length, 1, 'exactly one task node is expected')
+  return tasks[0]
+}
+
+/** The edge keys (`parent->child`) the canvas drew. */
+function edgeKeys(panel) {
+  const keys = []
+  fakeVisit(panel.tree, (entry) => {
+    if (entry.type === 'path' && typeof entry.props.key === 'string') keys.push(entry.props.key)
+  })
+  return keys
+}
+
+/** Type into the form's prompt box, the way the user would. */
+async function typePrompt(panel, text) {
+  fakeElementWithClass(panel.tree, 'dsh-forge-textarea').props.onChange({ target: { value: text } })
+  await settle(panel)
+}
+
+/** Mount the canvas board with a generation stub; the stub sees each body. */
+async function mountGeneration(generate, board = HARNESS_BOARD) {
+  const requests = []
+  const mounted = await mountWorkbench({
+    board,
+    generate: (init) => {
+      requests.push(JSON.parse(init.body))
+      return generate(requests.length - 1)
+    },
+  })
+  return { ...mounted, requests }
+}
+
+test('C11: generation drops a task node carrying its clientId, and the response converts it in place', async () => {
+  const pending = deferredResponse()
+  const { network, panel, requests } = await mountGeneration(() => pending.promise)
+  try {
+    // A picture becomes the reference, which is also the edge's source.
+    nodeElements(panel)[0].props.onPointerDown(pointerEvent({ clientX: 10, clientY: 10 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    buttonWithText(panel, '用作参考').props.onClick()
+    await settle(panel)
+    await typePrompt(panel, '一只橘猫坐在窗台上')
+
+    buttonWithText(panel, '生成改图').props.onClick()
+    await settle(panel)
+
+    // §4.3 step 1: the wire carries a host-valid clientId, the board and the
+    // form values; the task node is keyed by it and lands where a result would.
+    assert.equal(requests.length, 1, 'one POST per generation')
+    const body = requests[0]
+    assert.ok(isStudioClientId(body.clientId), 'the request carries a canonical clientId')
+    assert.equal(body.prompt, '一只橘猫坐在窗台上')
+    assert.equal(body.ratio, '1:1')
+    assert.equal(body.board, HARNESS_BOARD.id)
+    const clientId = body.clientId
+    const task = taskNodeElement(panel)
+    assert.equal(task.props['data-node-id'], clientId, 'the task node id is the clientId')
+    assert.equal(task.props['data-task-status'], 'idle')
+    assert.equal(task.props.style.left, '1440px', 'landing clears the widest right-most node')
+    assert.equal(task.props.style.width, '208px', 'a task node is the fixed default box')
+    assert.ok(fakeText(task).includes('一只橘猫坐在窗台上'), 'the node shows the prompt')
+    assert.ok(fakeText(task).includes('1:1 · 40 步 · 1 张'), 'the node shows the parameter summary')
+
+    // §4.2: run → queued, start → running, progress → label and percent.
+    const source = network.open()
+    source.emit('message', { type: 'run', promptId: 'prompt-1', clientId })
+    await settle(panel)
+    assert.equal(taskNodeElement(panel).props['data-task-status'], 'queued')
+    source.emit('message', { type: 'start', promptId: 'prompt-1', clientId })
+    await settle(panel)
+    assert.equal(taskNodeElement(panel).props['data-task-status'], 'running')
+    source.emit('message', { type: 'progress', promptId: 'prompt-1', clientId, value: 17, max: 50, percent: 34, label: '17/50' })
+    await settle(panel)
+    const running = taskNodeElement(panel)
+    assert.equal(running.props['data-task-status'], 'running')
+    assert.ok(fakeText(running).includes('第 17/50 步'))
+    assert.equal(fakeElementWithClass(panel.tree, 'dsh-forge-task-fill').props.style.width, '34%')
+
+    // §4.2's queue rule: a broadcast queue change never pushes a started run back.
+    source.emit('message', { type: 'queue', remaining: 0 })
+    await settle(panel)
+    assert.equal(taskNodeElement(panel).props['data-task-status'], 'running', 'queue frames are not retrograde')
+
+    // A done frame moves the status only; the node stays a task until the
+    // response says which pictures replace it (C11's race plan).
+    source.emit('message', { type: 'done', promptId: 'prompt-1', clientId })
+    await settle(panel)
+    assert.equal(taskNodeElement(panel).props['data-task-status'], 'done')
+    assert.equal(nodesOfKind(panel, 'image').length, 3, 'a frame alone converts nothing')
+    assert.equal(nodesOfKind(panel, 'task').length, 1)
+
+    pending.resolve(generateResult([resultImage('iimg1')]))
+    await settle(panel)
+
+    // DD5: the first image takes the task node's exact position and parents —
+    // the lineage edge survives the conversion.
+    assert.equal(nodesOfKind(panel, 'task').length, 0, 'the task node is gone')
+    const converted = nodesOfKind(panel, 'image').find((entry) => entry.props['data-node-id'] === 'iimg1')
+    assert.ok(converted !== undefined, 'the result is an image node keyed by the board item id')
+    assert.equal(converted.props.style.left, '1440px')
+    assert.equal(converted.props.style.top, '0px')
+    assert.ok(edgeKeys(panel).includes('iaaa1->iimg1'), 'parents crossed the conversion as a drawn edge')
+    assert.equal(nodeElements(panel).length, 4, 'three board pictures plus the new one')
+    assert.equal(progressView(panel).phase, 'done')
+  } finally {
+    network.restore()
+  }
+})
+
+test('C11: a failed task stays for retry, and the retry replaces it in place with a new clientId', async () => {
+  const retry = deferredResponse()
+  const { network, panel, requests } = await mountGeneration((index) => (index === 0
+    ? fakeResponse({ error: 'CUDA out of memory\nTraceback (most recent call last): ...' }, 500)
+    : retry.promise))
+  try {
+    await typePrompt(panel, '一只橘猫坐在窗台上')
+    buttonWithText(panel, '生成').props.onClick()
+    await settle(panel)
+
+    assert.equal(requests.length, 1)
+    const firstId = requests[0].clientId
+    const failed = taskNodeElement(panel)
+    assert.equal(failed.props['data-task-status'], 'failed')
+    assert.ok(fakeText(failed).includes('失败：CUDA out of memory'), 'the first line of the reason is shown')
+    assert.ok(!fakeText(failed).includes('Traceback'), 'the traceback stays out of the node')
+    assert.ok(fakeElementWithClass(panel.tree, 'dsh-forge-studio-alert') !== undefined, 'the form also reports the refusal')
+    const position = { left: failed.props.style.left, top: failed.props.style.top }
+
+    // §4.5 retry: a fresh clientId, the same snapshot, the same position.
+    buttonWithText(panel, '重试').props.onClick()
+    await settle(panel)
+    assert.equal(requests.length, 2)
+    const secondId = requests[1].clientId
+    assert.ok(isStudioClientId(secondId))
+    assert.notEqual(secondId, firstId, 'a retry is a new run, so a new clientId')
+    assert.equal(requests[1].prompt, '一只橘猫坐在窗台上', 'the params snapshot is re-sent verbatim')
+    const restarted = taskNodeElement(panel)
+    assert.equal(restarted.props['data-node-id'], secondId, 'the node is replaced, not duplicated')
+    assert.equal(restarted.props.style.left, position.left)
+    assert.equal(restarted.props.style.top, position.top)
+    assert.equal(nodesOfKind(panel, 'task').length, 1, 'a failed intent does not pile up')
+
+    retry.resolve(generateResult([resultImage('iimg2')]))
+    await settle(panel)
+    assert.equal(nodesOfKind(panel, 'task').length, 0)
+    assert.deepEqual(edgeKeys(panel), [], 'no reference was held, so no edge is drawn')
+  } finally {
+    network.restore()
+  }
+})
+
+test('C11: events without this clientId cannot touch a task node', async () => {
+  const pending = deferredResponse()
+  const { network, panel, requests } = await mountGeneration(() => pending.promise)
+  try {
+    await typePrompt(panel, '一只橘猫坐在窗台上')
+    buttonWithText(panel, '生成').props.onClick()
+    await settle(panel)
+    const source = network.open()
+
+    // A conversation-tool run carries no clientId: its frames are not this task's.
+    source.emit('message', { type: 'start', promptId: 'prompt-other' })
+    source.emit('message', { type: 'progress', promptId: 'prompt-other', value: 1, max: 4, percent: 25, label: '1/4' })
+    source.emit('message', { type: 'error', promptId: 'prompt-other', message: '别的任务失败' })
+    await settle(panel)
+    assert.equal(taskNodeElement(panel).props['data-task-status'], 'idle', 'clientId-less events are isolated')
+    assert.ok(!fakeText(taskNodeElement(panel)).includes('别的任务失败'))
+
+    // Another canvas task's frames are isolated by clientId too.
+    source.emit('message', { type: 'start', promptId: 'prompt-b', clientId: 'cothertask' })
+    await settle(panel)
+    assert.equal(taskNodeElement(panel).props['data-task-status'], 'idle')
+
+    // The global status bar still follows the unlinked run (pre-DD7 behaviour).
+    assert.equal(progressView(panel).phase, 'running')
+  } finally {
+    network.restore()
+  }
+})
+
+test('C11: an interrupt lands on the node, and edit-params refills the form to replace it', async () => {
+  const first = deferredResponse()
+  const second = deferredResponse()
+  const { network, panel, requests } = await mountGeneration((index) => (index === 0 ? first.promise : second.promise))
+  try {
+    await typePrompt(panel, '一只橘猫坐在窗台上')
+    buttonWithText(panel, '生成').props.onClick()
+    await settle(panel)
+    const clientId = requests[0].clientId
+    const source = network.open()
+    source.emit('message', { type: 'run', promptId: 'prompt-1', clientId })
+    source.emit('message', { type: 'start', promptId: 'prompt-1', clientId })
+    await settle(panel)
+    assert.equal(taskNodeElement(panel).props['data-task-status'], 'running')
+
+    source.emit('message', { type: 'interrupted', promptId: 'prompt-1', clientId })
+    await settle(panel)
+    // The run's own POST settles after the interrupt; a cancelled run's refusal
+    // must not relabel the node (the interrupt is the terminal truth).
+    first.resolve({ error: '已中断' }, 500)
+    await settle(panel)
+    const interrupted = taskNodeElement(panel)
+    assert.equal(interrupted.props['data-task-status'], 'interrupted')
+    assert.ok(fakeText(interrupted).includes('已中断'))
+    assert.ok(buttonWithText(panel, '编辑参数') !== undefined)
+
+    // §4.5 edit: the snapshot goes back into the form, and the node is marked
+    // for replacement rather than removed before the user has decided.
+    buttonWithText(panel, '编辑参数').props.onClick()
+    await settle(panel)
+    assert.equal(fakeElementWithClass(panel.tree, 'dsh-forge-textarea').props.value, '一只橘猫坐在窗台上')
+    assert.equal(nodesOfKind(panel, 'task').length, 1, 'the failed node stays until the next generate')
+
+    // The next generate replaces that node slot instead of adding a second one.
+    buttonWithText(panel, '生成').props.onClick()
+    await settle(panel)
+    assert.equal(requests.length, 2)
+    assert.notEqual(requests[1].clientId, clientId)
+    assert.equal(nodesOfKind(panel, 'task').length, 1)
+    assert.equal(taskNodeElement(panel).props['data-node-id'], requests[1].clientId)
+  } finally {
+    network.restore()
+  }
+})
+
+test('C11: a persisted failure is rebuilt from the board and its retry is wired', async () => {
+  // A v2 board with one picture and one terminal task entry (§4.6).
+  const board = {
+    id: 'cbrdtask',
+    name: '失败重试板',
+    camera: { x: 0, y: 0, zoom: 1 },
+    items: [
+      {
+        id: 'iaaa1',
+        path: 'C:/out/iaaa1.png',
+        markdownPath: 'C:/out/iaaa1.png',
+        width: 1024,
+        height: 1024,
+        bytes: 1024,
+        mediaType: 'image/png',
+        batchId: 'b1',
+        prompt: '一只橘猫',
+        ratio: '1:1',
+        steps: 8,
+        seed: 1,
+        mode: 'generate',
+        backend: 'studio',
+        parents: [],
+        x: 0,
+        y: 0,
+      },
+      {
+        id: 'ctaskrec1',
+        kind: 'task',
+        batchId: 'b0',
+        x: 600,
+        y: 0,
+        parents: ['iaaa1'],
+        task: {
+          status: 'failed',
+          error: '权重加载失败',
+          params: { prompt: '一只橘猫', ratio: '3:4', steps: 8, count: 2 },
+        },
+      },
+    ],
+  }
+  const pending = deferredResponse()
+  const { network, panel, requests } = await mountGeneration(() => pending.promise, board)
+  try {
+    // §4.6: a board task entry comes back as a retryable node; there is no live
+    // clientId, so the board item id stands in until a retry mints a fresh one.
+    assert.equal(nodesOfKind(panel, 'image').length, 1)
+    const rebuilt = taskNodeElement(panel)
+    assert.equal(rebuilt.props['data-task-status'], 'failed')
+    assert.equal(rebuilt.props.style.left, '600px')
+    assert.ok(fakeText(rebuilt).includes('权重加载失败'))
+    assert.ok(fakeText(rebuilt).includes('3:4 · 8 步 · 2 张'))
+
+    // The inline retry row is single-selection by design: select the node first.
+    rebuilt.props.onPointerDown(pointerEvent({ clientX: 610, clientY: 10 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    buttonWithText(panel, '重试').props.onClick()
+    await settle(panel)
+    assert.equal(requests.length, 1)
+    assert.ok(isStudioClientId(requests[0].clientId))
+    assert.equal(requests[0].ratio, '3:4')
+    assert.equal(requests[0].steps, 8)
+    assert.equal(requests[0].count, 2)
+    assert.equal(taskNodeElement(panel).props['data-node-id'], requests[0].clientId)
+    assert.equal(taskNodeElement(panel).props.style.left, '600px', 'a retry keeps the stored position')
+  } finally {
+    network.restore()
+  }
+})
+
+test('C11: count>1 keeps the first image in place and fans the rest out to the right', async () => {
+  const pending = deferredResponse()
+  const { network, panel, requests } = await mountGeneration(() => pending.promise)
+  try {
+    await typePrompt(panel, '两只橘猫')
+    // The second number input is the count; set it the way the form does.
+    const numbers = []
+    fakeVisit(panel.tree, (entry) => {
+      if (entry.type === 'input' && entry.props.type === 'number') numbers.push(entry)
+    })
+    numbers[1].props.onChange({ target: { value: '2' } })
+    await settle(panel)
+
+    buttonWithText(panel, '生成').props.onClick()
+    await settle(panel)
+    assert.equal(requests[0].count, 2)
+    const task = taskNodeElement(panel)
+    const left = task.props.style.left
+    const top = task.props.style.top
+
+    pending.resolve(generateResult([resultImage('i41'), resultImage('i42')]))
+    await settle(panel)
+    assert.equal(nodesOfKind(panel, 'task').length, 0)
+    const first = nodesOfKind(panel, 'image').find((entry) => entry.props['data-node-id'] === 'i41')
+    const second = nodesOfKind(panel, 'image').find((entry) => entry.props['data-node-id'] === 'i42')
+    assert.ok(first !== undefined && second !== undefined)
+    assert.equal(first.props.style.left, left, 'the first picture takes the task position')
+    assert.equal(first.props.style.top, top)
+    // The first picture is 200 wide at 1440, so the fan-out clears 1640 + 40.
+    assert.equal(second.props.style.left, '1680px', 'the extra picture lands to the right of every node')
+    assert.equal(nodeElements(panel).length, 5)
+  } finally {
     network.restore()
   }
 })

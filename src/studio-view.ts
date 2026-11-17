@@ -59,6 +59,8 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import {
+  CANVAS_NODE_HEIGHT,
+  CANVAS_NODE_WIDTH,
   buildEdges,
   clampZoom,
   edgePath,
@@ -113,9 +115,11 @@ import {
   STUDIO_MAX_REFERENCES,
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
+  firstLine,
   studioFileUrl,
   type BoardDetail,
   type BoardItem,
+  type BoardTaskParams,
   type BoardSummary,
   type StudioAsset,
   type StudioAssetsResponse,
@@ -139,26 +143,67 @@ interface HeldReference {
 }
 
 /**
- * One image on the canvas.
+ * One node on the canvas (§3.3).
  *
- * Nodes are not just results any more. The canvas is where a session is worked
- * on, so the node kinds are picture, generation task and layout draft — one
- * union in `docs/CANVAS-DESIGN.md` §3.3, of which this build still produces
- * picture nodes; the task and layout kinds arrive with their own commits.
+ * Nodes are not just results any more: the canvas is where a session is worked
+ * on, so a node is either a picture or a generation task. The layout kind is
+ * the third arm of §3.3 and arrives with C13; this build produces and persists
+ * the first two.
  *
  * `parents` is what makes the board graph-shaped: an edit made from another
  * result draws an edge back to it, so the lineage of a session stays readable.
  * Those edges record derivation, not parameters — this is deliberately not a
  * Comfy-style wiring graph, where an edge would mean "this output feeds that
- * input".
+ * input". A task node's parents are handed to the picture that replaces it
+ * (DD5), so the line survives the conversion.
  */
-interface CanvasNode {
+interface CanvasNodeBase {
+  /** Board item id for a picture; the clientId for a task node. */
   readonly id: string
-  readonly image: StudioImage
-  readonly batchId: string
   x: number
   y: number
   readonly parents: readonly string[]
+}
+
+/** A finished picture: the board item plus where it sits. */
+interface ImageCanvasNode extends CanvasNodeBase {
+  readonly kind: 'image'
+  readonly image: StudioImage
+  readonly batchId: string
+}
+
+/**
+ * §4.2's task states.
+ *
+ * `done` is deliberately brief: the SSE frame only moves the status, while the
+ * POST response is the conversion authority (see `startGeneration`). A failure
+ * or an interrupt stays on the canvas until the user retries or removes it.
+ */
+type TaskStatus = 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'interrupted'
+
+/** A generation in flight, or one that ended without a picture (§4.2, §4.5). */
+interface TaskCanvasNode extends CanvasNodeBase {
+  readonly kind: 'task'
+  /** `c` + base36, what the host echoes on every event of this run. */
+  readonly clientId: string
+  /** Request snapshot, so a retry needs no retyping (§4.5). */
+  readonly params: BoardTaskParams
+  status: TaskStatus
+  progress?: { readonly label?: string; readonly percent: number }
+  /** First line of whatever went wrong, for the node's caption. */
+  error?: string
+}
+
+type CanvasNode = ImageCanvasNode | TaskCanvasNode
+
+/** Narrowing helper: the render and lineage paths only read pictures' files. */
+function isImageNode(node: CanvasNode): node is ImageCanvasNode {
+  return node.kind === 'image'
+}
+
+/** Narrowing helper for the task reducer and the task node. */
+function isTaskNode(node: CanvasNode): node is TaskCanvasNode {
+  return node.kind === 'task'
 }
 
 /**
@@ -242,14 +287,21 @@ const DISTRIBUTE_LABELS: Record<DistributeAxis, string> = { x: '水平等距', y
 /**
  * World-space rectangle a node occupies.
  *
- * The width follows the picture's aspect ratio ({@link nodeDisplaySize}), so an
+ * A picture's width follows its aspect ratio ({@link nodeDisplaySize}), so an
  * edge anchors on the right edge of *this* node rather than a shared constant,
  * and `nextNodeSpot` clears the widest neighbour instead of the default box. The
  * height stays constant: caption and actions live below the picture area.
+ *
+ * A task node is the fixed default box (208×240, §3.2), which is why the landing
+ * grid needs no special case for it: it occupies exactly the space an unmeasured
+ * picture would. The layout node's own w/h arrive with C13.
  */
 function nodeRect(node: CanvasNode): Rect {
-  const size = nodeDisplaySize(node.image.width, node.image.height)
-  return { x: node.x, y: node.y, width: size.width, height: size.height }
+  if (isImageNode(node)) {
+    const size = nodeDisplaySize(node.image.width, node.image.height)
+    return { x: node.x, y: node.y, width: size.width, height: size.height }
+  }
+  return { x: node.x, y: node.y, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
 }
 
 /**
@@ -294,11 +346,41 @@ function fallbackSpot(index: number): Point {
   return { x: 40 + (index % 3) * 516, y: 40 + Math.floor(index / 3) * 276 }
 }
 
-/** Turn stored board items into canvas nodes, keeping the saved arrangement. */
+/**
+ * Turn stored board items into canvas nodes, keeping the saved arrangement.
+ *
+ * A task entry is a **terminal** failure/interrupt that was persisted (§4.6), so
+ * it comes back as a task node the user can retry; its clientId is gone with the
+ * run, and the board item id stands in for it until a retry mints a fresh one
+ * (§4.5). Layout entries are C13's kind and are filtered here so a v2 board that
+ * already has one stays readable by this build instead of crashing on an item
+ * that has no picture.
+ */
 function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
-  return items.map((item, index) => {
+  const nodes: CanvasNode[] = []
+  items.forEach((item, index) => {
     const spot = fallbackSpot(index)
-    return {
+    if (item.kind === 'layout') return
+    if (item.kind === 'task') {
+      const task = item.task
+      // The store's v2 validator drops a task entry without one, so this is
+      // belt-and-braces against a hand-edited file.
+      if (task === undefined) return
+      nodes.push({
+        kind: 'task',
+        id: item.id,
+        clientId: item.id,
+        x: item.x ?? spot.x,
+        y: item.y ?? spot.y,
+        parents: item.parents,
+        params: task.params,
+        status: task.status,
+        ...(task.error === undefined ? {} : { error: task.error }),
+      })
+      return
+    }
+    nodes.push({
+      kind: 'image',
       id: item.id,
       image: {
         id: item.id,
@@ -313,8 +395,9 @@ function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
       x: item.x ?? spot.x,
       y: item.y ?? spot.y,
       parents: item.parents,
-    }
+    })
   })
+  return nodes
 }
 
 /**
@@ -326,8 +409,11 @@ function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
  * request writes one size, one step count, one prompt).
  */
 function batchesFromBoard(items: readonly BoardItem[]): Batch[] {
+  // Only pictures form batches: a task node has no file and would otherwise
+  // become a phantom batch with empty dimensions.
+  const pictures = items.filter((item) => (item.kind ?? 'image') === 'image')
   const grouped = new Map<string, BoardItem[]>()
-  for (const item of items) {
+  for (const item of pictures) {
     const list = grouped.get(item.batchId)
     if (list === undefined) grouped.set(item.batchId, [item])
     else list.push(item)
@@ -589,6 +675,143 @@ function progressBridgeText(live: LiveProgress): string {
   return '实时进度连接中…'
 }
 
+/* -------------------------------------------------------------------------- */
+/* Task nodes (C11): the §4.2 state machine and its request snapshot           */
+/* -------------------------------------------------------------------------- */
+
+/** The badge copy each state prints. */
+const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+  idle: '准备提交',
+  queued: '排队中',
+  running: '正在生成',
+  done: '落图中',
+  failed: '生成失败',
+  interrupted: '已中断',
+}
+
+/**
+ * A fresh task id: `c` + base36, the same alphabet and length budget as
+ * `makeItemId` in `src/boards.ts`, and validated by `isStudioClientId` on the
+ * host. Three random chunks keep a collision as unlikely as a board item's.
+ */
+function makeClientId(): string {
+  const chunk = (): string => Math.random().toString(36).slice(2, 8)
+  return 'c' + (chunk() + chunk() + chunk()).slice(0, 18)
+}
+
+/** First line of the prompt, for a caption that must stay small. */
+function taskPromptLine(params: BoardTaskParams): string {
+  return firstLine(params.prompt, '（无提示词）')
+}
+
+/** What the request asked for, in one line (§3.2's parameter summary). */
+function taskParamsText(params: BoardTaskParams): string {
+  const parts: string[] = [params.ratio ?? '1:1']
+  if (params.steps !== undefined) parts.push(String(params.steps) + ' 步')
+  parts.push(String(params.count ?? 1) + ' 张')
+  const references = params.references?.length ?? 0
+  if (references > 0) parts.push(String(references) + ' 张参考')
+  return parts.join(' · ')
+}
+
+/** The state line under the progress bar. */
+function taskStatusText(task: TaskCanvasNode): string {
+  switch (task.status) {
+    case 'idle':
+      return '准备提交…'
+    case 'queued':
+      return '排队中…'
+    case 'running':
+      return task.progress?.label === undefined ? '正在生成…（等待第一步）' : '正在生成 · 第 ' + task.progress.label + ' 步'
+    case 'done':
+      return '生成完成，正在落图…'
+    case 'failed':
+      return '失败：' + (task.error ?? '未知错误')
+    case 'interrupted':
+      return '已中断'
+  }
+}
+
+/** Percent the task's bar paints; a finished node sits at 100. */
+function taskPercent(task: TaskCanvasNode): number {
+  if (task.status === 'done') return 100
+  return task.progress?.percent ?? 0
+}
+
+/** The clientId an event names, or `undefined` when the frame is not run-scoped. */
+function eventClientId(event: StudioProgressEvent): string | undefined {
+  switch (event.type) {
+    case 'run':
+      return event.clientId
+    case 'start':
+    case 'node':
+    case 'progress':
+    case 'done':
+    case 'error':
+    case 'interrupted':
+      return event.clientId
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Fold one SSE event into a task node (§4.2 reducer, beside
+ * `reduceProgressEvent`, which stays the global status bar's).
+ *
+ * Only events carrying **this** node's clientId apply, so a run started by the
+ * conversation tools — never registered, no clientId — cannot touch a canvas
+ * task. `queue` frames are global and deliberately ignored here: they must
+ * never push a started task back into "waiting" (the same rule the progress
+ * reducer states for its own phase).
+ *
+ * `done` moves the status only. **The POST response is the conversion
+ * authority** (C11's stop-condition plan): a response can overtake or trail the
+ * frame, so keying the replacement on the response means a late `done` cannot
+ * resurrect a node already converted, and an early one cannot convert before
+ * the image ids are known.
+ */
+function reduceTaskEvent(task: TaskCanvasNode, event: StudioProgressEvent): TaskCanvasNode {
+  if (eventClientId(event) !== task.clientId) return task
+  switch (event.type) {
+    case 'run':
+      return task.status === 'idle' || task.status === 'queued' ? { ...task, status: 'queued' } : task
+    case 'start':
+      return task.status === 'idle' || task.status === 'queued'
+        ? { ...task, status: 'running', progress: { percent: 0 }, error: undefined }
+        : task
+    case 'progress':
+      return task.status === 'idle' || task.status === 'queued' || task.status === 'running'
+        ? { ...task, status: 'running', progress: { label: event.label, percent: event.percent }, error: undefined }
+        : task
+    case 'done':
+      // A response that already failed the node, or an interrupt the user
+      // asked for, is the truth; a late frame must not overwrite it.
+      return task.status === 'failed' || task.status === 'interrupted'
+        ? task
+        : { ...task, status: 'done', progress: { ...(task.progress ?? {}), percent: 100 } }
+    case 'error':
+      return { ...task, status: 'failed', error: firstLine(event.message), progress: undefined }
+    case 'interrupted':
+      return { ...task, status: 'interrupted', error: '已中断', progress: undefined }
+    default:
+      return task
+  }
+}
+
+/** `reduceTaskEvent` over the whole board; the array identity is kept when idle. */
+function applyTaskEvent(nodes: CanvasNode[], event: StudioProgressEvent): CanvasNode[] {
+  let changed = false
+  const next = nodes.map((node) => {
+    if (!isTaskNode(node)) return node
+    const reduced = reduceTaskEvent(node, event)
+    if (reduced === node) return node
+    changed = true
+    return reduced
+  })
+  return changed ? next : nodes
+}
+
 /**
  * Render the workbench.
  *
@@ -669,6 +892,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const [assetsBusy, setAssetsBusy] = useState(false)
 
   const abortRef = useRef<AbortController | undefined>(undefined)
+  // One controller per in-flight task run, keyed by clientId: a retry is a
+  // separate run, and cancelling one task must not abort another (§4.2, §6.4).
+  const controllersRef = useRef<Map<string, AbortController>>(new Map())
+  // §4.5: "编辑参数重发" refills the form and marks the failed node; the next
+  // form generation replaces that node in place instead of adding a second one.
+  const pendingReplaceRef = useRef<{ readonly id: string } | undefined>(undefined)
   const referencesRef = useRef<HeldReference[]>([])
   referencesRef.current = references
   const nodesRef = useRef<CanvasNode[]>([])
@@ -777,7 +1006,17 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     const source = new EventSource(STUDIO_EVENTS_ROUTE)
     source.addEventListener('message', (event: { data?: unknown }) => {
       const parsed = parseProgressEvent(event.data)
-      if (parsed !== undefined) setLive((current) => reduceProgressEvent(current, parsed))
+      if (parsed === undefined) return
+      // Two reducers on purpose (§4.2): the global status bar follows any run,
+      // while a task node only follows its own clientId. `run` frames advance a
+      // node from idle to queued and are ignored by the global reducer's default
+      // branch, which is the pre-DD7 behaviour kept intact.
+      setLive((current) => reduceProgressEvent(current, parsed))
+      setNodes((current) => {
+        const next = applyTaskEvent(current, parsed)
+        if (next !== current) nodesRef.current = next
+        return next
+      })
     })
     source.addEventListener('error', () => {
       setLive((current) => ({ ...current, bridge: 'reconnecting' }))
@@ -802,7 +1041,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     const error = await postBoard({
       action: 'layout',
       board: id,
-      items: nodesRef.current.map((node) => ({ id: node.id, x: node.x, y: node.y })),
+      // Pictures only: a task node is session state and is deliberately never
+      // persisted while it runs (DD6); its terminal state is a different write
+      // (deferred by scope to C12's board route work — see the C11 report).
+      items: nodesRef.current
+        .filter(isImageNode)
+        .map((node) => ({ id: node.id, x: node.x, y: node.y })),
       camera: cameraRef.current,
     })
     if (error !== undefined) setBoardError(error)
@@ -998,7 +1242,269 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     }
   }, [prompt, references.length, ratio, promptStyle])
 
-  /** Run one generation with the form's current values. */
+  /**
+   * Write the node list everywhere it is read: React state *and* the refs.
+   *
+   * Defined ahead of the generation path because a task node is written the
+   * moment the request starts (§4.3), before any gesture or undo code runs.
+   */
+  const writeNodes = useCallback((next: CanvasNode[]) => {
+    // The ref is not a cache: gestures, undo and the save path all read it from
+    // callbacks that must see the change in the same tick (see `endGesture`).
+    nodesRef.current = next
+    setNodes(next)
+  }, [])
+
+  /* ------------------------------------------------------------------------ */
+  /* Generation (C11 §4.1–4.5): request ⇄ task node ⇄ result                   */
+  /* ------------------------------------------------------------------------ */
+
+  /** Show a node's rectangle, centring the camera only when it is off-screen. */
+  const revealRect = useCallback((x: number, y: number, width: number, height: number) => {
+    const element = canvasRef.current
+    if (element === null) return
+    const box = element.getBoundingClientRect()
+    setCamera((current) => {
+      const view = {
+        left: current.x,
+        top: current.y,
+        right: current.x + box.width / current.zoom,
+        bottom: current.y + box.height / current.zoom,
+      }
+      const centerX = x + width / 2
+      const centerY = y + height / 2
+      const inside = centerX > view.left && centerX < view.right && centerY > view.top && centerY < view.bottom
+      return inside
+        ? current
+        : { zoom: current.zoom, x: centerX - box.width / (2 * current.zoom), y: centerY - box.height / (2 * current.zoom) }
+    })
+  }, [])
+
+  /** The retry-wire references a task snapshot can still send (paths only, §4.6). */
+  const requestReferencesOf = useCallback((params: BoardTaskParams): StudioReferencePayload[] => {
+    const out: StudioReferencePayload[] = []
+    for (const entry of params.references ?? []) {
+      if (typeof entry.path !== "string" || entry.path.length === 0) continue
+      out.push({
+        path: entry.path,
+        mediaType: entry.mediaType ?? "image/png",
+        ...(entry.name === undefined ? {} : { name: entry.name }),
+      })
+    }
+    return out
+  }, [])
+
+  /** Record a run failure on its task node; the node stays for retry (§4.5). */
+  const failTask = useCallback((clientId: string, message: string, status: 'failed' | 'interrupted' = 'failed') => {
+    let changed = false
+    const next = nodesRef.current.map((node) => {
+      if (!isTaskNode(node) || node.clientId !== clientId) return node
+      // A user-requested interrupt is already the terminal truth; the POST for
+      // that run is expected to fail afterwards and must not relabel it.
+      if (node.status === 'interrupted' && status === 'failed') return node
+      changed = true
+      return { ...node, status, error: firstLine(message), progress: undefined }
+    })
+    if (changed) writeNodes(next)
+  }, [writeNodes])
+
+  /**
+   * DD5: the response replaces the task node with its pictures.
+   *
+   * The first image takes the task node's exact position (the user placed the
+   * task where the result should appear) and inherits its parents, so the
+   * lineage edge crosses the conversion. Extra images fan out to the right, as
+   * the old batch placement did. The task node id is a clientId the board never
+   * stored, so dropping it here is also the only correct bookkeeping.
+   */
+  const finishTask = useCallback((clientId: string, result: StudioGenerateResponse) => {
+    const taskNode = nodesRef.current.find((node): node is TaskCanvasNode => isTaskNode(node) && node.clientId === clientId)
+    if (taskNode === undefined) return
+    if (result.images.length === 0) {
+      failTask(clientId, '本次生成没有返回图片')
+      return
+    }
+    const batch: Batch = { id: String(result.elapsedMs) + '-' + String(Date.now()), response: result }
+    setBatches((current) => [batch, ...current].slice(0, 12))
+    setSelectedId(batch.id)
+    // A turbo request that degraded to the base weights is said out loud, in the
+    // same one-line note as the size/steps/seed: the pictures look fine either
+    // way, so without this the only clue is a slower click-to-image time.
+    setNote(
+      `${String(result.width)}×${String(result.height)} · ${String(result.steps)} 步 · seed ${String(result.seed)} · ${(result.elapsedMs / 1000).toFixed(1)} 秒` +
+        (result.turboFallback === true ? ' · 本次按 base 权重出图，turbo 权重未安装' : ''),
+    )
+    // A run can create its board (first draw after an empty library), so the
+    // header has to follow the host's answer rather than assume the one the
+    // form was opened on.
+    if (result.board !== undefined) {
+      setBoards((current) => upsertBoard(current, result.board as BoardSummary))
+      if (boardIdRef.current !== result.board.id) {
+        setBoardId(result.board.id)
+        setBoardName(result.board.name)
+        boardIdRef.current = result.board.id
+      }
+    }
+    const next = nodesRef.current.filter((node) => node.id !== taskNode.id)
+    const created: ImageCanvasNode[] = []
+    result.images.forEach((image: StudioImage, index: number) => {
+      const spot = index === 0 ? { x: taskNode.x, y: taskNode.y } : nextNodeSpot(next.map(nodeRect))
+      const node: ImageCanvasNode = {
+        kind: 'image',
+        // The board item id, not a client-side composite: the arrangement is
+        // stored per item, so a node has to carry the identity the host knows.
+        id: image.id,
+        image,
+        batchId: batch.id,
+        x: spot.x,
+        y: spot.y,
+        parents: taskNode.parents,
+      }
+      created.push(node)
+      next.push(node)
+    })
+    writeNodes(next)
+    scheduleLayout()
+    if (created[0] !== undefined) setSelection(new Set([created[0].id]))
+  }, [failTask, scheduleLayout, writeNodes])
+
+  /**
+   * §4.3 steps 1–2: mint the clientId, drop the task node where the result
+   * should land, make it visible, then submit the request carrying that id.
+   *
+   * All three entries converge here (§4.1): the form, a failed node's retry,
+   * and — once C13 lands — a layout node, which only needs this signature. A
+   * `replaceId` is the retry/edit path: the old node is swapped for the new one
+   * at the same position, so a failed intent does not pile nodes up (§4.5).
+   */
+  const startGeneration = useCallback(async (
+    params: BoardTaskParams,
+    options: {
+      readonly references?: readonly StudioReferencePayload[]
+      readonly parents?: readonly string[]
+      readonly replaceId?: string
+      /** Form-only: report a refusal to the form as well as to the node. */
+      readonly report?: (message: string) => void
+    } = {},
+  ): Promise<void> => {
+    const previous = options.replaceId === undefined
+      ? undefined
+      : nodesRef.current.find((node) => node.id === options.replaceId)
+    const clientId = makeClientId()
+    const spot = previous === undefined
+      ? nextNodeSpot(nodesRef.current.map(nodeRect))
+      : { x: previous.x, y: previous.y }
+    const taskNode: TaskCanvasNode = {
+      kind: 'task',
+      id: clientId,
+      clientId,
+      x: spot.x,
+      y: spot.y,
+      parents: options.parents ?? previous?.parents ?? [],
+      params,
+      status: 'idle',
+    }
+    const placed = previous === undefined
+      ? [...nodesRef.current, taskNode]
+      : nodesRef.current.map((node) => (node.id === previous.id ? taskNode : node))
+    writeNodes(placed)
+    setSelection(new Set([clientId]))
+    revealRect(taskNode.x, taskNode.y, CANVAS_NODE_WIDTH, CANVAS_NODE_HEIGHT)
+
+    const controller = new AbortController()
+    controllersRef.current.set(clientId, controller)
+    const fromForm = options.report !== undefined
+    if (fromForm) abortRef.current = controller
+    try {
+      const wireReferences = options.references ?? requestReferencesOf(params)
+      const response = await fetch(STUDIO_GENERATE_ROUTE, {
+        method: 'POST',
+        credentials: 'same-origin',
+        signal: controller.signal,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          prompt: params.prompt,
+          ratio: params.ratio ?? '1:1',
+          ...(params.steps === undefined ? {} : { steps: params.steps }),
+          count: params.count ?? 1,
+          ...(wireReferences.length === 0 ? {} : { references: wireReferences }),
+          ...(boardIdRef.current === undefined ? {} : { board: boardIdRef.current }),
+          clientId,
+        }),
+      })
+      const payload = await readJson(response)
+      if (payload === undefined || !Array.isArray(payload.images)) {
+        const message = typeof payload?.error === 'string'
+          ? payload.error
+          : '生成失败（HTTP ' + String(response.status) + '）'
+        failTask(clientId, message)
+        options.report?.(message)
+        return
+      }
+      finishTask(clientId, payload as unknown as StudioGenerateResponse)
+    } catch (cause) {
+      if (controller.signal.aborted) {
+        failTask(clientId, '已中断', 'interrupted')
+        return
+      }
+      const message = cause instanceof Error ? cause.message : String(cause)
+      failTask(clientId, message)
+      options.report?.(message)
+    } finally {
+      controllersRef.current.delete(clientId)
+      if (abortRef.current === controller) abortRef.current = undefined
+    }
+  }, [failTask, finishTask, requestReferencesOf, revealRect, writeNodes])
+
+  /** §4.5 retry: the same snapshot under a fresh clientId, in place. */
+  const retryTask = useCallback((id: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined || !isTaskNode(node)) return
+    void startGeneration(node.params, {
+      parents: node.parents,
+      replaceId: node.id,
+      report: (message) => { setError(message) },
+    })
+  }, [startGeneration])
+
+  /** §4.5 edit-and-resend: refill the form; the next generate replaces this node. */
+  const editTaskParams = useCallback((id: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined || !isTaskNode(node)) return
+    setPrompt(node.params.prompt)
+    setRatio(node.params.ratio ?? '1:1')
+    setSteps(node.params.steps === undefined ? '' : String(node.params.steps))
+    setCount(node.params.count ?? 1)
+    setReferences((current) => {
+      for (const reference of current) URL.revokeObjectURL(reference.previewUrl)
+      const restored: HeldReference[] = []
+      for (const [index, entry] of (node.params.references ?? []).entries()) {
+        if (typeof entry.path !== 'string' || entry.path.length === 0) continue
+        if (restored.length >= STUDIO_MAX_REFERENCES) break
+        restored.push({
+          id: node.id + '-param-' + String(index),
+          name: entry.name ?? (entry.path.split('/').pop() ?? '参考图'),
+          previewUrl: studioFileUrl(entry.path.replace(/\\/g, '/')),
+          payload: {
+            path: entry.path,
+            ...(entry.mediaType === undefined ? {} : { mediaType: entry.mediaType }),
+          },
+        })
+      }
+      return restored
+    })
+    pendingReplaceRef.current = { id: node.id }
+    setNote('参数已回填表单；改完再点「生成」会替换这个失败节点。')
+  }, [])
+
+  /** Abort one task node's own run (§4.2 lands it on `interrupted`). */
+  const cancelTask = useCallback((id: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined || !isTaskNode(node)) return
+    controllersRef.current.get(node.clientId)?.abort()
+  }, [])
+
+  /** Run one generation with the form's current values (§4.1 entry 1). */
   const generate = useCallback(async () => {
     const text = prompt.trim()
     if (text.length === 0) {
@@ -1008,118 +1514,38 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     setBusy(true)
     setError(undefined)
     setNote(undefined)
-    const controller = new AbortController()
-    abortRef.current = controller
+    const parsedSteps = steps.trim().length > 0 ? Number(steps) : undefined
+    const requested: NonNullable<BoardTaskParams['references']> = []
+    for (const entry of references) {
+      const path = entry.payload.path
+      if (typeof path !== 'string' || path.length === 0) continue
+      requested.push({ path, name: entry.name, mediaType: entry.payload.mediaType })
+    }
+    const params: BoardTaskParams = {
+      prompt: text,
+      ratio,
+      ...(parsedSteps === undefined || !Number.isFinite(parsedSteps) ? {} : { steps: parsedSteps }),
+      count,
+      ...(requested.length === 0 ? {} : { references: requested }),
+    }
+    // Canvas-held references are the edge's source, exactly as before (§4.5):
+    // the task node's parents become the picture's parents on conversion.
+    const parents = references
+      .map((entry) => entry.nodeId)
+      .filter((id): id is string => typeof id === 'string')
+    const replace = pendingReplaceRef.current
+    pendingReplaceRef.current = undefined
     try {
-      const parsedSteps = steps.trim().length > 0 ? Number(steps) : undefined
-      const response = await fetch(STUDIO_GENERATE_ROUTE, {
-        method: 'POST',
-        credentials: 'same-origin',
-        signal: controller.signal,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          prompt: text,
-          ratio,
-          ...(parsedSteps === undefined || !Number.isFinite(parsedSteps) ? {} : { steps: parsedSteps }),
-          count,
-          ...(references.length > 0 ? { references: references.map((entry) => entry.payload) } : {}),
-          ...(boardIdRef.current === undefined ? {} : { board: boardIdRef.current }),
-        }),
+      await startGeneration(params, {
+        references: references.map((entry) => entry.payload),
+        parents,
+        ...(replace === undefined ? {} : { replaceId: replace.id }),
+        report: (message) => { setError(message) },
       })
-      const payload = await readJson(response)
-      if (payload === undefined) {
-        setError('生成失败：响应不是有效的 JSON')
-        return
-      }
-      if (!Array.isArray(payload.images)) {
-        setError(typeof payload.error === 'string' ? payload.error : '生成失败')
-        return
-      }
-      const result = payload as unknown as StudioGenerateResponse
-      const batch: Batch = { id: `${String(result.elapsedMs)}-${String(Date.now())}`, response: result }
-      setBatches((current) => [batch, ...current].slice(0, 12))
-      setSelectedId(batch.id)
-      // A turbo request that degraded to the base weights is said out loud, in the
-      // same one-line note as the size/steps/seed: the pictures look fine either
-      // way, so without this the only clue is a slower click-to-image time.
-      setNote(
-        `${String(result.width)}×${String(result.height)} · ${String(result.steps)} 步 · seed ${String(result.seed)} · ${(result.elapsedMs / 1000).toFixed(1)} 秒` +
-          (result.turboFallback === true ? ' · 本次按 base 权重出图，turbo 权重未安装' : ''),
-      )
-
-      // A run can create its board (first draw after an empty library), so the
-      // header has to follow the host's answer rather than assume the one the
-      // form was opened on.
-      if (result.board !== undefined) {
-        setBoards((current) => upsertBoard(current, result.board as BoardSummary))
-        if (boardIdRef.current !== result.board.id) {
-          setBoardId(result.board.id)
-          setBoardName(result.board.name)
-          boardIdRef.current = result.board.id
-        }
-      }
-
-      // Place the fresh images on the canvas. Lineage is recorded from the
-      // references that came from the canvas itself, which is what draws the
-      // edge from "the image I edited" to "the image that came out".
-      const parents = references
-        .map((entry) => entry.nodeId)
-        .filter((id): id is string => typeof id === 'string')
-      const created: CanvasNode[] = []
-      const next = [...nodesRef.current]
-      result.images.forEach((image: StudioImage) => {
-        const spot = nextNodeSpot(next.map(nodeRect))
-        const node: CanvasNode = {
-          // The board item id, not a client-side composite: the arrangement is
-          // stored per item, so a node has to carry the identity the host knows.
-          id: image.id,
-          image,
-          batchId: batch.id,
-          x: spot.x,
-          y: spot.y,
-          parents,
-        }
-        created.push(node)
-        next.push(node)
-      })
-      setNodes(next)
-      nodesRef.current = next
-      scheduleLayout()
-      if (created[0] !== undefined) {
-        const first = created[0]
-        setSelection(new Set([first.id]))
-        // Only move the view when the new node would land off-screen: a user
-        // who zoomed out to survey the session should not be yanked back in.
-        // The margins are the node's own, not a shared constant: a 16:9 result
-        // is 356 wide and a 9:16 one 113, so a fixed box under- or over-counts
-        // how much of it is already visible.
-        const firstRect = nodeRect(first)
-        const element = canvasRef.current
-        if (element !== null) {
-          const box = element.getBoundingClientRect()
-          setCamera((current) => {
-            const visible = {
-              left: current.x,
-              top: current.y,
-              right: current.x + box.width / current.zoom,
-              bottom: current.y + box.height / current.zoom,
-            }
-            const inside = first.x < visible.right - firstRect.width * 0.4
-              && first.y < visible.bottom - firstRect.height * 0.4
-              && first.y > visible.top - firstRect.height * 0.6
-            return inside ? current : { zoom: current.zoom, x: first.x - 28, y: first.y - 28 }
-          })
-        }
-      }
-    } catch (cause) {
-      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setBusy(false)
-      if (abortRef.current === controller) abortRef.current = undefined
     }
-  }, [prompt, ratio, steps, count, references, scheduleLayout])
-
-  /** Put a finished image's prompt and settings back into the form. */
+  }, [count, prompt, ratio, references, startGeneration, steps])
   const reuse = useCallback((batch: Batch) => {
     setPrompt(batch.response.prompt)
     setRatio(batch.response.ratio)
@@ -1204,14 +1630,6 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   /* ------------------------------------------------------------------------ */
   /* Selection, movement and the undo stack (§6.1, §6.2, §6.5)                 */
   /* ------------------------------------------------------------------------ */
-
-  /** Write the node list everywhere it is read: React state *and* the refs. */
-  const writeNodes = useCallback((next: CanvasNode[]) => {
-    // The ref is not a cache: gestures, undo and the save path all read it from
-    // callbacks that must see the change in the same tick (see `endGesture`).
-    nodesRef.current = next
-    setNodes(next)
-  }, [])
 
   /** Set the coordinates of every node in `positions` in one write. */
   const applyPositions = useCallback((positions: ReadonlyMap<string, Point>) => {
@@ -1361,7 +1779,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     pushCommand(snapshotCommand('remove', before, after, (list) => { writeNodes([...list]) }))
     const board = boardIdRef.current
     if (board === undefined) return
-    for (const id of drop) {
+    // Only pictures are board items: removing a task node is a canvas-only
+    // action until its terminal state has a persistence path (C11 report).
+    for (const id of before.filter((node) => drop.has(node.id) && isImageNode(node)).map((node) => node.id)) {
       void postBoard({
         action: 'remove-item',
         board,
@@ -1574,6 +1994,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
 
   /** Hand a canvas result back to the form as an edit reference. */
   const referenceNode = useCallback((node: CanvasNode) => {
+    // Only a picture can be a reference; a task node has no file to point at.
+    if (!isImageNode(node)) return
     setReferences((current) => {
       if (current.length >= STUDIO_MAX_REFERENCES) return current
       if (hasReference(current, { nodeId: node.id })) return current
@@ -1741,9 +2163,20 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setSelection(new Set([target]))
       size = 1
     }
+    // The menu is generated from the node's own kind and, for a task, its state
+    // (§6.4: a running task offers 取消, a failed one offers 重试).
+    const hitNode = target === undefined ? undefined : nodesRef.current.find((node) => node.id === target)
+    const taskState = hitNode !== undefined && isTaskNode(hitNode)
+      ? (hitNode.status === 'idle' ? 'queued' as const : hitNode.status)
+      : undefined
     const items = contextMenuItems(target === undefined
       ? { kind: 'blank' }
-      : { kind: 'node', nodeKind: 'image', selectionSize: size })
+      : {
+        kind: 'node',
+        nodeKind: hitNode?.kind ?? 'image',
+        selectionSize: size,
+        ...(taskState === undefined ? {} : { taskState }),
+      })
     setMenu({
       x: event.clientX - box.left,
       y: event.clientY - box.top,
@@ -1777,11 +2210,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         if (!window.confirm('同时删除磁盘上的这个 PNG？此操作不可撤销。')) break
         removeNodes(menuIds(target), true)
         break
-      case 'reference': {
-        const node = nodesRef.current.find((entry) => entry.id === target)
-        if (node !== undefined) referenceNode(node)
-        break
-      }
+      case 'reference':
       case 'branch': {
         // "Branch from this image": prefill the form with it as the reference,
         // which is what starting an edit from a result means here (§6.4).
@@ -1791,13 +2220,22 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       }
       case 'original': {
         const node = nodesRef.current.find((entry) => entry.id === target)
-        if (node !== undefined) window.open(studioFileUrl(node.image.markdownPath), '_blank', 'noreferrer')
+        if (node !== undefined && isImageNode(node)) window.open(studioFileUrl(node.image.markdownPath), '_blank', 'noreferrer')
         break
       }
+      case 'task-retry':
+        if (target !== undefined) retryTask(target)
+        break
+      case 'task-edit':
+        if (target !== undefined) editTaskParams(target)
+        break
+      case 'task-cancel':
+        if (target !== undefined) cancelTask(target)
+        break
       default:
         break
     }
-  }, [fitView, menu?.target, menuIds, referenceNode, removeNodes])
+  }, [cancelTask, editTaskParams, fitView, menu?.target, menuIds, referenceNode, removeNodes, retryTask])
 
   /** Open the board an asset lives on and select it there. */
   const showOnCanvas = useCallback(async (asset: StudioAsset) => {
@@ -2509,71 +2947,123 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                 // "单选语义 = 选择集大小 1"), so a multi-selection shows none and
                 // uses the context menu instead.
                 const sole = singleSelection(selection) === node.id
-                // The width is inline because it belongs to this picture: the
-                // stylesheet cannot know the aspect ratio, and a fixed node
-                // width is exactly what turned a 16:9 result into a letterboxed
-                // thumbnail (D8). Height stays with the stylesheet — picture area
-                // plus caption/actions, which grow naturally when they wrap.
+                // The width is inline because it belongs to this node: a picture's
+                // width follows its aspect ratio (D8); a task node is the fixed
+                // default box. Height stays with the stylesheet in both cases.
+                const frame = {
+                  key: node.id,
+                  className: selected
+                    ? (node.kind === 'task' ? 'dsh-forge-node is-selected is-task' : 'dsh-forge-node is-selected')
+                    : (node.kind === 'task' ? 'dsh-forge-node is-task' : 'dsh-forge-node'),
+                  // What `onCanvasContextMenu` reads back to find the node it
+                  // can only identify through `closest`.
+                  'data-node-id': node.id,
+                  'data-node-kind': node.kind,
+                  style: {
+                    left: `${String(node.x)}px`,
+                    top: `${String(node.y)}px`,
+                    width: `${String(item.width)}px`,
+                  },
+                  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onNodePointerDown(event, node) },
+                }
+                // A picture node: the shipped render, unchanged.
+                if (!isTaskNode(node)) {
+                  return createElement(
+                    'div',
+                    frame,
+                    createElement('img', {
+                      src: studioFileUrl(node.image.markdownPath),
+                      alt: '生成结果',
+                      draggable: false,
+                      loading: 'lazy',
+                    }),
+                    createElement(
+                      'div',
+                      { className: 'dsh-forge-node-meta' },
+                      `${String(node.image.width)}×${String(node.image.height)} · ${String(Math.round(node.image.bytes / 1024))} KB`,
+                    ),
+                    sole
+                      ? createElement(
+                        'div',
+                        { className: 'dsh-forge-node-actions' },
+                        createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'dsh-forge-node-btn',
+                            title: '把这张图放进参考图，下一轮按它改',
+                            onClick: () => { referenceNode(node) },
+                          },
+                          '用作参考',
+                        ),
+                        createElement(
+                          'a',
+                          {
+                            className: 'dsh-forge-node-btn',
+                            href: studioFileUrl(node.image.markdownPath),
+                            target: '_blank',
+                            rel: 'noreferrer',
+                          },
+                          '原图',
+                        ),
+                        createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'dsh-forge-node-btn is-danger',
+                            title: '从画布移除（不会删文件）',
+                            onClick: () => { removeNode(node.id) },
+                          },
+                          '移除',
+                        ),
+                      )
+                      : null,
+                  )
+                }
+                // §4.2's task node: state, parameter summary, progress, and the
+                // retry/edit pair the failure state exists for (§4.5). The id the
+                // host validates is the clientId; it never reaches the board until
+                // the response replaces this node with pictures (DD5).
                 return createElement(
                   'div',
-                  {
-                    key: node.id,
-                    className: selected ? 'dsh-forge-node is-selected' : 'dsh-forge-node',
-                    // What `onCanvasContextMenu` reads back to find the node it
-                    // can only identify through `closest`.
-                    'data-node-id': node.id,
-                    style: {
-                      left: `${String(node.x)}px`,
-                      top: `${String(node.y)}px`,
-                      width: `${String(item.width)}px`,
-                    },
-                    onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onNodePointerDown(event, node) },
-                  },
-                  createElement('img', {
-                    src: studioFileUrl(node.image.markdownPath),
-                    alt: '生成结果',
-                    draggable: false,
-                    loading: 'lazy',
-                  }),
+                  { ...frame, 'data-task-status': node.status },
                   createElement(
                     'div',
-                    { className: 'dsh-forge-node-meta' },
-                    `${String(node.image.width)}×${String(node.image.height)} · ${String(Math.round(node.image.bytes / 1024))} KB`,
+                    { className: 'dsh-forge-task-head' },
+                    createElement(
+                      'span',
+                      { className: 'dsh-forge-task-badge', 'data-task-status': node.status },
+                      TASK_STATUS_LABELS[node.status],
+                    ),
+                    createElement('span', { className: 'dsh-forge-task-ratio' }, node.params.ratio ?? '1:1'),
                   ),
+                  createElement('div', { className: 'dsh-forge-task-prompt', title: node.params.prompt }, taskPromptLine(node.params)),
+                  createElement('div', { className: 'dsh-forge-task-meta' }, taskParamsText(node.params)),
+                  createElement(
+                    'div',
+                    {
+                      className: 'dsh-forge-task-bar',
+                      role: 'progressbar',
+                      'aria-valuenow': taskPercent(node),
+                      'aria-valuemin': 0,
+                      'aria-valuemax': 100,
+                    },
+                    createElement('i', { className: 'dsh-forge-task-fill', style: { width: `${String(taskPercent(node))}%` } }),
+                  ),
+                  createElement('div', { className: 'dsh-forge-task-status is-' + node.status }, taskStatusText(node)),
                   sole
                     ? createElement(
                       'div',
-                      { className: 'dsh-forge-node-actions' },
-                      createElement(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'dsh-forge-node-btn',
-                          title: '把这张图放进参考图，下一轮按它改',
-                          onClick: () => { referenceNode(node) },
-                        },
-                        '用作参考',
-                      ),
-                      createElement(
-                        'a',
-                        {
-                          className: 'dsh-forge-node-btn',
-                          href: studioFileUrl(node.image.markdownPath),
-                          target: '_blank',
-                          rel: 'noreferrer',
-                        },
-                        '原图',
-                      ),
-                      createElement(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'dsh-forge-node-btn is-danger',
-                          title: '从画布移除（不会删文件）',
-                          onClick: () => { removeNode(node.id) },
-                        },
-                        '移除',
-                      ),
+                      { className: 'dsh-forge-task-actions' },
+                      node.status === 'failed' || node.status === 'interrupted'
+                        ? [
+                          createElement('button', { key: 'retry', type: 'button', className: 'dsh-forge-node-btn', title: '用相同的参数重新提交', onClick: () => { retryTask(node.id) } }, '重试'),
+                          createElement('button', { key: 'edit', type: 'button', className: 'dsh-forge-node-btn', title: '把参数回填表单，改完再生成', onClick: () => { editTaskParams(node.id) } }, '编辑参数'),
+                        ]
+                        : node.status === 'idle' || node.status === 'queued' || node.status === 'running'
+                          ? [createElement('button', { key: 'cancel', type: 'button', className: 'dsh-forge-node-btn', title: '中断这次生成', onClick: () => { cancelTask(node.id) } }, '取消')]
+                          : [],
+                      createElement('button', { key: 'remove', type: 'button', className: 'dsh-forge-node-btn is-danger', title: '从画布移除（不会删文件）', onClick: () => { removeNode(node.id) } }, '移除'),
                     )
                     : null,
                 )

@@ -228,6 +228,15 @@ test('an entry with an unknown size falls back to the plain node box', () => {
   }
 })
 
+test('a task node is the plain default box, so the landing grid needs no special case', () => {
+  // C11 §3.2: a task node is fixed 208×240 — deliberately the same box that
+  // `nodeDisplaySize` falls back to for an unmeasured picture. That is why
+  // `nextNodeSpot` and the edge anchors clear it without knowing its kind.
+  assert.equal(CANVAS_NODE_WIDTH, 208)
+  assert.equal(CANVAS_NODE_HEIGHT, 240)
+  assert.deepEqual(nodeDisplaySize(0, 0), { width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT })
+})
+
 test('the picture area plus the caption chrome is the node height', () => {
   assert.equal(IMAGE_AREA_HEIGHT, 200, 'the picture keeps the height it has always had')
   assert.equal(CANVAS_NODE_HEIGHT - IMAGE_AREA_HEIGHT, 40, 'meta + actions row')

@@ -100,6 +100,25 @@ export const STUDIO_CSS = `
 .dsh-forge-node-btn{appearance:none;font:inherit;font-size:10.5px;padding:3px 7px;border-radius:5px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;cursor:pointer;text-decoration:none;line-height:1.5;white-space:nowrap}
 .dsh-forge-node-btn:hover{background:rgba(127,127,127,.13);border-color:rgba(127,127,127,.5)}
 .dsh-forge-node-btn.is-danger:hover{color:#dc2626;border-color:rgba(220,38,38,.5);background:rgba(220,38,38,.08)}
+/* C11 §4.2: the task node. A picture node is an <img> plus a caption; a task
+   node is a status card, so it needs its own rhythm: badge row, prompt, one
+   line of parameters, progress, state copy, actions. Fixed 208×240 (§3.2),
+   so the text is clamped instead of the box growing. */
+.dsh-forge-node.is-task{display:flex;flex-direction:column;gap:0;background:rgba(127,127,127,.06);cursor:grab}
+.dsh-forge-task-head{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:7px 8px 4px;font-size:10.5px}
+.dsh-forge-task-badge{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;border-radius:999px;border:1px solid rgba(127,127,127,.35);opacity:.85;font-weight:600;white-space:nowrap}
+.dsh-forge-task-badge[data-task-status="failed"]{color:#dc2626;border-color:rgba(220,38,38,.45);background:rgba(220,38,38,.07)}
+.dsh-forge-task-badge[data-task-status="interrupted"]{color:#b45309;border-color:rgba(180,83,9,.45);background:rgba(180,83,9,.07)}
+.dsh-forge-task-badge[data-task-status="running"],.dsh-forge-task-badge[data-task-status="queued"]{color:#3b82f6;border-color:rgba(59,130,246,.45);background:rgba(59,130,246,.08)}
+.dsh-forge-task-ratio{opacity:.55;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsh-forge-task-prompt{padding:0 8px;font-size:11px;line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.dsh-forge-task-meta{padding:3px 8px 0;font-size:10px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.dsh-forge-task-bar{margin:6px 8px 0;height:4px;border-radius:2px;background:rgba(127,127,127,.22);overflow:hidden}
+.dsh-forge-task-fill{display:block;height:100%;border-radius:2px;background:currentColor;color:#3b82f6;transition:width .18s}
+.dsh-forge-task-status{padding:5px 8px 0;font-size:10.5px;line-height:1.45;opacity:.8;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.dsh-forge-task-status.is-failed{color:#dc2626;opacity:1}
+.dsh-forge-task-status.is-interrupted{color:#b45309;opacity:1}
+.dsh-forge-task-actions{display:flex;gap:4px;padding:6px 6px 6px;flex-wrap:wrap;margin-top:auto}
 .dsh-forge-canvas-hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;margin:0;padding:0 28px;text-align:center;font-size:12.5px;line-height:1.7;opacity:.45;pointer-events:none}
 .dsh-forge-canvas-foot{position:absolute;left:0;right:0;bottom:0;padding:6px 10px;font-size:10.5px;opacity:.55;background:linear-gradient(transparent,rgba(127,127,127,.14));pointer-events:none;text-align:center}
 .dsh-forge-marquee{position:absolute;z-index:3;pointer-events:none;border:1px solid rgba(59,130,246,.85);background:rgba(59,130,246,.12);border-radius:2px}
