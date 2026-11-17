@@ -98,8 +98,8 @@ Edit：
 
 配置 `comfyModel` 决定跑哪一档（默认 `base`）：
 
-- `turbo`：8 步出图，同一画质下比 base 快约 2.7×。**日常默认建议 turbo**。
-- `base`：25 步。**写实人像、画面里要出现中文文字、古典/绘画性构图**这三类切 base——turbo 在这些题材上掉细节。
+- `turbo`：8 步出图，比 base（40 步）快得多（25 步基准时实测约 2.7×）。**日常默认建议 turbo**。
+- `base`：40 步（官方推荐 40–50；≈1.6× 25 步耗时）。**写实人像、画面里要出现中文文字、古典/绘画性构图**这三类切 base——turbo 在这些题材上掉细节。
 - `comfyModel: "turbo"` 是**请求不是保证**：`/object_info` 里没有 turbo unet 时会自动回落 base，
   并在结果 `comfyui.turbo_fallback` 里说明。别据此向用户承诺速度。
 

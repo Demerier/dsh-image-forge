@@ -12,35 +12,41 @@
 | `comfyEndpoint` | 空 | ComfyUI 地址，如 `http://127.0.0.1:8188`；**空 = 自动探测 `comfyPorts`**。非回环地址会被拒绝（本后端只与本机通信） |
 | `comfyPorts` | `8000,8188,8189,8190,8191,8192` | `comfyEndpoint` 为空时依次尝试的端口（桌面版常见 8000/8188，便携版 8188） |
 | `comfyModelsDir` | **探测**：候选目录里第一个存在的 | ComfyUI 的 `models` 根目录，**只用于报错里写清「文件该放到哪」**；探测不到就留空，错误只说相对路径 |
-| `comfyModel` | `qwen21-base` | 三个规范值：`qwen21-base`（Qwen 25 步，官方全量）/ `qwen21-turbo`（8 步蒸馏，缺权重自动回落 base）/ `moss-sft`（MOSS-Image 文生图，缺权重**报错**，不回落）。旧值 `base` / `turbo` 仍被接受并映射到前两个 |
+| `comfyModel` | `qwen21-base` | 三个规范值：`qwen21-base`（Qwen 40 步，官方全量）/ `qwen21-turbo`（8 步蒸馏，缺权重自动回落 base）/ `moss-sft`（MOSS-Image 文生图，缺权重**报错**，不回落）。旧值 `base` / `turbo` 仍被接受并映射到前两个 |
 | `mossSampling` | `comfy` | MOSS 的采样档位：`comfy`（ComfyUI 模板口径，25 步 / CFG 2.5 / `er_sde`）/ `official`（OpenMOSS 卡片，50 步 / CFG 3 / `euler`）。**只对 `moss-sft` 生效**——Qwen 两个 profile 没有档位，读到它也不改变任何采样数值 |
 | `turboSteps` | 空 | turbo 专用步数；**空 = 8**。它**不**继承 `defaultSteps`（把 25 递给蒸馏版会让画面变差） |
-| `defaultSteps` | `25` | **默认采样步数**。没有单独指定时用它。25 = 官方 ComfyUI 2.1 模板口径 |
+| `defaultSteps` | `40` | **Qwen base 的默认采样步数**。没有单独指定时用它；40 = 官方模型卡/教程推荐区间（40–50）的起点，官方模板的 25 只是起步值。MOSS 的步数由采样档位决定，不走这个字段 |
 | `comfyuiSteps` | 空 | ComfyUI 专用步数（只对 base 那一支生效）；**空 = 用 `defaultSteps`** |
 | `outputDir` | `~/Pictures/dsh-image-forge` | 图片落盘目录 |
 | `timeoutMs` | `180000` | 单次调用预算（ComfyUI 首次冷加载模型很慢，可调到 `900000`） |
 
-**步数解析优先级**（两套，互不越界）：
+**步数解析优先级**（三条，互不越界）：
 
 ```text
-base :  调用方显式 steps  >  comfyuiSteps  >  档位自带步数（`mossSampling` = official 时 50）  >  defaultSteps
-turbo:  调用方显式 steps  >  turboSteps    >  8
+Qwen base :  调用方显式 steps  >  comfyuiSteps  >  defaultSteps（默认 40）
+turbo     :  调用方显式 steps  >  turboSteps    >  8
+MOSS      :  调用方显式 steps  >  comfyuiSteps  >  采样档位自带（comfy 25 / official 50）
 ```
 
-第三级只在「该 profile 发布了档位、且选中的不是它自己的默认档」时出现：MOSS 的默认档 `comfy`
-仍由 `defaultSteps` 决定（25 与模板一致），`official` 档自带 50；Qwen 两个 profile 没有档位表，
-这一级永不参与，所以它们的采样数值逐字不变。Agent 工具与 Studio 走的是**同一条**链
-（`resolveSteps` / `resolveStudioSteps`），两条通路不会给出不同的步数。
+`defaultSteps` 是 **Qwen base 的默认**；MOSS 的步数是模型家族属性（官方模板口径 25、OpenMOSS 卡片
+口径 50），由 `mossSampling` 直接给出，不会被 `defaultSteps` 带着走——想改 MOSS 的步数用
+`comfyuiSteps` 或换档位。Qwen 两个 profile 没有档位表，所以 `comfyuiSteps` → `defaultSteps`
+这条链对它们逐字不变。Agent 工具与 Studio 走的是**同一条**链（`resolveSteps` /
+`resolveStudioSteps`），两条通路不会给出不同的步数。
 
 结果里恒带 `steps_used`（实际步数）与 `steps_source`（`explicit` / `backend` / `default`），
 所以「为什么这张不一样」可以直接从返回值回答。档位自带的值报 `default`（它是模型家族自己的
 工作点，不是你覆盖的、也不是共享的 ComfyUI 覆盖）。解析发生在**每次派发时**，
 设置页改完步数、权重档、档位、端口，下一次调用立即生效（工具在每次调用时重新读取配置）。
-turbo 之所以不落回 `defaultSteps`：蒸馏按 8 步调，25 步在它身上是「更贵且更差」，不是「更精细」。
+turbo 之所以不落回 `defaultSteps`：蒸馏按 8 步调，把 Qwen base 的默认步数递给它只会「更贵且更差」，不是「更精细」。
 
-**「更大不等于更好」的实测**：同提示词、同 seed 下 25 → 50 步，客观指标反而**变差**——
-lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = 没有更多细节），用户目视也说 25 步更好。
-所以默认值就是 25，`defaultSteps` **没有被锁死**，仍可自由配置。**要更多细节就把画布提上去，不是把步数堆上去。**
+**为什么默认是 40 步**：官方 GitHub 模型卡推荐 `num_inference_steps: 40`，官方教程描述 25→40 的收益是
+细节区「fizzle」减少、手指这类固执细节约 30 步内收敛；代价是耗时近似线性，40 步 ≈ **1.6 × 25 步**
+（本机 8 GB 卡 25 步 45–55 s/张，按官方口径外推 40 步约 70–90 s，未重新实测）。
+
+**但不是越多越好**：同提示词、同 seed 下 25 → 50 步，本机旧对照的客观指标反而**变差**——
+lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = 没有更多细节）。40 是官方推荐的
+起点，`defaultSteps` **没有被锁死**，觉得慢或够用可以调回 25。**要更多细节就把画布提上去，不是无脑堆步数。**
 
 ## 设置页（DSH Web GUI）
 

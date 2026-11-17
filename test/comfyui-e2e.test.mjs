@@ -574,7 +574,7 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
     assert.equal(base.model, 'qwen_image_2.1_int8_convrot.safetensors')
     assert.equal(base.comfyui.comfyModel, 'base')
     assert.equal(base.comfyui.profile, 'qwen21-base')
-    assert.equal(base.steps_used, 25)
+    assert.equal(base.steps_used, 40)
 
     // Asking for turbo on a base-only install still produces an image, and says why.
     const fallbackTools = register({ comfyEndpoint: fallbackComfy.endpoint, comfyModel: 'turbo', outputDir, timeoutMs: 30_000 })
@@ -887,9 +887,9 @@ test('a MOSS register selected while a Qwen profile runs changes nothing on the 
     assert.deepEqual(withRegister, baseline)
     assert.equal(withRegister['6'].inputs.cfg, 1)
     assert.equal(withRegister['6'].inputs.sampler_name, 'euler')
-    assert.equal(withRegister['6'].inputs.steps, 25, 'the shared default, not the register 50')
-    assert.equal(before.steps_used, 25)
-    assert.equal(after.steps_used, 25)
+    assert.equal(withRegister['6'].inputs.steps, 40, 'the shared default, not the register 50')
+    assert.equal(before.steps_used, 40)
+    assert.equal(after.steps_used, 40)
   } finally {
     await comfy.close()
     rmSync(outputDir, { recursive: true, force: true })

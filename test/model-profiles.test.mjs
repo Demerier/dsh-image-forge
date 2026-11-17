@@ -195,7 +195,7 @@ test('every profile declares its own latent node, clip type, sampler and filenam
       latent: { classType: 'EmptyLatentImage', multiple: 32 },
       clipTypes: ['qwen_image'],
       sampler: { node: 'KSampler', name: 'euler', scheduler: 'simple', cfg: 1 },
-      steps: { default: 25 },
+      steps: { default: 40 },
       negativePrompt: '',
       filenamePrefix: 'dsh-image-forge',
       edit: true,
@@ -372,9 +372,9 @@ test('MOSS publishes two sampling registers; the Qwen profiles ignore the settin
     assert.equal(fallback.steps.default, 25)
   }
 
-  // Only a *non-default* register brings its own step count; the default one defers
-  // to the shared `defaultSteps`, exactly as it did before registers existed.
-  assert.equal(presetSteps(moss, 'comfy'), undefined)
+  // A published register owns its step count, the default one included: MOSS's
+  // counts are model properties, so the Qwen-tuned `defaultSteps` never moves them.
+  assert.equal(presetSteps(moss, 'comfy'), 25)
   assert.equal(presetSteps(moss, 'official'), 50)
   assert.equal(presetSteps(moss, undefined), undefined)
   assert.equal(presetSteps(moss, 'karras'), undefined)
@@ -517,17 +517,21 @@ test('step resolution: explicit > comfyuiSteps > register > defaultSteps, and tu
     ...overrides,
   })
 
-  // The default register is inert: the shared `defaultSteps` decides, as before registers existed.
+  // A published register owns the count: `defaultSteps` is the Qwen base default and
+  // must not drag MOSS off its template's 25.
   assert.deepEqual(resolveSteps(undefined, settingsFor()), { steps: 25, source: 'default' })
-  assert.deepEqual(resolveSteps(undefined, settingsFor({ defaultSteps: 40 })), { steps: 40, source: 'default' })
-  // A non-default register brings its own working point (official: 50, not 25).
+  assert.deepEqual(resolveSteps(undefined, settingsFor({ defaultSteps: 40 })), { steps: 25, source: 'default' })
+  // The other register brings its own working point (official: 50, not 25).
   console.log('MOSS official steps:', JSON.stringify(resolveSteps(undefined, settingsFor({ mossSampling: 'official' }))))
   assert.deepEqual(resolveSteps(undefined, settingsFor({ defaultSteps: 40, mossSampling: 'official' })), { steps: 50, source: 'default' })
   // ...but the caller's explicit count and the ComfyUI override still outrank it.
   assert.deepEqual(resolveSteps(12, settingsFor({ mossSampling: 'official' })), { steps: 12, source: 'explicit' })
   assert.deepEqual(resolveSteps(undefined, settingsFor({ mossSampling: 'official', comfyuiSteps: 30 })), { steps: 30, source: 'backend' })
-  // An unset or unknown register falls back to `defaultSteps`.
-  assert.deepEqual(resolveSteps(undefined, settingsFor({ mossSampling: undefined })), { steps: 25, source: 'default' })
+  // An unset or unknown register falls back to `defaultSteps` (the Qwen base default).
+  assert.deepEqual(
+    resolveSteps(undefined, settingsFor({ mossSampling: undefined, defaultSteps: 40 })),
+    { steps: 40, source: 'default' },
+  )
 
   // A Qwen profile never sees the register: the setting only reaches families that publish one.
   assert.deepEqual(

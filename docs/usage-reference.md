@@ -36,6 +36,11 @@ qwen_image_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
 真不够是 ComfyUI 回报的 CUDA OOM，缩 `width`/`height` 是唯一可靠的减法。
 要显式像素就用 `width`/`height`（必须 32 的倍数，否则报错并给出最近的合法值）——**显式值永远优先**。
 
+**采样步数**：Qwen base 默认 **40 步**（官方 GitHub 卡片推荐 40–50，模板的 25 只是起步值；40 步耗时 ≈ 1.6× 25 步），
+解析链是「显式 `steps` > `comfyuiSteps` > `defaultSteps`」；`turbo` 走蒸馏档（8 步，`turboSteps` 可覆盖）；
+`moss-sft` 的步数由 `mossSampling` 档位决定（comfy 25 / official 50），不受 `defaultSteps` 影响。
+结果里恒带 `steps_used` 与 `steps_source`，可以直接回答「这张为什么和上一张不一样」。
+
 落盘命名：`<outputDir>/<prefix>_<W>x<H>_<n>.png`，`prefix` 默认 `qwen`，可用 `preset` 覆盖；
 编号从 1 起且**跳过已占用的名字**，所以重复调用不会覆盖旧图。
 

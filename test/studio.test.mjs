@@ -768,13 +768,12 @@ test('the sampling register never moves either Qwen profile', () => {
   }
 })
 
-test('only a non-default register contributes a step count', () => {
+test('a published register owns its step count, the default one included', () => {
   const moss = MODEL_PROFILES['moss-sft']
-  // The register the profile's own `steps` describes keeps deferring to the
-  // shared chain, exactly as it did before this table existed.
-  assert.equal(presetSteps(moss, 'comfy'), undefined)
+  // MOSS's counts are model properties, so the Qwen-tuned shared `defaultSteps`
+  // never moves MOSS off its template's 25 — the register always answers.
+  assert.equal(presetSteps(moss, 'comfy'), 25)
   assert.equal(presetSteps(moss, undefined), undefined)
-  // Any other register brings its own working point (MOSS official: 50, not 25).
   assert.equal(presetSteps(moss, 'official'), 50)
   assert.equal(presetSteps(moss, 'karras'), undefined)
 })
@@ -792,14 +791,14 @@ test('the Studio step chain honours the register and still lets comfyuiSteps win
   // An explicit request wins over everything, inside the shared clamp.
   assert.equal(resolveStudioSteps(official, 12), 12)
   assert.equal(resolveStudioSteps(official, 10_000), 200)
-  // The default register leaves `defaultSteps` in charge, so a user who raised it
-  // sees no change until they pick the official one.
+  // The comfy register owns 25 even when `defaultSteps` (Qwen's default) was raised:
+  // MOSS never inherits a step count tuned for the other family.
   assert.equal(
     resolveStudioSteps(
       configuredSettings('moss-sft', { mossSampling: 'comfy', comfyuiSteps: undefined, defaultSteps: 40 }),
       undefined,
     ),
-    40,
+    25,
   )
   // And neither Qwen profile is affected by the setting at all.
   assert.equal(

@@ -139,7 +139,7 @@ export const Config = Schema.object({
   // override resolves to `undefined` and the resolver falls back to the family
   // default. They are still declared keys: `schemaDefaults` keeps every key, so
   // the settings page's field-coverage guard sees them.
-  defaultSteps: Schema.number().default(25).volatile(),
+  defaultSteps: Schema.number().default(40).volatile(),
   comfyuiSteps: Schema.number().volatile(),
   // The accepted set is the canonical profile ids **plus** the two legacy
   // values: the union is what validates a profile patch, so dropping `base` /

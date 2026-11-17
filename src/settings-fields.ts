@@ -140,7 +140,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   {
     id: 'steps',
     label: '步数（画质与耗时）',
-    hint: 'base 25 步；turbo 蒸馏版 8 步。',
+    hint: 'base 40 步；turbo 蒸馏版 8 步。',
   },
   {
     id: 'comfyui',
@@ -160,7 +160,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'defaultSteps',
     group: 'steps',
     label: '默认步数',
-    hint: 'base 的默认：25，官方模板口径。',
+    hint: 'base 的默认：40，官方推荐 40–50。',
     kind: 'number',
     min: 1,
     max: 200,
@@ -184,7 +184,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     hint: 'turbo 8 步 2.7×；缺权重退回 base；moss 缺报错。',
     kind: 'enum',
     choices: [
-      { value: 'qwen21-base', label: 'qwen21-base（Qwen 25 步）' },
+      { value: 'qwen21-base', label: 'qwen21-base（Qwen 40 步）' },
       { value: 'qwen21-turbo', label: 'qwen21-turbo（8 步蒸馏）' },
       { value: 'moss-sft', label: 'moss-sft（MOSS-Image 文生图）' },
     ],

@@ -501,9 +501,11 @@ export interface ModelProfile {
   /**
    * The register the profile's own `sampler` / `steps` fields already describe.
    *
-   * That one is the family default, so its step count defers to the shared
-   * `defaultSteps` exactly as before this table existed; a *different* register
-   * brings its own count (see {@link presetSteps}).
+   * It stays meaningful in two places: `resolveSampling` falls back to that pair
+   * for an unknown value, and the default register reports this pair's step count.
+   * The shared `defaultSteps` is the fallback for families **without** a register
+   * table (both Qwen profiles), never for a registered one — see
+   * {@link presetSteps}.
    */
   readonly defaultPreset?: string
   /** Negative prompt this family recommends. */
@@ -632,7 +634,7 @@ const MOSS_SAMPLING: Readonly<Record<MossSamplingPreset, SamplingPreset>> = {
 export const MODEL_PROFILES: Readonly<Record<ComfyModelId, ModelProfile>> = {
   'qwen21-base': {
     id: 'qwen21-base',
-    label: 'Qwen-Image 2.1（base，25 步）',
+    label: 'Qwen-Image 2.1（base，40 步）',
     family: 'qwen-image-2.1',
     variant: 'base',
     legacyIds: ['base'],
@@ -641,7 +643,9 @@ export const MODEL_PROFILES: Readonly<Record<ComfyModelId, ModelProfile>> = {
     clipType: { prefer: ['qwen_image'], fallback: /qwen/i },
     latent: { classType: 'EmptyLatentImage', multiple: 32 },
     sampler: { node: 'KSampler', name: 'euler', scheduler: 'simple', cfg: 1 },
-    steps: { default: 25 },
+    // The official GitHub card recommends 40 (docs/qwen21-optimization.md §四-2);
+    // the ComfyUI template's 25 is a starting point, not the target.
+    steps: { default: 40 },
     negativePrompt: '',
     filenamePrefix: 'dsh-image-forge',
     textToImage: QWEN_IMAGE_WORKFLOW,
@@ -676,8 +680,9 @@ export const MODEL_PROFILES: Readonly<Record<ComfyModelId, ModelProfile>> = {
     latent: { classType: 'EmptyFlux2LatentImage', multiple: MOSS_LATENT_MULTIPLE },
     // 25 steps / CFG 2.5 / er_sde / simple is what the official ComfyUI template
     // and the verified sample both run, so that register *is* this profile's own
-    // `sampler` / `steps` (and `defaultPreset`), which keeps the shipped
-    // behaviour byte-identical. The OpenMOSS register (50 / 3.0 / euler) is the
+    // `sampler` / `steps` (and `defaultPreset`). The register also owns the step
+    // count: the shared `defaultSteps` is tuned for Qwen base and must never drag
+    // MOSS off its template's 25. The OpenMOSS register (50 / 3.0 / euler) is the
     // other entry of the table; select it with `mossSampling: 'official'`.
     sampler: MOSS_SAMPLING.comfy.sampler,
     steps: MOSS_SAMPLING.comfy.steps,
@@ -766,13 +771,18 @@ export function resolveSampling(
 }
 
 /**
- * The step count a *non-default* register contributes.
+ * The step count a published sampling register contributes.
  *
- * The register a profile's own `steps` already describes (`defaultPreset`) keeps
- * deferring to the shared `defaultSteps`, exactly as it did before registers
- * existed; any other register brings its own count, because its whole point is a
- * different working point (MOSS official: 50, not 25). `undefined` means "no
- * opinion" — a Qwen profile, an unknown value, or the default register.
+ * A family that publishes registers owns its working points: the selected
+ * register's count outranks the shared `defaultSteps` (MOSS comfy: 25, official:
+ * 50). That is deliberate — MOSS's counts are model properties, so raising
+ * `defaultSteps` for the Qwen base path must not silently move MOSS off its
+ * template's 25. The default register reports the profile's own `steps.default`
+ * (the pair the profile's `sampler` / `steps` mirror).
+ *
+ * `undefined` means "no opinion" — a Qwen profile (no table) or an unknown value.
+ * The shared `defaultSteps` stands for those, exactly as it did before registers
+ * existed.
  *
  * @param profile - the profile that will run.
  * @param preset - the configured register name, if any.
@@ -780,8 +790,9 @@ export function resolveSampling(
  */
 export function presetSteps(profile: ModelProfile, preset: string | undefined): number | undefined {
   if (profile.samplingPresets === undefined || typeof preset !== 'string') return undefined
-  if (preset === profile.defaultPreset) return undefined
-  return profile.samplingPresets[preset]?.steps.default
+  const chosen = profile.samplingPresets[preset]
+  if (chosen === undefined) return undefined
+  return preset === profile.defaultPreset ? profile.steps.default : chosen.steps.default
 }
 
 /**

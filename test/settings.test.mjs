@@ -548,7 +548,7 @@ test('the real schema defaults survive a resolve round trip as plain data', () =
   console.log('resolved value types:', JSON.stringify([...kinds]))
   assert.deepEqual([...kinds].sort(), ['number', 'string'], 'the surviving fields are strings and numbers only')
   assert.equal(resolved.timeoutMs, 180000)
-  assert.equal(resolved.defaultSteps, 25)
+  assert.equal(resolved.defaultSteps, 40)
   // Profiles replaced the `base` / `turbo` pair: the default is now the
   // canonical id, and the two legacy spellings normalise into it (asserted in
   // the compatibility test below).
