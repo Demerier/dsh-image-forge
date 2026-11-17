@@ -114,7 +114,7 @@ import {
   compileLayout,
   LAYOUT_NODE_DEFAULT_WIDTH,
   clampLayoutNodeWidth,
-  draftToState,
+  draftToEditorState,
   layoutNodeHeight,
   mountLayoutEditor,
   stateToDraft,
@@ -1020,29 +1020,44 @@ function LayoutEditorMount(props: LayoutEditorMountProps): ReturnType<typeof cre
   const latestRef = useRef(props)
   latestRef.current = props
   const appliedDraftRef = useRef<BoardLayoutDraft>(props.node.draft)
+  // An imperative editor that throws inside an effect unmounts the whole panel,
+  // which reads as "the plugin page went blank". Keep the failure local: show it
+  // on the node and leave every other node (and the panel) alive.
+  const [mountError, setMountError] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     const host = hostRef.current
     if (host === null) return undefined
     const node = latestRef.current.node
     appliedDraftRef.current = node.draft
-    const editor = mountLayoutEditor(host, {
-      draft: node.draft as unknown as LayoutDraft,
-      onChange: (state: LayoutEditorState) => {
-        const draft = stateToDraft(state)
-        appliedDraftRef.current = draft
-        const current = latestRef.current
-        current.onDraft(current.node.id, draft)
-      },
-    })
-    editorRef.current = editor
+    let editor: LayoutEditorHandle | undefined
+    try {
+      editor = mountLayoutEditor(host, {
+        draft: node.draft as unknown as LayoutDraft,
+        onChange: (state: LayoutEditorState) => {
+          const draft = stateToDraft(state)
+          appliedDraftRef.current = draft
+          const current = latestRef.current
+          current.onDraft(current.node.id, draft)
+        },
+      })
+      editorRef.current = editor
+      setMountError(undefined)
+    } catch (error) {
+      setMountError(error instanceof Error ? error.message : String(error))
+      return undefined
+    }
     // Destroy on unmount / node id change. A strict-mode double mount creates,
     // tears down and creates again; the editor's destroy removes its root, so
     // the second mount starts from an empty host. See the C13 report for what
     // was and was not verified about StrictMode in the host shell.
     return () => {
       editorRef.current = undefined
-      editor.destroy()
+      try {
+        editor?.destroy()
+      } catch {
+        // A destroy failure must not run during unmount as an unhandled throw.
+      }
     }
   }, [props.node.id])
 
@@ -1052,9 +1067,20 @@ function LayoutEditorMount(props: LayoutEditorMountProps): ReturnType<typeof cre
     if (editor === undefined) return
     if (appliedDraftRef.current === props.node.draft) return
     appliedDraftRef.current = props.node.draft
-    editor.setState(draftToState(props.node.draft as unknown as LayoutDraft))
+    try {
+      editor.setState(draftToEditorState(props.node.draft as unknown as LayoutDraft))
+    } catch (error) {
+      setMountError(error instanceof Error ? error.message : String(error))
+    }
   }, [props.node.draft])
 
+  if (mountError !== undefined) {
+    return createElement(
+      'div',
+      { className: 'dsh-forge-layout-error', title: mountError },
+      '布局编辑器加载失败：' + mountError,
+    )
+  }
   return createElement('div', { ref: hostRef, className: 'dsh-forge-layout-host' })
 }
 

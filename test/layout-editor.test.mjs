@@ -57,6 +57,7 @@ import {
   createLayoutState,
   decompileLayout,
   deleteBox,
+  draftToEditorState,
   draftToState,
   exportCompiled,
   exportDraft,
@@ -271,6 +272,27 @@ test('an empty layout is rejected before it can reach a prompt', () => {
   assert.ok(validateLayoutDraft(missingItems).some((issue) => issue.includes('missing fields')))
   assert.throws(() => compileLayout(missingItems), LayoutEditorError)
 })
+test('a new layout node opens with an empty draft (the C13 blank-panel regression)', () => {
+  // A freshly created layout node has no boxes yet; mounting it must work even
+  // though exporting it is (correctly) refused.
+  const state = createLayoutState({ width: 1536, height: 1024, summary: { caption: '' } })
+  const emptyDraft = stateToDraft(state)
+  assert.deepEqual(emptyDraft.items, [])
+  // Strict loader still rejects an empty draft that came from a file…
+  assert.throws(() => draftToState(emptyDraft), LayoutEditorError)
+  // …but the editor-mount path accepts it and keeps canvas + summary.
+  const loaded = draftToEditorState(emptyDraft)
+  assert.equal(loaded.width, 1536)
+  assert.equal(loaded.height, 1024)
+  assert.deepEqual(loaded.items, [])
+  assert.equal(loaded.summary.caption, '')
+  assert.deepEqual(stateToDraft(loaded), emptyDraft)
+  // Any other malformation is still refused: only the empty-items rule is relaxed.
+  assert.throws(() => draftToEditorState({ ...emptyDraft, bbox_format: 'xywh' }), LayoutEditorError)
+  assert.throws(() => draftToEditorState({ ...emptyDraft, width: 1537 }), LayoutEditorError)
+  assert.throws(() => draftToEditorState(null), LayoutEditorError)
+})
+
 
 test('clamping and rounding keep every drawn box exportable', () => {
   const width = 160

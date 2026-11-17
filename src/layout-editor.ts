@@ -917,9 +917,48 @@ export function createLayoutState(options: CreateLayoutStateOptions = {}): Layou
   }
 }
 
-/** Load a draft into the editor, assigning editor-only ids in array order. */
+/**
+ * Load a draft into the editor, assigning editor-only ids in array order.
+ *
+ * Strict on purpose: this validates a draft that came from a file, where an
+ * empty `items` list means the file is broken. A layout **node** starts life
+ * with no boxes at all, so the mount path uses {@link draftToEditorState}.
+ */
 export function draftToState(draft: unknown): LayoutEditorState {
-  const issues = validateLayoutDraft(draft)
+  return draftToEditorStateWith(draft, false)
+}
+
+/**
+ * Load a draft into the editor, tolerating a draft with **no boxes yet**.
+ *
+ * A freshly created layout node has an empty draft (the first thing the user
+ * does is draw a box), and undoing the first box takes it back to empty. Both
+ * must mount, not blank the panel: the strict rule exists to reject malformed
+ * *files*, not to make an empty canvas un-openable. Every other validation rule
+ * is still enforced.
+ *
+ * @param draft - a draft from a board entry or the editor itself.
+ * @returns editable state, with zero items allowed.
+ * @throws When the draft is malformed for any reason other than being empty.
+ */
+export function draftToEditorState(draft: unknown): LayoutEditorState {
+  return draftToEditorStateWith(draft, true)
+}
+
+/**
+ * Draft issues that only matter when a layout is **submitted**, not while it is
+ * being edited. A new node has no boxes and no caption yet — those two become
+ * requirements at compile/export time, not at mount time.
+ */
+const EDITOR_TOLERANT_ISSUES = new Set([
+  'items must be a nonempty flat array',
+  'summary.caption must be nonempty text',
+])
+
+function draftToEditorStateWith(draft: unknown, tolerateDrafting: boolean): LayoutEditorState {
+  const issues = tolerateDrafting
+    ? validateLayoutDraft(draft).filter((issue) => !EDITOR_TOLERANT_ISSUES.has(issue))
+    : validateLayoutDraft(draft)
   if (issues.length > 0) throw new LayoutEditorError(issues)
   const source = draft as LayoutDraft
   const items: LayoutEditorItem[] = source.items.map((item, index) => {
@@ -1141,7 +1180,8 @@ interface LayoutDragState {
 
 function resolveInitialState(options: LayoutEditorOptions): LayoutEditorState {
   if (options.state !== undefined) return options.state
-  if (options.draft !== undefined) return draftToState(options.draft)
+  // A layout node's draft is empty until the first box; mount must still work.
+  if (options.draft !== undefined) return draftToEditorState(options.draft)
   return createLayoutState({ width: options.width, height: options.height, summary: options.summary })
 }
 
