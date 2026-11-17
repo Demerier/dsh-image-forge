@@ -65,6 +65,7 @@
  */
 import { createHash } from 'node:crypto'
 import { sniffImageMime, type GeneratedImage, type GenerateRequest, type ReferenceImagePayload } from './images.ts'
+import { resolveBackendPlan, runThroughBackends } from './backend.ts'
 import {
   MODEL_PROFILES,
   assertLatentAligned,
@@ -1213,6 +1214,26 @@ async function runGraph(
   const interval = options.pollIntervalMs ?? 750
   const deadline = Date.now() + options.timeoutMs
   const remaining = (): number => Math.max(1, deadline - Date.now())
+
+  // Non-HTTP backends run first: MCP (`comfy-mcp` over the Host-supplied SDK)
+  // then the comfy CLI, each with the same rendered graph; the `/prompt` path
+  // below stays the last resort. Selection is environment-only
+  // (`DSH_IMAGE_FORGE_BACKEND` etc.), so an empty environment — every existing
+  // test and every user without a toolchain — keeps the historical behaviour
+  // byte-for-byte.
+  const backendRun = await runThroughBackends(
+    {
+      endpoint: target.endpoint,
+      graph,
+      what,
+      timeoutMs: options.timeoutMs,
+      pollIntervalMs: interval,
+      signal,
+      onPromptId: options.onPromptId,
+    },
+    resolveBackendPlan(process.env),
+  )
+  if (backendRun !== undefined) return backendRun.images
 
   const submission = await requestJson(
     `${target.endpoint}/prompt`,

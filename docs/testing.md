@@ -7,8 +7,11 @@ pnpm build
 pnpm test
 ```
 
-**14 个文件 / 242 个用例**（T14 时点计数），全部不需要 GPU、ComfyUI 或任何权重
-（ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / settings 59 / studio 38 / studio-canvas 9 / boards 18 / output 3 / package-contents 4 / studio-file-route 3 / model-profiles 7 / progress 7 / environment 28）。
+**22 个文件 / 397 个用例**（2026-11-18 T15 时点计数），全部不需要 GPU、ComfyUI、comfy-mcp
+或任何权重（ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / moss-edit 3 / settings 59 /
+studio 72 / studio-canvas 29 / boards 24 / board-migration 8 / output 3 / package-contents 4 /
+studio-file-route 3 / model-profiles 7 / progress 8 / runs 7 / environment 28 / layout-editor 16 /
+studio-lineage 5 / canvas-interactions 27 / moss-layout 9 / mcp-backend 19）。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——
@@ -55,6 +58,33 @@ schema 里 **10** 个字段齐全且 5 个云端字段绝迹、
 里面必须只剩本机 ComfyUI 一条路、不许再提 `qwen_image_env` / `localReferenceBudget` / `freeComfyBeforeLocalStart` /
 `minFreeVramMiB` / `local_edit_budget` / `apiKey`，并且必须写到 `comfyModel`、`turbo`、`8 步`、`turbo_fallback`
 与部署文档的路径。
+
+### `test/mcp-backend.test.mjs`（19，T15 新增）
+
+后端接线与自研 MCP client。**假的是 stdio 连接缝，不是断言**：宿主随包的
+`@modelcontextprotocol/client` 是 peerDependency，由 DSH profile 运行时解析，普通
+`node` 里 import 不到（见 [mcp-backend.md](mcp-backend.md)），所以假对象实现的是
+`McpConnectionLike`（`listTools`/`callTool`/close）——生产代码的每个分支都被真的走到：
+
+- **工具过滤**：39 工具清单里只放行 `run_workflow` / `job` / `fetch_outputs` /
+  `validate_workflow` / `system_stats`；缺 `run_workflow`/`job`/`fetch_outputs` 任一个在
+  connect 时就报版本错误；非白名单工具在到达子进程前被拒。
+- **提交/轮询/取图**：`run_workflow` 必须带 `wait: false`（首次加载权重常超 110 s，默认
+  `wait=True` 会撒谎）；首轮 `timed_out: true` **不是失败**（§4.2 口径）；`fetch_outputs` 必须收到
+  绝对 `out_dir`，落盘字节按真实 PNG 头识别 mime。
+- **超时与杀进程树**：轮询到 `timeoutMs` 仍无终态时，用 transport pid 调 `taskkill /F /T`
+  （POSIX `kill(-pid)`）并报出 prompt id；completed 却零图同样是错误。
+- **后端链**：`auto` = mcp → cli，失败上报 skipped 后继续；`mcp`/`cli` 严格模式不回退；
+  没有任何工具链时返回 `undefined`（HTTP 旧路径，零行为变化）。
+- **CLI 降级**：`comfy --json --where local --skip-prompt run --workflow … --wait` 后
+  `download <prompt_id> --out-dir`，失败 envelope 原文回传。
+- **隐私断言（决策 6）**：`lib/index.js` 里不许出现 `mcpManager` 或 `mcp__`——MCP 工具
+  不得进入对话模型工具表；同时 `fetch_outputs` 必须在主机侧 bundle 里。
+- **配置边界**：后端选择/超时**不进 Config schema**，只读环境变量
+  `DSH_IMAGE_FORGE_BACKEND` / `…_COMFY_MCP_BIN` / `…_COMFY_BIN` /
+  `…_BACKEND_TIMEOUT_MS` / `…_MCP_DEBUG` / `…_BACKEND_TMPDIR`。原因：schema 新字段必须
+  有设置页控件（`test/settings.test.mjs` 会失败），而 `src/settings-fields.ts` 不在 T15
+  写入范围；「配置项进 schema + 控件」记为 T15 未完成项，交 T22/协调者。
 
 ### `test/comfyui-e2e.test.mjs`（10）
 
@@ -155,6 +185,7 @@ T14 把「零下载 / 一键部署」的旧口径换成了**受管安装 + 按�
 | `test/surface.test.mjs` | 「三个工具」→ 四个（含 `qwen_image_setup`）；新增 action 枚举与 `confirm` 断言；描述必须点名 `/object_info` 与 `computer use` | 新能力必须可被契约测到；`qwen_image_env` 旧名仍禁 |
 | `test/settings.test.mjs` | 保留旧禁项（`dsh-image-forge-deploy` / `一键部署` / `127.0.0.1:8411` / `qwen_image_env` / `DeployStatusPayload`）；新增「随包散文面必须写到受管安装/下载方向」 | 旧字段与旧一键部署卡片**不回魂**；同时新能力不能只活在代码里 |
 | 本文件 | 11 文件/159 → 14 文件/242；补 3 个测试文件章节；`surface` 的字段数 9 → 10 | 计数与实际一致；`schema` 已是 10 个字段 |
+| `test/mcp-backend.test.mjs`（T15 新增） | 19 用例：假 stdio 连接缝覆盖提交/轮询/取图/超时/杀进程树、后端链严格/回退、CLI envelope、隐私（无 `mcpManager`/`mcp__`） | MCP 主通道必须可被契约测到；工具不进对话工具表要机器判定；后端选择走环境变量是刻意的范围裁决 |
 
 口径边界：`qwen_image_env`（旧本地运行时工具）、`一键部署` 卡片、云端 `backend` 仍然**禁止**出现；
 新增的是 `qwen_image_setup` 的受管安装引导与权重下载（只与本机 ComfyUI 通信、只写 Desktop 模型目录）。
