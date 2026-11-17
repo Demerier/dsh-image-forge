@@ -136,6 +136,11 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
   才让 ComfyUI 自己交回：`POST /free` + `{"unload_models":false,"free_memory":true}`——`free_memory=true` 清 VRAM，
   `unload_models=true` 会连 RAM 里的模型一起清、下一轮被迫重载，所以**别在轮次之间调**。插件**不会再替你发**
   这个请求（它不碰别人的进程），只在 `qwen_image_status` 里把显存数字报出来，由你决定。
+- **权重档位选择（8 GB 卡口径）**：插件按 `/object_info` 枚举到的**文件名打分**，不硬编码文件名。
+  文本编码器优先 `qwen3vl_8b_w4a8.safetensors`（≈5.88 GiB，比 `int8_convrot` 的 8.71 GiB 省 ~2.8 GiB；
+  8 GB 卡上它是**驻 RAM / 按需 offload**，不是常驻显存），没有 w4a8 才回落 `qwen3vl_8b_int8_convrot`，
+  bf16（16.33 GiB，8 GB 卡放不下）排最后。DiT 仍是 `int8_convrot`（≈6.76 GiB）优先，两处打分互不影响；
+  MOSS 的文本编码器走它自己的规则（见 `docs/comfyui-deployment.md`）。
 - **QwenImage21Cache（前缀 KV cache）**：官方 Qwen-Image 2.1 工作流在 UNETLoader 后串了
   `QwenImage21Cache`（`device=auto`、`dtype=default`），把文本/参考图 token 的前缀只算一次、全步复用；
   官方说明**改图的大部分加速来自这里**。插件已把它接进 base / turbo 的 t2i 与 edit 四张图。它需要

@@ -649,6 +649,51 @@ test('qwen_image_status compares the ComfyUI version against the cache requireme
   }
 })
 
+test('the Qwen text encoder prefers w4a8 over int8 over bf16', async () => {
+  /** The fake server with a chosen CLIPLoader option list. */
+  const qwenWithClips = (clipNames) => {
+    const info = structuredClone(OBJECT_INFO)
+    info.CLIPLoader.input.required.clip_name[0] = clipNames
+    return info
+  }
+  const all = await startFakeComfy({
+    objectInfo: qwenWithClips([
+      'qwen3vl_8b_bf16.safetensors',
+      'qwen3vl_8b_int8_convrot.safetensors',
+      'qwen3vl_8b_w4a8.safetensors',
+      'qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors',
+    ]),
+  })
+  const int8Only = await startFakeComfy({
+    objectInfo: qwenWithClips(['qwen3vl_8b_bf16.safetensors', 'qwen3vl_8b_int8_convrot.safetensors']),
+  })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-te-tier-'))
+  try {
+    const args = { prompt: 'A cat.', wh_ratio: '1:1', seed: 3 }
+    const w4a8 = await run(register({ comfyEndpoint: all.endpoint, outputDir, timeoutMs: 30_000 }), 'qwen_image_generate', args)
+    console.log('TE with all tiers:', w4a8.comfyui.models.clip)
+    // The 8 GB-friendly encoder must outrank int8_convrot even though the server
+    // lists int8 first; the quantisation marker is the tie-breaker.
+    assert.equal(w4a8.comfyui.models.clip, 'qwen3vl_8b_w4a8.safetensors')
+    // The DiT's own preference is untouched: int8_convrot still beats bf16.
+    assert.equal(w4a8.comfyui.models.unet, 'qwen_image_2.1_int8_convrot.safetensors')
+    // The prompt-enhancer encoders never win, even though they match /qwen/i.
+    assert.notEqual(w4a8.comfyui.models.clip, 'qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors')
+
+    const int8 = await run(
+      register({ comfyEndpoint: int8Only.endpoint, outputDir, timeoutMs: 30_000 }),
+      'qwen_image_generate',
+      args,
+    )
+    console.log('TE without w4a8:', int8.comfyui.models.clip)
+    assert.equal(int8.comfyui.models.clip, 'qwen3vl_8b_int8_convrot.safetensors', 'no w4a8 file -> int8 remains')
+  } finally {
+    await all.close()
+    await int8Only.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
 test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is installed too', async () => {
   // The documented deployment ships BOTH checkpoints. Name scoring ties on
   // "image" + "2.1" + "int8", and a tie keeps the server's order — which lists

@@ -594,7 +594,14 @@ const QWEN_BASE_WEIGHTS: ModelProfile['weights'] = {
     what: 'Qwen-Image 2.1 的文本编码器（Qwen3-VL 8B）',
     example: 'qwen3vl_8b_int8_convrot.safetensors',
     required: /qwen/i,
-    bonus: [/vl/i, /8b/i, /int8/i],
+    // The 8 GB-friendly TE is w4a8 (5.88 GiB) rather than int8_convrot (8.71 GiB),
+    // so it must outrank int8: the earlier a bonus pattern sits, the more it weighs
+    // (see pickModelFile). Both files match /vl/ and /8b/, so the tie-breaker is the
+    // quantisation marker — w4a8 matches its own pattern and int8 matches the one
+    // after it, which is what makes w4a8 win when both are installed. With no w4a8
+    // file installed int8 still wins, and a full bf16 encoder (16.33 GiB, no room on
+    // an 8 GB card) stays last. The DiT's own int8_convrot preference is untouched.
+    bonus: [/vl/i, /8b/i, /w4a8/i, /int8/i],
   },
   vae: {
     loader: 'VAELoader',
