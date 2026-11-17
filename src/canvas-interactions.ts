@@ -19,18 +19,18 @@
  *
  * Camera arithmetic is *not* reimplemented here: {@link marqueeWorldRect}
  * composes `screenToWorld` from `./studio-canvas.ts`, which owns that maths
- * (`src/studio-canvas.ts:9-11` states the discipline). `rectsIntersect` lives
- * here rather than there only because C07 had not landed when this module was
- * written — the C08 task book (`docs/CANVAS-DESIGN.md` §13 C08 step 2) says the
- * first to commit owns the landing spot and the later task imports it. If C07
- * later moves it into `studio-canvas.ts`, re-export from there instead of
- * keeping a second copy.
+ * (`src/studio-canvas.ts:9-11` states the discipline). `rectsIntersect` was
+ * written here first (C08 landed before C07) and C07 has now moved it into
+ * `./studio-canvas.ts`, where the viewport culling needs it without a cycle; it
+ * is re-exported below so every existing import path keeps working.
  *
  * @module canvas-interactions
  */
 
-import { screenToWorld } from './studio-canvas.ts'
+import { rectsIntersect, screenToWorld } from './studio-canvas.ts'
 import type { Camera, Point, Rect } from './studio-canvas.ts'
+
+export { rectsIntersect }
 
 /**
  * Hard ceiling on the undo stack, in commands.
@@ -57,18 +57,11 @@ export interface NodeRect extends Rect {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Do two rectangles overlap by a positive area?
- *
- * Touching edges do **not** count: dragging a marquee up to a node's border and
- * stopping should not sweep it in, or every selection would also grab the
- * neighbour the box happens to touch. Containment counts — a marquee larger than
- * the board catches everything inside it, which is the point of the gesture.
+ * `rectsIntersect` (the marquee's positive-area rule) is re-exported above from
+ * `./studio-canvas.ts`: C08 wrote it, C07 moved it to the geometry module where
+ * viewport culling can reach it without an import cycle, and the export path here
+ * is unchanged so existing marquee callers keep working.
  */
-export function rectsIntersect(a: Rect, b: Rect): boolean {
-  const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
-  const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
-  return overlapX > 0 && overlapY > 0
-}
 
 /** Normalise two opposite corners into a rectangle that always has a size. */
 function rectBetween(a: Point, b: Point): Rect {

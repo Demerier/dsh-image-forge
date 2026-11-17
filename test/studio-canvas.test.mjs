@@ -17,13 +17,21 @@ import {
   IMAGE_AREA_HEIGHT,
   MAX_NODE_WIDTH,
   MIN_NODE_WIDTH,
+  VIEWPORT_CULL_MARGIN,
+  buildEdges,
   clampZoom,
+  edgeBounds,
   edgePath,
   fitCamera,
   nextNodeSpot,
   nodeDisplaySize,
+  nodeIndex,
   panBy,
+  rectsIntersect,
   screenToWorld,
+  visibleEdges,
+  visibleNodes,
+  visibleWorldRect,
   worldToScreen,
   zoomAt,
   zoomLabel,
@@ -242,3 +250,169 @@ test('widened nodes still land side by side without overlapping', () => {
   assert.ok(spot.x >= MAX_NODE_WIDTH + 40, 'placement accounts for the clamped maximum width')
 })
 
+
+/* -------------------------------------------------------------------------- */
+/* C07: viewport culling, the edge index, and the pure half of the throttle    */
+/* -------------------------------------------------------------------------- */
+
+/** A render-layer node rect, the shape `visibleNodes`/`buildEdges` take. */
+function node(id, x, y, parents = []) {
+  return { id, parents, x, y, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+}
+
+test('the visible world rect is the viewport divided by zoom, grown by the margin', () => {
+  assert.equal(VIEWPORT_CULL_MARGIN, 256, 'the pre-render margin is the documented 256 world units')
+  const camera = { x: 100, y: 200, zoom: 1 }
+  const viewport = { width: 900, height: 600 }
+  assert.deepEqual(visibleWorldRect(camera, viewport), {
+    x: 100 - 256,
+    y: 200 - 256,
+    width: 900 + 512,
+    height: 600 + 512,
+  })
+  // Zoom scales how much world one pixel covers; the camera origin does not move.
+  const out = visibleWorldRect({ ...camera, zoom: 0.1 }, viewport)
+  assert.equal(out.width, 9000 + 512)
+  assert.equal(out.height, 6000 + 512)
+  const inn = visibleWorldRect({ ...camera, zoom: 4 }, viewport)
+  assert.equal(inn.width, 225 + 512)
+  assert.equal(inn.height, 150 + 512)
+  // A zero margin is legal: culling to exactly the viewport, no pre-render.
+  assert.equal(visibleWorldRect(camera, viewport, 0).width, 900)
+})
+
+test('a node inside the margin renders, one that only touches the boundary does not', () => {
+  const camera = { x: 0, y: 0, zoom: 1 }
+  const viewport = { width: 800, height: 600 }
+  const world = visibleWorldRect(camera, viewport)
+  const left = world.x
+  const right = world.x + world.width
+  // Touching is not overlapping — the same rule the marquee uses, so a node on
+  // the cull boundary and a node on the marquee boundary behave alike.
+  assert.equal(visibleNodes([node('touch-l', left - CANVAS_NODE_WIDTH, 0)], camera, viewport).length, 0)
+  assert.equal(visibleNodes([node('inside-l', left - CANVAS_NODE_WIDTH + 1, 0)], camera, viewport).length, 1)
+  assert.equal(visibleNodes([node('touch-r', right, 0)], camera, viewport).length, 0)
+  assert.equal(visibleNodes([node('inside-r', right - 1, 0)], camera, viewport).length, 1)
+})
+
+test('an empty board and an unmeasured viewport both fall through to "render"', () => {
+  const camera = { x: 0, y: 0, zoom: 1 }
+  assert.deepEqual(visibleNodes([], camera, { width: 800, height: 600 }), [])
+  // Before the browser has measured the element there is no honest viewport to
+  // cull against: culling must never blank the canvas for the first frame.
+  const all = [node('a', 0, 0), node('b', 9000, 9000)]
+  assert.equal(visibleNodes(all, camera, { width: 0, height: 0 }).length, 2)
+  const unbounded = visibleWorldRect(camera, { width: 0, height: 0 })
+  assert.equal(rectsIntersect(all[1], unbounded), true, 'an unmeasured viewport is unbounded')
+})
+
+test('the visible set follows the zoom extremes, not just the middle of the range', () => {
+  const viewport = { width: 1000, height: 600 }
+  const nodes = [node('near', 0, 0), node('far', 5000, 0)]
+  assert.deepEqual(visibleNodes(nodes, { x: 0, y: 0, zoom: 1 }, viewport).map((entry) => entry.id), ['near'])
+  // At the 0.1 floor the same screen shows 10000 world units of board.
+  assert.deepEqual(visibleNodes(nodes, { x: 0, y: 0, zoom: 0.1 }, viewport).map((entry) => entry.id), ['near', 'far'])
+  // At the 4x ceiling the world window is 250 + 2×256 = 762 wide.
+  assert.deepEqual(visibleNodes(nodes, { x: 0, y: 0, zoom: 4 }, viewport).map((entry) => entry.id), ['near'])
+  assert.deepEqual(visibleNodes([node('past', 520, 0)], { x: 0, y: 0, zoom: 4 }, viewport).map((entry) => entry.id), [])
+})
+
+test('the edge index resolves each parent with one lookup instead of a board scan', () => {
+  const nodes = [node('a', 0, 0), node('b', 300, 0, ['a']), node('c', 600, 0, ['a', 'b'])]
+  let lookups = 0
+  class CountingMap extends Map {
+    get(key) {
+      lookups += 1
+      return super.get(key)
+    }
+  }
+  const index = new CountingMap(nodes.map((entry) => [entry.id, entry]))
+  const edges = buildEdges(nodes, index)
+  assert.deepEqual(edges.map((edge) => `${edge.parent}->${edge.child}`), ['a->b', 'a->c', 'b->c'])
+  // Three parent links, three hash hits. The old inner `nodes.find` was n
+  // comparisons *per link*, which is the O(n×parents) this task removes.
+  assert.equal(lookups, 3)
+})
+
+test('an edge whose parent is not on the board is dropped, not thrown', () => {
+  const nodes = [node('orphan', 0, 0, ['gone-from-another-board'])]
+  assert.deepEqual(buildEdges(nodes, nodeIndex(nodes)), [])
+  assert.deepEqual(buildEdges([], new Map()), [])
+})
+
+test('the node index keeps the first of a duplicated id, like find did', () => {
+  const index = nodeIndex([node('a', 0, 0), node('a', 500, 100)])
+  assert.equal(index.size, 1)
+  assert.equal(index.get('a').x, 0)
+})
+
+test('an edge draws when an endpoint is visible or when the wire crosses the viewport', () => {
+  const world = visibleWorldRect({ x: 0, y: 0, zoom: 1 }, { width: 800, height: 600 })
+  const near = { x: 0, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const far = { x: 9000, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const farLeft = { x: -9000, y: 400, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const edge = (from, to) => ({ child: 'c', parent: 'p', from, to })
+  // One endpoint on screen.
+  assert.equal(visibleEdges([edge(near, far)], world).length, 1)
+  // Both endpoints off-screen but the wire runs through the viewport — this is
+  // what keeps a long blood-line from blinking out in the middle of a pan.
+  assert.equal(visibleEdges([edge(farLeft, far)], world).length, 1)
+  // Both endpoints off-screen and the wire nowhere near it.
+  const highLeft = { x: -9000, y: -9000, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const highRight = { x: 9000, y: -9000, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  assert.equal(visibleEdges([edge(highLeft, highRight)], world).length, 0)
+  assert.deepEqual(visibleEdges([], world), [])
+})
+
+test('a level wire keeps a body to be culled by, or it vanishes edge-on', () => {
+  // Two nodes at the same height give a mathematically zero-height curve; a
+  // zero-area rectangle never intersects, so the box is padded into a wire.
+  const from = { x: -9000, y: 400, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const to = { x: 9000, y: 400, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const box = edgeBounds(from, to)
+  assert.ok(box.height > 0, 'a level wire needs a thickness to intersect with')
+  assert.ok(box.width > 17000, 'the box spans both endpoints')
+  const world = visibleWorldRect({ x: 0, y: 0, zoom: 1 }, { width: 800, height: 600 })
+  assert.equal(visibleEdges([{ child: 'c', parent: 'p', from, to }], world).length, 1)
+})
+
+test('the edge box contains the curve even when the wire runs backwards', () => {
+  const from = { x: 600, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const to = { x: 0, y: 500, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const box = edgeBounds(from, to)
+  // Anchors: (from right edge, mid-height) = (808, 120) and (to left edge) = (0, 620).
+  assert.ok(box.x <= 0, 'the box reaches past the left anchor')
+  assert.ok(box.y <= 120, 'and above the higher anchor')
+  assert.ok(box.x + box.width >= 808, 'and past the right anchor')
+  assert.ok(box.y + box.height >= 620, 'and below the lower one')
+})
+
+test('a 1000-node board culls to the visible count and indexes every parent once', () => {
+  const nodes = []
+  for (let i = 0; i < 1000; i += 1) {
+    nodes.push(node(`n${String(i)}`, (i % 20) * 300, Math.floor(i / 20) * 300, i === 0 ? [] : [`n${String(i - 1)}`]))
+  }
+  let lookups = 0
+  class CountingMap extends Map {
+    get(key) {
+      lookups += 1
+      return super.get(key)
+    }
+  }
+  const index = new CountingMap(nodes.map((entry) => [entry.id, entry]))
+  const edges = buildEdges(nodes, index)
+  assert.equal(edges.length, 999, 'a chain of 1000 nodes has 999 edges')
+  assert.equal(lookups, 999, 'one hash hit per parent link, never a board scan')
+
+  // 20 columns × 50 rows at a 300 pitch, 1200×800 viewport at zoom 1 with the
+  // 256 margin: world x ∈ [-256, 1456] (columns 0-4), y ∈ [-256, 1056] (rows 0-3).
+  const shown = visibleNodes(nodes, { x: 0, y: 0, zoom: 1 }, { width: 1200, height: 800 })
+  assert.equal(shown.length, 20)
+  assert.ok(shown.length < nodes.length / 10, 'the render layer must not see the whole board')
+
+  // Panning moves the window instead of growing it: x is [1244, 2956] (columns
+  // 4-9) and y is [1244, 2556] (rows 4-8), so 6 x 5 = 30 nodes.
+  const panned = visibleNodes(nodes, { x: 1500, y: 1500, zoom: 1 }, { width: 1200, height: 800 })
+  assert.equal(panned.length, 30)
+  assert.notDeepEqual(panned.map((entry) => entry.id), shown.map((entry) => entry.id))
+})

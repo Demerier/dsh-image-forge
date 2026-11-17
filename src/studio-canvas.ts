@@ -199,23 +199,229 @@ export function nextNodeSpot(rects: readonly Rect[]): Point {
 }
 
 /**
+ * The four numbers `edgePath` draws with, shared with {@link edgeBounds}.
+ *
+ * One definition, two readers: the path string and the bounding box must agree
+ * or a long edge that visibly crosses the viewport would be culled for being
+ * "outside" it.
+ */
+function edgeAnchors(from: Rect, to: Rect): { x1: number; y1: number; x2: number; y2: number; reach: number } {
+  const x1 = from.x + from.width
+  const y1 = from.y + from.height / 2
+  const x2 = to.x
+  const y2 = to.y + to.height / 2
+  return { x1, y1, x2, y2, reach: Math.max(40, Math.abs(x2 - x1) * 0.45) }
+}
+
+/**
  * `<path d>` for an edge from the right edge of `from` to the left edge of `to`.
  *
  * A cubic with horizontal control points reads as a wire rather than a slash
  * whenever the two nodes are on the same row, which is the common case.
  */
 export function edgePath(from: Rect, to: Rect): string {
-  const x1 = from.x + from.width
-  const y1 = from.y + from.height / 2
-  const x2 = to.x
-  const y2 = to.y + to.height / 2
-  const reach = Math.max(40, Math.abs(x2 - x1) * 0.45)
+  const { x1, y1, x2, y2, reach } = edgeAnchors(from, to)
   return `M ${round(x1)} ${round(y1)} C ${round(x1 + reach)} ${round(y1)}, ${round(x2 - reach)} ${round(y2)}, ${round(x2)} ${round(y2)}`
 }
 
 /** Zoom as a percentage label, e.g. `120%`. */
 export function zoomLabel(zoom: number): string {
   return `${String(Math.round(zoom * 100))}%`
+}
+
+/* -------------------------------------------------------------------------- */
+/* Viewport culling (§5.2) and the edge index (§3.5)                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Pre-render margin around the viewport, in world units.
+ *
+ * Culling to exactly the visible rectangle would pop a node in at the very edge
+ * of a pan, half of it already on screen. 256 world units is a bit more than one
+ * default node — enough that a node is fully mounted before any part of it can
+ * be seen, at every zoom down to 0.1 (where it is 25 screen pixels). It also
+ * keeps `loading: 'lazy'` meaningful: an image inside the margin is still not
+ * fetched until it is really on screen.
+ */
+export const VIEWPORT_CULL_MARGIN = 256
+
+/**
+ * Half-thickness, in world units, of an edge's culling box.
+ *
+ * A wire drawn between two nodes at the same height has a zero-height bounding
+ * box, and a zero-area rectangle never intersects anything under the strict
+ * rule — so a long level edge crossing the viewport would be culled while
+ * clearly visible. This gives it a body; the stroke is 2 screen pixels, so 2
+ * world units is generous without reaching a neighbour's edge.
+ */
+const EDGE_BOUNDS_PAD = 2
+
+/** Viewport size in screen pixels, as measured from the canvas element. */
+export interface Viewport {
+  width: number
+  height: number
+}
+
+/** A node rect carrying what the render layer needs to place an edge. */
+export interface EdgeNode extends Rect {
+  readonly id: string
+  readonly parents: readonly string[]
+}
+
+/** One resolved parent link, with both endpoints' rectangles already attached. */
+export interface CanvasEdge {
+  readonly child: string
+  readonly parent: string
+  readonly from: Rect
+  readonly to: Rect
+}
+
+/**
+ * Do two rectangles overlap by a positive area?
+ *
+ * Touching edges do **not** count — the same rule a marquee uses, so the node
+ * set a selection would catch and the node set culling renders agree at the
+ * boundary. Containment counts.
+ *
+ * Lives here because it is geometry; `canvas-interactions.ts` re-exports it so
+ * the C08 import path keeps working (that module's header explains the handover).
+ */
+export function rectsIntersect(a: Rect, b: Rect): boolean {
+  const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
+  const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
+  return overlapX > 0 && overlapY > 0
+}
+
+/**
+ * The world rectangle the viewport shows, padded by `margin` on every side.
+ *
+ * `camera.x`/`camera.y` is the world point at the viewport's top-left corner, so
+ * the visible world size is the viewport in screen pixels divided by the zoom.
+ *
+ * An unmeasured viewport (width or height ≤ 0, or a zoom that is not a positive
+ * number) returns an effectively unbounded rectangle: until the browser has
+ * measured the element, "render everything" is the only safe answer — culling
+ * against a zero viewport would blank the canvas for the first frame, and
+ * culling is never allowed to change what is on screen. The sentinel is a finite
+ * ±2⁵³ span rather than `±Infinity`, because an infinite extent makes the
+ * intersection arithmetic produce `NaN` and cull everything.
+ */
+export function visibleWorldRect(camera: Camera, viewport: Viewport, margin = VIEWPORT_CULL_MARGIN): Rect {
+  const pad = Number.isFinite(margin) ? Math.max(0, margin) : 0
+  const width = viewport.width
+  const height = viewport.height
+  if (!(Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
+    || !(Number.isFinite(camera.zoom) && camera.zoom > 0)
+    || !Number.isFinite(camera.x) || !Number.isFinite(camera.y)) {
+    const span = Number.MAX_SAFE_INTEGER
+    return { x: -span, y: -span, width: span * 2, height: span * 2 }
+  }
+  return {
+    x: camera.x - pad,
+    y: camera.y - pad,
+    width: width / camera.zoom + pad * 2,
+    height: height / camera.zoom + pad * 2,
+  }
+}
+
+/**
+ * The subset of `rects` whose node would be on screen.
+ *
+ * Order is preserved (the caller's `nodes` order is what stacks siblings) and
+ * the input items come back unchanged, so the caller can pass render items —
+ * node plus rect plus id — and get the same objects back. O(n) rectangle tests,
+ * which is cheaper than the DOM diff it saves even on a small board, so this
+ * runs unconditionally with no switch.
+ */
+export function visibleNodes<T extends Rect>(
+  rects: readonly T[],
+  camera: Camera,
+  viewport: Viewport,
+  margin = VIEWPORT_CULL_MARGIN,
+): T[] {
+  const world = visibleWorldRect(camera, viewport, margin)
+  return rects.filter((rect) => rectsIntersect(rect, world))
+}
+
+/**
+ * `Map<id, node>` for the whole board, built once per `nodes` change.
+ *
+ * This is what retires the old per-edge `nodes.find` (O(n) inside O(n×parents)):
+ * every parent lookup is now a hash hit. A duplicated id keeps its first
+ * occurrence, matching what `Array.prototype.find` used to return.
+ */
+export function nodeIndex<T extends { readonly id: string }>(nodes: readonly T[]): Map<string, T> {
+  const index = new Map<string, T>()
+  for (const node of nodes) {
+    if (!index.has(node.id)) index.set(node.id, node)
+  }
+  return index
+}
+
+/**
+ * Resolve every `parents` link into an edge with both endpoints' rectangles.
+ *
+ * `index` is the board's {@link nodeIndex}: the child comes from `nodes`, the
+ * parent from one hash lookup, so a board's edges cost O(parent links) map hits
+ * rather than O(n) scans. A parent that is not on the board (a cross-board
+ * reference, or an item the store dropped) is skipped instead of throwing —
+ * `boards.resolveParents` already tolerates it, and a broken lineage must not
+ * cost the user their canvas.
+ *
+ * A self-link is kept: it renders as the degenerate curl it always did, and
+ * culling later decides whether to draw it.
+ */
+export function buildEdges<T extends EdgeNode>(nodes: readonly T[], index: ReadonlyMap<string, T>): CanvasEdge[] {
+  const edges: CanvasEdge[] = []
+  for (const node of nodes) {
+    const to = rectOf(node)
+    for (const parentId of node.parents) {
+      const parent = index.get(parentId)
+      if (parent === undefined) continue
+      edges.push({ child: node.id, parent: parentId, from: rectOf(parent), to })
+    }
+  }
+  return edges
+}
+
+/**
+ * World-space bounding box of the cubic {@link edgePath} draws.
+ *
+ * A cubic never leaves the convex hull of its four control points, so the hull
+ * of the two anchors and the two horizontal control points is a sufficient — and
+ * cheap — box. `EDGE_BOUNDS_PAD` gives a horizontal wire a thickness: a
+ * perfectly level long edge has a zero-height box, and a zero-area rectangle
+ * never intersects anything under the strict rule.
+ */
+export function edgeBounds(from: Rect, to: Rect): Rect {
+  const { x1, y1, x2, y2, reach } = edgeAnchors(from, to)
+  const left = Math.min(x1, x2, x1 + reach, x2 - reach) - EDGE_BOUNDS_PAD
+  const right = Math.max(x1, x2, x1 + reach, x2 - reach) + EDGE_BOUNDS_PAD
+  const top = Math.min(y1, y2) - EDGE_BOUNDS_PAD
+  const bottom = Math.max(y1, y2) + EDGE_BOUNDS_PAD
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+/**
+ * The edges this frame should draw.
+ *
+ * An edge counts as visible when either endpoint is (its node intersects the
+ * padded viewport — exactly the membership test in {@link visibleNodes}), or
+ * when its own bounding box crosses the viewport. The second rule is what keeps
+ * a long blood-line edge passing behind the viewport while both of its nodes are
+ * off-screen; without it the wire would vanish in the middle of a pan.
+ */
+export function visibleEdges(edges: readonly CanvasEdge[], worldRect: Rect): CanvasEdge[] {
+  return edges.filter((edge) => (
+    rectsIntersect(edge.from, worldRect)
+    || rectsIntersect(edge.to, worldRect)
+    || rectsIntersect(edgeBounds(edge.from, edge.to), worldRect)
+  ))
+}
+
+/** Copy the four geometry fields, so an edge keeps the rects it was built from. */
+function rectOf(rect: Rect): Rect {
+  return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
 }
 
 function round(value: number): number {

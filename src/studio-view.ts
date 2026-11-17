@@ -58,17 +58,24 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import {
+  buildEdges,
   clampZoom,
   edgePath,
   fitCamera,
   nextNodeSpot,
   nodeDisplaySize,
+  nodeIndex,
   panBy,
+  visibleEdges,
+  visibleNodes,
+  visibleWorldRect,
   zoomAt,
   zoomLabel,
   type Camera,
+  type EdgeNode,
   type Point,
   type Rect,
+  type Viewport,
 } from './studio-canvas.ts'
 import {
   STUDIO_ASSETS_ROUTE,
@@ -145,6 +152,18 @@ type Gesture =
 function nodeRect(node: CanvasNode): Rect {
   const size = nodeDisplaySize(node.image.width, node.image.height)
   return { x: node.x, y: node.y, width: size.width, height: size.height }
+}
+
+/**
+ * One render item: a node paired with the world rectangle it occupies.
+ *
+ * Flattening the rectangle into the item keeps the culling and edge-building
+ * passes in `studio-canvas.ts` free of any knowledge of `CanvasNode`, and lets
+ * the visible set come back as these same objects — so the render never has to
+ * look a node up again after filtering it.
+ */
+interface NodeView extends EdgeNode {
+  readonly node: CanvasNode
 }
 
 /** A generated batch, kept so a previous result can be compared or reused. */
@@ -491,9 +510,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const [view, setView] = useState<'canvas' | 'list' | 'assets'>('canvas')
   const [nodes, setNodes] = useState<CanvasNode[]>([])
   const [camera, setCamera] = useState<Camera>({ x: -28, y: -28, zoom: 1 })
+  // Measured size of the canvas element. {0,0} until the first measurement,
+  // which `visibleWorldRect` treats as "unbounded" — see the culling note below.
+  const [viewport, setViewport] = useState<Viewport>({ width: 0, height: 0 })
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined)
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const gestureRef = useRef<Gesture | undefined>(undefined)
+  // Latest pointer position and the one queued frame that will apply it (§10.3).
+  const pointerRef = useRef<Point | undefined>(undefined)
+  const frameRef = useRef<number | undefined>(undefined)
   // Board state: the library, the one on screen, and its rename editor.
   const [boards, setBoards] = useState<BoardSummary[]>([])
   const [boardId, setBoardId] = useState<string | undefined>(undefined)
@@ -976,6 +1001,55 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     return () => { element.removeEventListener('wheel', onWheel) }
   }, [view])
 
+  // Culling needs the viewport's size, which only the element knows. Measuring
+  // it into state is what lets the render pass decide "on screen" before
+  // building any DOM; the observer keeps it right across panel resizes.
+  // `view` is a dependency because the canvas element only exists in canvas
+  // view, and node/image loads do not resize this box.
+  useEffect(() => {
+    const element = canvasRef.current
+    if (element === null || view !== 'canvas') return undefined
+    const measure = (): void => {
+      const box = element.getBoundingClientRect()
+      setViewport((current) => (
+        current.width === box.width && current.height === box.height
+          ? current
+          : { width: box.width, height: box.height }
+      ))
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure)
+      return () => { window.removeEventListener('resize', measure) }
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => { observer.disconnect() }
+  }, [view])
+
+  /**
+   * The board as rectangles, the edges between them, and what this frame shows.
+   *
+   * Two memos on purpose: `graph` (rects + the id index + the resolved edge
+   * list) is rebuilt only when a node moves, while the visible subsets follow
+   * the camera. Panning therefore never re-touches `parents` or re-looks-up a
+   * parent — it only intersects rectangles.
+   */
+  const graph = useMemo(() => {
+    const views: NodeView[] = nodes.map((node) => ({
+      id: node.id,
+      parents: node.parents,
+      node,
+      ...nodeRect(node),
+    }))
+    const index = nodeIndex(views)
+    return { views, edges: buildEdges(views, index) }
+  }, [nodes])
+
+  const cullRect = useMemo(() => visibleWorldRect(camera, viewport), [camera, viewport])
+  const shown = useMemo(() => visibleNodes(graph.views, camera, viewport), [graph, camera, viewport])
+  const shownEdges = useMemo(() => visibleEdges(graph.edges, cullRect), [graph, cullRect])
+
   /** Frame every node; a no-op on an empty canvas so the view never jumps. */
   const fitView = useCallback(() => {
     const element = canvasRef.current
@@ -991,6 +1065,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     // Nodes start their own drag; anything else pans the view.
     if (target.closest('.dsh-forge-node') !== null) return
     event.currentTarget.setPointerCapture(event.pointerId)
+    pointerRef.current = undefined
     gestureRef.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, camera }
     setSelectedNodeId(undefined)
   }, [camera])
@@ -1000,31 +1075,76 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
     setSelectedNodeId(node.id)
+    pointerRef.current = undefined
     gestureRef.current = { kind: 'node', id: node.id, startX: event.clientX, startY: event.clientY, origin: { x: node.x, y: node.y } }
   }, [])
 
-  const onCanvasPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+  /**
+   * Apply the pointer position buffered by the latest move event.
+   *
+   * Both gesture kinds are computed from the *gesture start*, never from the
+   * previous frame, so applying only the last position is exact: nothing
+   * accumulates and the end position is the same whether one frame ran or sixty
+   * (§10.3). The pending frame is cancelled here so a manual flush (pointerup)
+   * cannot be followed by a second, stale one.
+   */
+  const flushPointer = useCallback(() => {
+    if (frameRef.current !== undefined) {
+      cancelAnimationFrame(frameRef.current)
+      frameRef.current = undefined
+    }
+    const pointer = pointerRef.current
+    pointerRef.current = undefined
     const gesture = gestureRef.current
-    if (gesture === undefined) return
+    if (gesture === undefined || pointer === undefined) return
     if (gesture.kind === 'pan') {
-      setCamera(panBy(gesture.camera, { x: event.clientX - gesture.startX, y: event.clientY - gesture.startY }))
+      setCamera(panBy(gesture.camera, { x: pointer.x - gesture.startX, y: pointer.y - gesture.startY }))
       return
     }
     // Screen delta → world delta: the node must track the pointer at any zoom.
-    const dx = (event.clientX - gesture.startX) / camera.zoom
-    const dy = (event.clientY - gesture.startY) / camera.zoom
+    const dx = (pointer.x - gesture.startX) / camera.zoom
+    const dy = (pointer.y - gesture.startY) / camera.zoom
     setNodes((current) => current.map((node) => (
       node.id === gesture.id ? { ...node, x: gesture.origin.x + dx, y: gesture.origin.y + dy } : node
     )))
   }, [camera.zoom])
 
+  /**
+   * Buffer the pointer and let one animation frame apply it.
+   *
+   * A high-refresh pointer fires several `pointermove` events per frame; each
+   * one used to be a full re-render (`setCamera`/`setNodes`). Coalescing them
+   * keeps the work at one render per frame while the visible result is
+   * unchanged, because the geometry is derived from the gesture origin.
+   */
+  const onCanvasPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (gestureRef.current === undefined) return
+    pointerRef.current = { x: event.clientX, y: event.clientY }
+    if (frameRef.current !== undefined) return
+    frameRef.current = requestAnimationFrame(() => { flushPointer() })
+  }, [flushPointer])
+
   const endGesture = useCallback(() => {
     const gesture = gestureRef.current
+    if (gesture === undefined) {
+      // A stray pointerup still cleans a queued frame from a gesture that was
+      // cancelled elsewhere; nothing is left to apply.
+      pointerRef.current = undefined
+      if (frameRef.current !== undefined) {
+        cancelAnimationFrame(frameRef.current)
+        frameRef.current = undefined
+      }
+      return
+    }
+    // Flush before dropping the gesture: the release position is the one the
+    // user chose, and a move that was still waiting for a frame must not be
+    // lost — the saved arrangement has to match what the drag looked like.
+    flushPointer()
     gestureRef.current = undefined
     // Both a drag and a pan moved something worth keeping: node positions in the
     // first case, the camera in both.
-    if (gesture !== undefined) scheduleLayout()
-  }, [scheduleLayout])
+    scheduleLayout()
+  }, [flushPointer, scheduleLayout])
 
   /** Hand a canvas result back to the form as an edit reference. */
   const referenceNode = useCallback((node: CanvasNode) => {
@@ -1712,24 +1832,24 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               createElement(
                 'svg',
                 { className: 'dsh-forge-canvas-edges', width: 1, height: 1, 'aria-hidden': true },
-                ...nodes.flatMap((node) => node.parents.flatMap((parentId) => {
-                  const parent = nodes.find((candidate) => candidate.id === parentId)
-                  if (parent === undefined) return []
-                  return [createElement('path', {
-                    key: `${parentId}->${node.id}`,
-                    d: edgePath(nodeRect(parent), nodeRect(node)),
-                    className: 'dsh-forge-edge',
-                  })]
+                // Edges are resolved once per board change (`graph.edges`, via
+                // `Map<id, node>` — no per-edge scan) and then culled per frame:
+                // an edge draws when an endpoint is on screen or when the wire
+                // itself crosses the viewport.
+                ...shownEdges.map((edge) => createElement('path', {
+                  key: `${edge.parent}->${edge.child}`,
+                  d: edgePath(edge.from, edge.to),
+                  className: 'dsh-forge-edge',
                 })),
               ),
-              ...nodes.map((node) => {
+              ...shown.map((item) => {
+                const node = item.node
                 const selected = node.id === selectedNodeId
                 // The width is inline because it belongs to this picture: the
                 // stylesheet cannot know the aspect ratio, and a fixed node
                 // width is exactly what turned a 16:9 result into a letterboxed
                 // thumbnail (D8). Height stays with the stylesheet — picture area
                 // plus caption/actions, which grow naturally when they wrap.
-                const rect = nodeRect(node)
                 return createElement(
                   'div',
                   {
@@ -1738,7 +1858,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                     style: {
                       left: `${String(node.x)}px`,
                       top: `${String(node.y)}px`,
-                      width: `${String(rect.width)}px`,
+                      width: `${String(item.width)}px`,
                     },
                     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onNodePointerDown(event, node) },
                   },
