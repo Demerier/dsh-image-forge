@@ -68,6 +68,7 @@ import { sniffImageMime, type GeneratedImage, type GenerateRequest, type Referen
 import {
   MODEL_PROFILES,
   assertLatentAligned,
+  parseMossLayout,
   resolveProfile,
   resolveSampling,
   withoutQwenCache,
@@ -98,6 +99,7 @@ export {
   TURBO_STEPS,
   editTurboWorkflow,
   editWorkflow,
+  parseMossLayout,
   withoutQwenCache,
 } from './model-profiles.ts'
 export {
@@ -215,8 +217,22 @@ export interface SamplerOverrides {
   readonly scheduler?: string
 }
 
+/**
+ * Optional MOSS layout conditioning for one text-to-image call.
+ *
+ * The value is the layout editor's **compiled** export (the JSON string whose
+ * `bbox_coord_space` is `abs_centralized` and `bbox_format` `yxyx`). Only a
+ * profile with `layoutTemplate` accepts it (today: MOSS-Image); `tools.ts` owns
+ * the caller-facing validation, and the renderer parses it again so a direct
+ * adapter caller cannot submit a layout ComfyUI would silently ignore.
+ */
+export interface LayoutOverride {
+  /** Compiled layout prompt; absent keeps the plain text-to-image graph. */
+  readonly layout?: string
+}
+
 /** Everything the optional per-call overrides can put on a graph. */
-export type WorkflowOverrides = QualityTierOverrides & SamplerOverrides
+export type WorkflowOverrides = QualityTierOverrides & SamplerOverrides & LayoutOverride
 
 /**
  * Optional quality-tier overrides for the Qwen base `KSampler` graphs.
@@ -1111,12 +1127,29 @@ function textToImageValues(
  * @param preset - the configured sampling register, if any.
  * @returns a rendered graph, ready for `/prompt`.
  */
-function renderTextToImage(
+export function renderTextToImage(
   profile: ModelProfile,
   models: ComfyModels,
   request: GenerateRequest & WorkflowOverrides,
   preset?: string,
 ): Record<string, unknown> {
+  // Layout conditioning swaps in the family's layout graph and adds the two values
+  // only that graph reads. Refused loudly rather than dropped: a profile without
+  // the native nodes would otherwise submit a plain text-to-image graph and the
+  // caller would think the boxes were honoured.
+  if (request.layout !== undefined) {
+    if (profile.layoutTemplate === undefined) {
+      throw new Error(
+        `comfyui backend: 布局（layout）只对 MOSS-Image 生效——只有 moss-sft 的布局通路（compiled JSON 当正向编码文本）存在，` +
+          `当前 profile 是 ${profile.label}。`,
+      )
+    }
+    const parsed = parseMossLayout(request.layout)
+    return renderWorkflow(profile.layoutTemplate, {
+      ...textToImageValues(profile, models, request, preset),
+      layout_json: parsed.json,
+    }) as Record<string, unknown>
+  }
   const template =
     profile.family === 'qwen-image-2.1' && !models.cache ? withoutQwenCache(profile.textToImage) : profile.textToImage
   return renderWorkflow(template, textToImageValues(profile, models, request, preset)) as Record<string, unknown>

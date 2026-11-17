@@ -35,7 +35,7 @@ import {
   type NativeScheduler,
   type NativeSampler,
 } from './comfyui.ts'
-import { presetSteps, type ModelProfile, type MossSamplingPreset } from './model-profiles.ts'
+import { parseMossLayout, presetSteps, type ModelProfile, type MossSamplingPreset } from './model-profiles.ts'
 import type { GeneratedImage } from './images.ts'
 import { sanitizePrefix, writeImages, type WrittenImage } from './output.ts'
 import { makeItemId, recordItems } from './boards.ts'
@@ -153,6 +153,14 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
       '采样步数；省略则按配置解析：`comfyuiSteps` → 采样档位自带步数（仅 MOSS：comfy 25 / official 50）→ 默认 `defaultSteps`（默认 40，仅无档位的 Qwen）；' +
       '`comfyModel` 是 turbo 变体（`qwen21-turbo` / 旧值 `turbo`）时是 `turboSteps` → 8。' +
       '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
+  },
+  layout: {
+    type: 'string',
+    description:
+      '编译后的 MOSS 布局（compiled JSON 字符串，布局编辑器「导出 compiled」原文）：bbox_coord_space=abs_centralized、bbox_format=yxyx，' +
+      'items 为画框数组（label / caption / text / bbox），summary.caption 为整图描述（必填）。传了它，MOSS 的正向编码文本就是这段布局 prompt，画框控制构图。' +
+      '**仅 comfyModel="moss-sft" 支持**（Qwen 两个 profile 没有布局通路，传了会明确报错）；省略则与之前逐字节一致的普通文生图。' +
+      '布局在本地编译并校验，不需要 ComfyUI 额外装节点（原生 MOSSImageLayoutPrompt 产出的就是同一份 JSON）。',
   },
   ...QUALITY_PARAMETERS,
   ...SAMPLER_PARAMETERS,
@@ -951,6 +959,22 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         asNumber(args.cfg, 'cfg'),
         asText(args.negative_prompt, 'negative_prompt'),
       )
+      // Layout conditioning is MOSS-only and must fail before any backend work: a
+      // profile without the native layout nodes would otherwise submit a graph that
+      // silently ignores the layout, and a malformed layout string would be caught
+      // by ComfyUI only after the weights were loaded.
+      const layout = asText(args.layout, 'layout')
+      if (layout !== undefined) {
+        if (requestedProfile.layoutTemplate === undefined) {
+          throw new Error(
+            'comfyui backend: 布局（layout）只对 MOSS-Image 生效——只有 moss-sft 的布局通路（compiled JSON 作为正向编码文本）存在，' +
+              '当前请求的 profile 是 ' + requestedProfile.label + '。把 comfyModel 换成 moss-sft 再传 layout，或去掉该参数。',
+          )
+        }
+        // Parse here as well: fail on the tool boundary with a named field instead of
+        // submitting a layout the CreateBoundingBoxes node would refuse.
+        parseMossLayout(layout)
+      }
       const request = {
         prompt,
         width: size.width,
@@ -963,6 +987,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       const overrides = {
         ...(quality === null ? {} : { cfg: quality.cfg, negativePrompt: quality.negativePrompt }),
         ...(samplerOverrides === null ? {} : samplerOverrides),
+        ...(layout === undefined ? {} : { layout }),
       }
       const startedAt = Date.now()
 

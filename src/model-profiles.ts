@@ -418,6 +418,162 @@ export const MOSS_IMAGE_WORKFLOW: ApiGraph = {
   '10': { class_type: 'SaveImage', inputs: { images: ['9', 0], filename_prefix: '{{filename_prefix}}' } },
 }
 
+// ---------------------------------------------------------------------------
+// MOSS-Image: layout-conditioned generation (native nodes, T21)
+// ---------------------------------------------------------------------------
+
+/**
+ * One item of a compiled MOSS layout prompt.
+ *
+ * `verify/layout_prompt.json` and the `*_draft.json` ⇄ compiled pairs under
+ * `verify/` are the format authority. `bbox` is `[y1, x1, y2, x2]` in the
+ * centred coordinate space the official compiler emits (`abs_centralized`),
+ * which is why the compiled document carries that tag and the order.
+ */
+export interface MossLayoutItem {
+  /** `object` / `character` / `text`; absent means the compiler's default. */
+  readonly label?: string
+  /** What to draw inside the box (the caption, not the whole-image prompt). */
+  readonly caption: string
+  /** Literal text, for `text` items. */
+  readonly text?: string
+  /** `[y1, x1, y2, x2]` in centred absolute pixels. */
+  readonly bbox: readonly number[]
+}
+
+/** A compiled layout prompt document (what the layout editor exports). */
+export interface MossLayoutPromptDocument {
+  readonly summary?: { readonly caption?: string }
+  readonly items: readonly MossLayoutItem[]
+  readonly bbox_coord_space: string
+  readonly bbox_format: string
+}
+
+/** A validated layout prompt, ready to fill the graph placeholders. */
+export interface ParsedMossLayout {
+  /** The parsed document. */
+  readonly document: MossLayoutPromptDocument
+  /** The exact JSON string handed to the positive encode node, verbatim. */
+  readonly json: string
+}
+
+/** Item labels the official compiler emits; anything else is a typo. */
+const MOSS_LAYOUT_LABELS = ['object', 'character', 'text'] as const
+
+/**
+ * Parse and validate a compiled layout prompt.
+ *
+ * The layout is prompt text, not workflow wiring: the compiled JSON is handed to
+ * ComfyUI's `CreateBoundingBoxes` node as a string. Validation therefore fails
+ * loudly on anything the node would choke on — malformed JSON, the wrong
+ * coordinate space or order, an empty item list, a box that is not four finite
+ * numbers — instead of submitting a graph that silently ignores the layout.
+ *
+ * @param input - the compiled JSON string (the layout editor's "compiled" export).
+ * @returns the parsed document plus the strings the layout graph needs.
+ * @throws When the JSON is not a valid compiled layout prompt.
+ */
+export function parseMossLayout(input: string): ParsedMossLayout {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(input)
+  } catch {
+    throw new Error('moss layout: 布局不是合法 JSON。请传布局编辑器导出的 compiled 文本（abs_centralized / yxyx）。')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('moss layout: 布局必须是一个 JSON 对象（含 summary / items / bbox_coord_space / bbox_format）。')
+  }
+  const document = parsed as Partial<MossLayoutPromptDocument> & Record<string, unknown>
+  if (document.bbox_coord_space !== 'abs_centralized') {
+    throw new Error(
+      'moss layout: bbox_coord_space 必须是 abs_centralized，收到 ' + String(document.bbox_coord_space) +
+        '。请用布局编辑器导出的 compiled 文本，不要手改坐标空间。',
+    )
+  }
+  if (document.bbox_format !== 'yxyx') {
+    throw new Error(
+      'moss layout: bbox_format 必须是 yxyx，收到 ' + String(document.bbox_format) +
+        '。compiled 布局的 bbox 顺序是 [y1, x1, y2, x2]。',
+    )
+  }
+  if (!Array.isArray(document.items) || document.items.length === 0) {
+    throw new Error('moss layout: items 必须是非空数组（至少一个画框）。')
+  }
+  const items: MossLayoutItem[] = document.items.map((raw, index) => {
+    const position = 'items[' + String(index) + ']'
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('moss layout: ' + position + ' 必须是对象（label / caption / bbox）。')
+    }
+    const item = raw as Record<string, unknown>
+    if (typeof item.caption !== 'string' || item.caption.trim().length === 0) {
+      throw new Error('moss layout: ' + position + '.caption 必须是非空字符串。')
+    }
+    if (item.label !== undefined && !(MOSS_LAYOUT_LABELS as readonly unknown[]).includes(item.label)) {
+      throw new Error('moss layout: ' + position + '.label 只能是 object / character / text。')
+    }
+    if (!Array.isArray(item.bbox) || item.bbox.length !== 4 || !item.bbox.every((value) => Number.isFinite(value))) {
+      throw new Error('moss layout: ' + position + '.bbox 必须是 [y1, x1, y2, x2] 四个有限数字。')
+    }
+    return {
+      label: typeof item.label === 'string' ? item.label : undefined,
+      caption: item.caption,
+      text: typeof item.text === 'string' ? item.text : undefined,
+      bbox: item.bbox as number[],
+    }
+  })
+  const caption = document.summary?.caption
+  if (typeof caption !== 'string' || caption.trim().length === 0) {
+    throw new Error(
+      'moss layout: summary.caption 必须是非空字符串——它是整图描述，MOSS 的布局 prompt 把它作为整体语义；' +
+        '只画框不给整图描述时，布局和提示词会互相打架。',
+    )
+  }
+  return {
+    document: {
+      summary: document.summary as MossLayoutPromptDocument['summary'],
+      items,
+      bbox_coord_space: 'abs_centralized',
+      bbox_format: 'yxyx',
+    },
+    json: input,
+  }
+}
+
+/**
+ * The layout-conditioned MOSS-Image graph.
+ *
+ * Identical to {@link MOSS_IMAGE_WORKFLOW} except that the positive encoder's
+ * text is the compiled layout prompt instead of the caller's prose. That is what
+ * the native nodes would ultimately produce: `MOSSImageLayoutPrompt.execute`
+ * compiles drawn boxes into exactly this JSON shape (`{summary:{caption},
+ * items,bbox_coord_space:'abs_centralized',bbox_format:'yxyx'}`) and the official
+ * template feeds that string into the positive `CLIPTextEncode`. Compiling in the
+ * editor and passing the compiled text keeps the graph to one extra value, with
+ * no element-array round trip that the API cannot express (see the comment
+ * inside the graph).
+ *
+ * The no-layout path keeps using {@link MOSS_IMAGE_WORKFLOW} unchanged — a
+ * request without a layout must stay byte-identical.
+ */
+export const MOSS_IMAGE_LAYOUT_WORKFLOW: ApiGraph = {
+  ...MOSS_IMAGE_WORKFLOW,
+  // The compiled layout prompt *is* what MOSS conditions on: the native
+  // `MOSSImageLayoutPrompt` node's whole job is to turn drawn boxes into exactly
+  // this JSON string (verify its `execute` in comfy_extras/nodes_moss_image.py),
+  // and the official template feeds that string straight into the positive
+  // `CLIPTextEncode`. The plugin already produces the same string from its layout
+  // editor, so the layout path replaces the positive prompt text and nothing else —
+  // same model, same sampler, byte-identical graph minus one value.
+  //
+  // Why not wire `MOSSImageLayoutPrompt` itself: its `element` input takes the
+  // `CreateBoundingBoxes` element array (0-1000 normalised boxes), which ComfyUI
+  // cannot be handed as a literal list over the API (every list is treated as a
+  // linked input, and `CreateBoundingBoxes.editor_state` is a required widget with
+  // no producer). Pre-compiling locally is the same transformation done one layer
+  // earlier, with no lossy round trip.
+  '4': { class_type: 'CLIPTextEncode', inputs: { text: '{{layout_json}}', clip: ['2', 0] } },
+}
+
 /** Side length MOSS-Image's `EmptyFlux2LatentImage` requires a multiple of. */
 export const MOSS_LATENT_MULTIPLE = 16
 
@@ -733,6 +889,13 @@ export interface ModelProfile {
   readonly textToImage: ApiGraph
   /** The image-to-image graph, when the family has one wired up. */
   readonly imageToImage?: EditSpec
+  /**
+   * The layout-conditioned graph, when the family can consume a compiled layout
+   * prompt. Only MOSS-Image ships the native `MOSSImageLayoutPrompt` /
+   * `MOSSImageControl` nodes; a layout request on a profile without this field is
+   * refused rather than silently dropped.
+   */
+  readonly layoutTemplate?: ApiGraph
   /** Why a graph family is not wired up yet, when it is not. */
   readonly todo?: string
 }
@@ -916,9 +1079,10 @@ export const MODEL_PROFILES: Readonly<Record<ComfyModelId, ModelProfile>> = {
     filenamePrefix: 'dsh-image-forge-moss',
     textToImage: MOSS_IMAGE_WORKFLOW,
     imageToImage: { template: MOSS_IMAGE_EDIT_WORKFLOW, build: mossEditWorkflow },
-    // TODO(moss-layout): `MOSSImageLayoutPrompt` + `MOSSImageControl` (JSON
-    // layout contract sample: `verify/layout_prompt.json`) are a separate,
-    // unrequested feature; the reference-image edit above does not need them.
+    // T21: a compiled layout prompt conditions the text-to-image graph through
+    // the native MOSSImageLayoutPrompt + MOSSImageControl nodes; the plain
+    // MOSS_IMAGE_WORKFLOW stays the no-layout path, byte-identical.
+    layoutTemplate: MOSS_IMAGE_LAYOUT_WORKFLOW,
   },
 }
 

@@ -159,11 +159,39 @@ qwen_image_edit(prompt = <成品修改指令>, images = ["D:\\pictures\\cup.png"
   描述，不靠「主体小一点」这类形容词）；**布局 caption 的视觉语汇会扩散到全图**（改图
   prompt 里也别堆远景高频细节词，否则参考图之外会被补出同类纹理）。
 
-## 工具一览
+### MOSS-Image 的布局控制（`layout`，仅 `comfyModel: "moss-sft"`）
+
+`qwen_image_generate` 的 `layout` 参数把布局编辑器导出的 **compiled JSON** 作为 MOSS 的
+**正向编码文本**：MOSS 的布局 prompt 本来就是这段 JSON（原生 `MOSSImageLayoutPrompt` 节点的输出
+就是 `{summary:{caption},items,bbox_coord_space:"abs_centralized",bbox_format:"yxyx"}`），
+官方模板把它直接喂给正向 `CLIPTextEncode`。插件在本地完成同一份编译，所以布局通路只换一个
+文本值，**不注入任何额外节点**。
+
+```text
+qwen_image_generate(
+  prompt  = <整图描述：布局 summary.caption，工具会把它与布局一起校验>,
+  layout  = <布局编辑器「导出 compiled」原文（abs_centralized / yxyx）>,
+  wh_ratio = "1:1",   // 或 width/height，需与布局 draft 的坐标空间一致
+  comfyModel 由插件配置为 "moss-sft",
+)
+```
+
+- **只对 MOSS-Image 生效**：Qwen 两个 profile 没有布局通路，传 `layout` 会在调用前明确报错
+  （不会提交一张忽略布局的图）。
+- **校验在工具边界完成**：布局必须是合法 JSON、`bbox_coord_space=abs_centralized`、
+  `bbox_format=yxyx`、`items` 非空、`summary.caption` 非空（整图描述是布局 prompt 的语义锚点）、
+  每个 bbox 是四个有限数字；任何一条不满足都会点名报错。
+- **无布局回归**：不传 `layout` 时走原来的 `MOSS_IMAGE_WORKFLOW`，注入图与之前逐字节一致。
+- **为什么不是节点链**：ComfyUI 0.45.3 的原生 `MOSSImageLayoutPrompt` 需要 `CreateBoundingBoxes`
+  的 element 数组，而该数组/节点状态无法通过 HTTP API 传入（列表会被当作 linked input，
+  `editor_state` 是必填 widget 且无生产者）。本地编译是同一变换提前一层完成，输出字节等价。
+- **本期边界**：只支持「MOSS 文生图 + 布局」；布局与参考图改图叠加的行为未定义（T21 停止条件），
+  改图请去掉 `layout`。布局强度由布局稿本身决定（本版不暴露 `MOSSImageControl` 的强度旋钮，
+  那个节点管的是 color/depth control map，不是画框布局）。
 
 | 工具 | 说明 |
 |---|---|
-| `qwen_image_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`size_tier`（`1.5mp` 默认 / `2k` 官方 4.2MP 表）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`preset`、`board`（画板 id/名字，**省略就新建**，见「画板」一节）、以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见[配置](configuration.md)） |
+| `qwen_image_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`size_tier`（`1.5mp` 默认 / `2k` 官方 4.2MP 表）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`preset`、`board`（画板 id/名字，**省略就新建**，见「画板」一节）、`layout`（MOSS 专用：布局编辑器导出的 compiled JSON，见「MOSS-Image 的布局控制」）、以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见[配置](configuration.md)） |
 | `qwen_image_edit` | **参考图编辑（图生图）**。`prompt`（成品修改指令，必填）、`images`（1–10 张绝对路径或 `data:image/…;base64,…`，必填，按序对应 `<image1>`…）、`ratio_follow`（画布跟随某张参考图的宽高比；`image1`… 或该图在 `images` 里的原字符串）、`wh_ratio`（**与 `ratio_follow` 互斥**）、`size_tier`、`width`/`height`、`steps`、`seed`、`count`、`preset`（默认 `edit`）、`board`（改图通常传参考图所在画板的 id） |
 | `qwen_image_status` | **只读**体检：**本机 ComfyUI 是否在跑**（探了哪几个端口、三个权重能不能枚举到、显卡型号与显存余量）、输出目录能否写。不产图、不写盘、不改配置，也不拉起或杀掉任何进程 |
 
