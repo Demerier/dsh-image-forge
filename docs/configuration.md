@@ -126,11 +126,16 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
   cache 开 **24.06 / 23.20 s** 每步、关 **3.40 / 3.40 s** 每步，**7 倍、可复现、与顺序无关**。
   这条也是删除 worker 的直接依据之一：同一个画布 ComfyUI 8 步 19–23 s。
 
-- ⚠️ **一个仍然会让人卡住的显存陷阱（8 GB 卡必读）**：ComfyUI 跑完会在自己进程里留下约 **3.6 GiB** 的
-  `cudaMallocAsync` 分配器缓存，而 `nvidia-smi --query-compute-apps` **列不出占用进程**。
-  所以「显存看着不够但没人占着」的时候，正确动作是让 ComfyUI 自己交回：
-  `POST /free` + `{"unload_models":false,"free_memory":true}`。插件**不会再替你发**这个请求（它不碰别人的进程），
-  只在 `qwen_image_status` 里把显存数字报出来，由你决定。
+- **显存调度：先交给 ComfyUI（8 GB 卡必读）**。NVIDIA Windows/Linux 上 ComfyUI **默认已开 dynamic VRAM**：
+  按需逐层 fault-in 权重，而不是整包常驻后 OOM；文本编码器也跟着这套驻留策略走，8 GB 卡上让它 offload 是正解。
+  所以**不要**用 `--novram` / `--highvram` / `--gpu-only` / `--cpu` 去「手动省显存」——它们会关掉 dynamic VRAM，
+  反而更糟；`--lowvram` 在 dynamic VRAM 开启时**无效**。要调就调新参数：`--dynamic-vram`、`--vram-headroom N`、
+  `--fast-disk`（官方启动参数文档）。
+- ⚠️ **`/free` 不是常规轮询手段**：ComfyUI 跑完会在自己进程里留下约 **3.6 GiB** 的 `cudaMallocAsync` 分配器缓存，
+  而 `nvidia-smi --query-compute-apps` **列不出占用进程**。只有「卡被别的程序挤占、这一轮必须立刻回收显存」时，
+  才让 ComfyUI 自己交回：`POST /free` + `{"unload_models":false,"free_memory":true}`——`free_memory=true` 清 VRAM，
+  `unload_models=true` 会连 RAM 里的模型一起清、下一轮被迫重载，所以**别在轮次之间调**。插件**不会再替你发**
+  这个请求（它不碰别人的进程），只在 `qwen_image_status` 里把显存数字报出来，由你决定。
 - 这一块是**静态说明**，不做动态探测。文案纪律由 `test/settings.test.mjs` 守住：
   结论性措辞（`已定位` / `WDDM` / `对照实验`）**必须**出现在已定位的 finding 里且**必须**带实测数字；
   同时**全块禁止**任何修复承诺（`正在优化` / `即将修复` / `预计` / `会修好` / `保证` 一律测试失败），

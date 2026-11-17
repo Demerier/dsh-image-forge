@@ -59,6 +59,10 @@ node scripts/start-comfyui.mjs --dir D:\path\to\ComfyUI   # 手动指定安装�
 [doctor] 结论：可以出图。pnpm run test:live 会真跑一张。
 ```
 
+> 上面是更早一次实测的快照。T04 在 2026-11-17 复测同一模型根：**39 个模型文件、合计 178.3 GiB**（递归数 `.safetensors`）。
+> `--doctor` 自己按扩展名白名单限深度统计（`scripts/start-comfyui.mjs`），计数随本机装/删模型变化，
+> 对不上时以 `--doctor` 的现场输出为准，别把这里的数字当校验值。同一时期 base 默认步数还是 25（T05 起改为 40），块内「25 步」只是当时快照里的标签。
+
 退出码：`0` 就绪 / `1` 没找到安装或缺权重 / `2` 进程起不来（会打日志最后 25 行）/ `3` 等超时。
 
 **你只需要读下面这些章节的情形**：脚本说「没找到 ComfyUI」（→ §1 装）、说缺权重（→ §4 下权重）。
@@ -126,8 +130,10 @@ curl -s http://127.0.0.1:8188/system_stats
   或直接写死 `comfyEndpoint = http://127.0.0.1:<端口>`。
 - **版本**：`comfyui_version` 要 **≥ 0.37**（Qwen-Image 2.1 的节点从这一版起提供）。本机 0.41.3。
   太老的版本装不上模板，也认不了 `int8_convrot` 权重。
-- 桌面版启动参数里带 `--lowvram`（本机实测），这是它自己的省显存策略，和插件无关；插件不会传
-  任何启动参数，也不重启 ComfyUI。
+- 桌面版自带的启动参数（本机 `installations.json` 实测：`--fast-disk`、`--reserve-vram 1`、`--vram-headroom 0.5` 等）
+  是它自己的显存调度，和插件无关；插件不会传任何启动参数，也不重启 ComfyUI。**别再给桌面版加 `--lowvram`**：
+  dynamic VRAM 默认开启时它不起作用；`--novram` / `--highvram` / `--gpu-only` / `--cpu` 反而会关掉 dynamic VRAM
+  （见 §8）。
 
 ---
 
@@ -191,9 +197,11 @@ comfy.desktop_0:
 | `text_encoders/qwen3vl_8b_*.safetensors` | `models\clip\` | `CLIPLoader.clip_name` |
 | `vae/qwen_image_2.1_vae_bf16.safetensors` | `models\vae\` | `VAELoader.vae_name` |
 
-`models\diffusion_models\` 和 `models\text_encoders\` 虽然在 yaml 里也映射了，但**那是给别的
-节点用的**（新版 `UNETLoader` 只列 `unet\`）。放错地方的典型症状是：文件明明在，ComfyUI 的
-下拉框里就是没有它。
+`models\diffusion_models\` 和 `models\text_encoders\` 在 yaml 里也映射了，而且**它们和 `unet\` / `clip\`
+是合并列出的**：ComfyUI 0.45.3 实测（`folder_paths.py` 把 `unet` 与 `diffusion_models` 并进同一个
+folder，`text_encoders` 与 `clip` 同理），放在 `diffusion_models\` 的主干同样会出现在
+`UNETLoader.unet_name` 下拉框里。所以 §3 表格里的落盘目录是「推荐放法」，不是唯一放法；真正放错的是
+yaml **没有映射**的自造目录，以及 `ComfyUI-Installs\…\models` 那棵没在用的老树（§2.2、§9）。
 
 ---
 
@@ -347,9 +355,9 @@ curl -s http://127.0.0.1:8188/object_info > object_info.json
 |---|---|---|
 | `comfyEndpoint` | 留空 | 留空 = 按 `comfyPorts` 挨个探。端口固定的话写死 `http://127.0.0.1:8188` 更快 |
 | `comfyPorts` | `8000,8188,8189,8190,8191,8192`（默认） | 监听在别的端口就把那个端口加进来 |
-| `comfyModelsDir` | 自动探测到的 `…\ComfyUI-Shared\models` | **只用于把错误信息写具体**（「把文件放进 X」）。插件不往这里读写任何东西，ComfyUI 自己管它的目录 |
-| `comfyModel` | `turbo` | 8 步，同画质约快 2.7×。写实人像 / 画面里有中文文字 / 古典绘画性构图切 `base` |
-| `turboSteps` | 留空 = 8 | turbo 的步数。`base` 用 `defaultSteps`（25） |
+| `comfyModelsDir` | **探测**候选目录，第一个存在的；探不到就留空 | **只用于把错误信息写具体**（「把文件放进 X」）。候选只有 `%APPDATA%\ComfyUI\models`、`%LOCALAPPDATA%\ComfyUI\models`、`~\ComfyUI\models` 等常见位置（`src/config-defaults.ts`），**不含桌面版的 `ComfyUI-Shared\models`**——本机实测探不到、值为空；想让报错带上绝对路径就手填 `D:\Comfy-Desktop\ComfyUI-Shared\models`。插件不往这里读写任何东西 |
+| `comfyModel` | `qwen21-turbo`（旧值 `turbo` 仍可用） | 8 步；25 步 base 基准实测约快 2.7×（base 现默认 40 步，按线性外推约 4–5×，未重新实测）。写实人像 / 画面里有中文文字 / 古典绘画性构图切 `qwen21-base` |
+| `turboSteps` | 留空 = 8 | turbo 的步数。`base` 用 `defaultSteps`（40） |
 | `comfyuiSteps` | 留空 | 只对 `comfyui` 后端生效的步数覆盖；一般不用填 |
 
 做完跑一次体检：
@@ -372,11 +380,32 @@ RTX 4070 Laptop（8188 MiB，`cudaMallocAsync`）、ComfyUI 0.41.3、int8_convro
 | 文生图 1312×736 | 8（turbo） | 19–23 s，约 2 s/步 |
 | 编辑 1312×736，1 张参考图 | 8（turbo） | 19–23 s |
 
-- 比 base（25 步）快约 **2.7×**，画质盲测无显著差异——**除了写实人像、画面中文字、古典构图**这三类，
+- 比 40 步的 base 快得多（25 步基准下实测约 **2.7×**；40 步按线性外推约 4–5×，未重新实测），画质盲测无显著差异——**除了写实人像、画面中文字、古典构图**这三类，
   turbo 会掉细节，那几类切 `base`。
-- 显存由 ComfyUI 自己调度（本机桌面版带 `--lowvram`）。真不够时是**干净的 CUDA OOM**回报，
-  不是插件拒绝你：调小 `width`/`height`，或先关掉别的吃显存程序。
+- 显存由 ComfyUI 的 **dynamic VRAM** 自己调度（NVIDIA Windows/Linux 默认开启：按需逐层把权重 fault-in，
+  不再整包常驻）。`--lowvram` 在它开启时**无效**；`--novram` / `--highvram` / `--gpu-only` / `--cpu` 会把它关掉、
+  反而更容易 OOM。要调就调 `--vram-headroom N`（给别的程序留显存）或 `--fast-disk`。
+  真不够时是**干净的 CUDA OOM**回报，不是插件拒绝你：调小 `width`/`height`，或先关掉别的吃显存程序。
 - 卡上同时跑第二个 ComfyUI 实例 / 游戏 / Blender，会显著拖慢甚至 OOM。
+
+---
+
+## 8.5 画质小瑕疵：VAE 网格纹（degrid）
+
+Qwen-Image 2.1 的 VAE 解码在部分图上会留下 **2px 网格 / halftone / 菱形交叉纹**（社区多源报告；插件不处理，也不把它包装成没有）。
+
+社区现成方案是 **Nyquist Notch 去网格节点**，代表实现：
+
+- [lunaaispace-eng/ComfyUI-DeGrid](https://github.com/lunaaispace-eng/ComfyUI-DeGrid)（Apache-2.0）：自动校准的
+  Nyquist notch + 锁相网格检测，纯 PyTorch、无额外依赖；接线位置是 **VAE Decode 之后、其余节点之前**。
+- comfy.icu 节点目录里的 `VAE DeGrid (Nyquist Notch)` 是同类包装。
+
+**本插件不内置、不下载、不自动接线**：节点包是第三方依赖，引入它超出本项目的边界；要用就自己装到 ComfyUI 里，
+插件发给 ComfyUI 的工作流里没有它。
+
+**与超分链路的兼容性（社区口径，未在本插件验证）**：网格是 VAE 解码带出来的，超分 / 细节增强会把它一起放大
+或强化，所以去网格要放在 **超分之前**；部分超分、锐化、降噪节点本身也抹细节，与 degrid 叠加可能「去纹也去纹理」，
+需要自己 A/B 对照。本插件不给出画质承诺。
 
 ---
 
@@ -385,12 +414,12 @@ RTX 4070 Laptop（8188 MiB，`cudaMallocAsync`）、ComfyUI 0.41.3、int8_convro
 | 症状 | 病因 | 处理 |
 |---|---|---|
 | `qwen_image_status` 说 ComfyUI 没在跑，但界面明明开着 | 端口不在探测列表 | 看 §2 拿到真实端口，写进 `comfyPorts` 或 `comfyEndpoint` |
-| 报「缺 unet / 找不到主干」 | 权重放进了 `diffusion_models\` 或 `Installs\…\models` | 搬到 `<base_path>\unet\`（§3） |
+| 报「缺 unet / 找不到主干」 | 权重放进了 `Installs\…\models`（没被 yaml 映射的目录） | 搬到 `<base_path>\unet\`（§3） |
 | 文件在 `unet\` 里，下拉框却没有 | 没重启 ComfyUI | 重启实例（§5） |
 | 加载时报 `header` / 反序列化错误 | 下载被截断 | 比对字节数，删掉重下（`-C -` 续传，§4.3） |
 | `CLIPLoader` 的 `type` 里没有 `qwen_image` | ComfyUI 版本 < 0.37 | 升级桌面版 |
-| 编辑 CUDA OOM | 画布太大 / 卡被占 | 减小 `width`/`height`；关掉别的吃显存程序；必要时让 ComfyUI 走 `/free` |
-| `diffusion_models\` 里放对了还是不行 | 桌面版两个 `models` 目录搞混了 | 认 `system_stats` 的 `extra-model-paths-config` → `base_path`（§3 办法 A），只信这个 |
+| 编辑 CUDA OOM | 画布太大 / 卡被占 | 减小 `width`/`height`；关掉别的吃显存程序。只有「卡被别的程序挤占、这一轮必须立刻回收」时才 `POST /free` + `{"free_memory":true}`——常规轮次不要调，卸载模型只会让下一轮重新加载（§8） |
+| 权重明明在共享模型根里，ComfyUI 还是看不见 | 桌面版两个 `models` 目录搞混了 | 认 `system_stats` 的 `extra-model-paths-config` → `base_path`（§3 办法 A），只信这个 |
 | 下载速度为 0 / 反复断 | 直连 HF 或镜像抖动 | 确认域名是 `hf-mirror.com`；`--retry 5`；`-C -` 反复续传 |
 
 ---

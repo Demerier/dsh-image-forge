@@ -234,19 +234,19 @@ Lightning LoRA 下正常，且依赖参考图内容。
 | # | 优先级 | 改动 | 依据 | 状态 |
 |---|---|---|---|---|
 | 1 | **P0** | turbo edit cfg 8 → 1 | 官方三处口径；cfg 8 + 空负向词在 CFGGuider 路径上实质劣化改图 | ✅ 已修 |
-| 2 | **P1** | base 默认步数 25 → **40**（t2i 与 edit 同步；turbo 不动） | 〔官方+多源〕官方 GitHub 推荐 40；"reduces fizzle"、"hands settle by ~30 steps"；社区优先级排序确认收益真实。代价 ≈1.6×时间 | 📋 改 `defaultSteps` 默认值 + 文档 |
+| 2 | **P1** | base 默认步数 25 → **40**（t2i 与 edit 同步；turbo 不动） | 〔官方+多源〕官方 GitHub 推荐 40；"reduces fizzle"、"hands settle by ~30 steps"；社区优先级排序确认收益真实。代价 ≈1.6×时间 | ✅ 已改（T05：`defaultSteps` 与 qwen21-base profile 默认 40；`docs/configuration.md`、`docs/usage-reference.md`、`skill.md` 同步） |
 | 3 | **P1** | 新增「质量档」：cfg 2.5–3 + 默认负向词集（base 路径，t2i 优先；edit 单参考可用 cfg 2，**多参考保持 cfg 1**） | 〔官方+多源〕官方 cfg2 定性 + 锁种子实测 + 三个社区帖；PE 长提示词最优点 < 3.5；黄偏移用负向词 "overly warm color temperature" 抵消；多参考+真实 CFG 出 artifacts〔孤证〕需回避 | 📋 工具加 `cfg` / `negative_prompt` 参数；时间翻倍要写进返回值 |
 | 4 | **P1** | 2K/4MP 画幅档（画面含文字时在文档/skill 层强制建议） | 〔官方+多源〕官方 4.2MP 七档表；2MP/4MP 显著好于 1MP；小字精度随分辨率提升；上限 2K（4K 丢贴合度） | 📋 `DEFAULT_SIZES` 增补官方 4.2MP 档或 `pixel_budget` 参数 |
 | 5 | **P2** | edit 画布对齐官方语义：默认路径（ratio_follow）改从编码节点 `latent` 输出取采样画布，`resolution` 对齐画布预算 | 〔官方〕"any other size shifts the edit"；需先解决 count>1 的批量语义（encode latent 无 batch），故标实验 | 🔬 对照实验：同 seed 下 latent 接线 vs EmptyLatentImage 的编辑漂移 |
 | 6 | **P2** | base 与 turbo 两条链都接入 `QwenImage21Cache(device="auto", dtype="default")`（插在 UNETLoader 之后），**避开 `gpu` 档** | 〔官方〕t2i 模板既定结构、edit 加速大头、优雅降级不崩 run；已知 bug 集中在 gpu 档（#16879/#16900）；需 ComfyUI ≥ 0.37.0（在 `qwen_image_status` 里提示版本）；A/B 数字待 §五-4 | 📋 改 4 张工作流图 + 版本兼容检查 |
-| 7 | **P2** | 单参考图编辑改自然指代（去 `<image1>`），多参考保留标签；保留描述抽象化写进 edit_rules | 〔官方契约〕guide_edit 明文 | 📋 改 `references/edit_rules.md` + skill |
-| 8 | **P2** | VAE 网格纹：文档指路 Nyquist Notch degrid 节点（不内置依赖） | 〔多源现象+双源方案〕halftone/diamond/crosshatch 纹；"extremely effective with pretty much no sharpness loss"；与超分链路有兼容性问题需注明 | 📋 docs 一段 |
+| 7 | **P2** | 单参考图编辑改自然指代（去 `<image1>`），多参考保留标签；保留描述抽象化写进 edit_rules | 〔官方契约〕guide_edit 明文 | ✅ 已落实（`references/edit_rules.md` + `skill.md`：N = 1 用自然指代、不加 `<image1>`；N ≥ 2 保留标签） |
+| 8 | **P2** | VAE 网格纹：文档指路 Nyquist Notch degrid 节点（不内置依赖） | 〔多源现象+双源方案〕halftone/diamond/crosshatch 纹；"extremely effective with pretty much no sharpness loss"；与超分链路有兼容性问题需注明 | ✅ 已写文档（`docs/comfyui-deployment.md` §8.5：现象、代表实现 [ComfyUI-DeGrid](https://github.com/lunaaispace-eng/ComfyUI-DeGrid)、超分链路兼容性警告；不内置依赖） |
 | 9 | **P3** | 文本编码器优先档增补 `w4a8`（比 int8_convrot TE 省 ~2.8 GiB，8GB offload 场景更稳） | 〔官方文件表〕TE 三档体积；插件现打分 `/int8/i` 会压过 w4a8，需给 8GB 用户更优默认 | 📋 调整 `MODEL_KINDS.clip.bonus` + 文档 |
 | 10 | ~~P3~~ | ~~t2i 的 `resolution` 1024 → 传画布面积等效值~~ **核实后取消**：官方 t2i 模板的 encode 节点就是静态 1024（无连线、latent 输出未接），插件现状与官方完全一致 | 〔官方〕模板 JSON 逐字段核对（§一）；早前「与官方不一致」的怀疑不成立 | ✅ 无需改动 |
 | 11 | **P3** | RGBA 透明输出恢复：按官方 RGBA 提示词模板 + 检查 VAE alpha 通道输出 | 〔官方〕模型卡有原生路径；0.2.x 删掉的 `transparent` 是因为旧实现不处理而非模型不支持 | 🔬 需实验：VAE 解码 alpha 后 PNG 落盘链路 |
 | 12 | **P3** | 采样器高级档暴露（res_multistep / RES4LYF+beta_57+shift16 / er_sde+beta），默认保持 euler/simple | 替代组合全部〔孤证〕，无严格对照；默认合理性〔官方+双源〕 | 📋 可选参数，不做默认 |
 | 13 | **P3** | 改图 denoise<1 档（锁 ≈0.55）做「轻改」模式 | 〔孤证〕中文社区实测；需加 latent 注入接线 | 🔬 实验后定 |
-| 14 | **P3（文档）** | 显存指引更新：`--lowvram` 已失效、dynamic VRAM 默认开、`/free` 不做常规轮询（只限「卡被挤占、必须立即回收」场景）、turbo LoRA（913 MB）是低配卡替代路径 | 〔官方 flag 文档 + 源码语义〕configuration.md 的 /free 条目需限定场景 | 📋 改 configuration.md + deployment 文档 |
+| 14 | **P3（文档）** | 显存指引更新：`--lowvram` 已失效、dynamic VRAM 默认开、`/free` 不做常规轮询（只限「卡被挤占、必须立即回收」场景）、turbo LoRA（913 MB）是低配卡替代路径 | 〔官方 flag 文档 + 源码语义〕configuration.md 的 /free 条目需限定场景 | ✅ 已改 `docs/configuration.md`（dynamic VRAM 默认开、`--lowvram` 失效、`--vram-headroom`、/free 限定场景）与 `docs/comfyui-deployment.md`（§2 启动参数、§8 显存调度、§9 排障） |
 
 ---
 
