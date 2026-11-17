@@ -16,7 +16,7 @@
 
 **两个入口，一套后端**：对话里说一句话，模型按 Qwen 契约改写后调用工具；或者打开设置页的「图像工作台」点按钮。两边共用同一份配置、同一个输出目录、同一批画板。
 
-**目录**：[能不能用](#能不能用) · [快速开始](#快速开始) · [出图](#出图) · [改图](#改图) · [工作台](#工作台) · [工具](#工具) · [提示词怎么写](#提示词怎么写) · [后端](#后端) · [可能踩的坑](#可能踩的坑) · [许可](#许可) · [更多文档](#更多文档)
+**目录**：[能不能用](#能不能用) · [快速开始](#快速开始) · [出图](#出图) · [改图](#改图) · [工作台](#工作台) · [工具](#工具) · [提示词怎么写](#提示词怎么写) · [性能](#性能base-与-turbo) · [可能踩的坑](#可能踩的坑) · [许可](#许可) · [更多文档](#更多文档)
 
 ---
 
@@ -69,7 +69,7 @@ node scripts/start-comfyui.mjs --doctor  # 只看缺什么：安装、torch、�
 起好之后**什么都不用填**：插件自动探测 8000 / 8188 / … 端口（非回环地址会被拒绝）。缺 Qwen-Image 权重时，
 `--doctor` 会点名缺哪个，照 [ComfyUI 部署指引](docs/comfyui-deployment.md) 把文件放进对应目录。
 
-9 个配置字段都有默认值，日常一个都不用碰；全部字段见 [docs/configuration.md](docs/configuration.md)。
+10 个配置字段，除两个可选的步数覆盖项外都有默认值，日常一个都不用碰；全部字段见 [docs/configuration.md](docs/configuration.md)。
 
 ### 3. 出第一张图
 
@@ -233,7 +233,7 @@ ComfyUI 后端与工作流占位符协议（`{{prompt}}` / `{{seed}}` / `{{image
 | 文档 | 内容 |
 |---|---|
 | [docs/comfyui-deployment.md](docs/comfyui-deployment.md) | 本机部署：下载、建实例、放权重、校验、排障 |
-| [docs/configuration.md](docs/configuration.md) | 14 个配置字段的默认值和边界 |
+| [docs/configuration.md](docs/configuration.md) | 10 个配置字段的默认值和边界 |
 | [docs/usage-reference.md](docs/usage-reference.md) | 像素怎么算、表外比例、`board` 用法、`status` 各字段 |
 | [docs/license-and-limits.md](docs/license-and-limits.md) | 分发和商用前的注意事项 |
 | [docs/local-install.md](docs/local-install.md) | 开发：本机构建、打包、tarball 安装 |
