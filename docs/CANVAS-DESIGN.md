@@ -602,6 +602,8 @@ function migrateBoardFile(raw: unknown): BoardFile | undefined {
 
 体例与 EXECUTION-PLAN.md §4 任务书一致（目标/前置/写入范围/步骤/验收/停止条件六段式），供下一个工作者直接并入。**共同守则沿用执行计划 §9**：写入范围即权限边界；`npm test` 全绿是底线；同一构造两次改失败 → 停；权限拒绝 → 停；证据带 `文件:行号`。共同停止条件（各任务不再重复）：需要改写入范围外文件（哪怕一行）→ 停下汇报；需要安装新依赖 → 停；现状与本设计基线严重不符 → 按实际停下汇报差异。
 
+**先例参考约定（2026-11-17 查重后补，来源 [CANVAS-PRIOR-ART.md](CANVAS-PRIOR-ART.md)）**：每份任务书在「目标」后多一条「先例参考」，写清该模块在成熟项目里的对应实现与借用边界。执行纪律：**MIT 项目（React Flow/xyflow、Excalidraw、LiteGraph、Fabric、Konva）只读源码提炼算法，不复制代码、不引依赖**；GPL/自定义许可项目（ComfyUI Frontend＝GPL-3.0、tldraw＝生产需商业授权）**只看公开文档与产品行为，不读拷源码**。总判定：模块级 12/15 有先例，集成级 0 个可接库（详见报告 §0/§2）。
+
 **安全独占区**（执行计划内无任务触碰，可先行）：`src/studio-canvas.ts`、`src/boards.ts`、`src/client-styles.ts`、`src/studio-service.ts`、`test/studio-canvas.test.mjs`、`test/boards.test.mjs`。
 **串行竞争面**：`src/studio-view.ts`、`src/studio-shared.ts`、`test/studio.test.mjs`、`docs/usage-reference.md` 与 T20 挂载（已被 C13 取代）、T22 竞争；`src/comfyui.ts`、`src/tools.ts`、`src/model-profiles.ts` 与 T21 竞争。
 
@@ -619,9 +621,12 @@ function migrateBoardFile(raw: unknown): BoardFile | undefined {
 
 studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 → C13 → C14 → C15**（与 T22 的 stepper UI 窗口由协调者排程，T22 收口性质建议排 C15 后或按时间片错开）。
 
+**执行状态（2026-11-17 23:20，单一执行线）**：截至本注记，C01、C03–C09 已提交（`6f27195`/`599fe13`/`a725dca`/`ff23f51`/`876698e`/`53f3684`/`d184906`/`3770a95`）；**C02 仍未完成**（Bug2 仍在 `src/studio-view.ts:1609`，需在 C10 前补，属 view 链首）；C10–C15 未开始。并行执行线已关闭，后续全部由单一执行线完成。批次 A/B 的「可立即开工」表述仅保留为历史排序依据，现行开工顺序以本状态为准。
+
 ### C01 Bug1：面板生成血缘持久化
 
 - **目标**：面板改图的血缘边刷新后仍在——服务端 path→id 解析（DD15 口径），不改生成请求线缆契约。
+- **先例参考**：无直接先例（本业务语义）；邻接表/边持久化的通用存法可看 tldraw、React Flow（MIT，读思路），不引依赖。查重报告 §4-C01。
 - **前置**：无。安全独占区（studio-service.ts），批次 A 先行。
 - **写入范围**：`src/studio-service.ts`（:458-474 条目构造）、`test/studio-lineage.test.mjs`（新增）、`package.json`（仅 test 脚本加行，沿用 T01 先例）。**不改** studio-routes.ts / studio-shared.ts / studio-view.ts / boards.ts。
 - **步骤**：
@@ -635,6 +640,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C02 Bug2：素材去重字段修正
 
 - **目标**：同一素材不再重复添加进参考图行（`entry.path` → `entry.payload.path`）。
+- **先例参考**：无先例（本地 bug）。修复点行号随 C09 前移，当前在 `src/studio-view.ts:1609`（2026-11-17 复核），抽纯函数进 canvas-interactions 并单测。查重报告 §4-C02。
 - **前置**：无逻辑前置；studio-view.ts 串行链首（批次 B）。
 - **写入范围**：`src/studio-view.ts`（:1028 一行 + 去重判定抽纯函数）、`test/canvas-interactions.test.mjs` 或 `test/studio.test.mjs`（纯函数断言；**优先新文件**避开 studio.test.mjs 竞争面，C08 会建该文件，若 C08 未开工则本任务自建）、`lib/`（构建产物重建）、`package.json`（仅 test 脚本行，若用新测试文件）。
 - **步骤**：
@@ -648,6 +654,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C03 卫生批：陈旧注释与文档座位口径
 
 - **目标**：清掉已完成工作的 TODO 残留与过时座位描述（§11.3）。
+- **先例参考**：卫生批，无先例可借；对照实际代码状态（moss-edit 已接线、工作台已迁 main panel）逐条核。
 - **前置**：无。批次 A 并行（comfyui.ts 只动注释，与 T21 的代码改动错开窗口；T21 未开始，先做无冲突）。
 - **写入范围**：`src/comfyui.ts`（:1257-1271 注释段，**不改任何代码逻辑**）、`README.md`（仅座位事实句，**定位措辞禁改**，D5）、`docs/configuration.md`（工作台座位相关段）。
 - **步骤**：
@@ -660,6 +667,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C04 board v2 模型与 v1→v2 迁移
 
 - **目标**：节点 kind 字段 + 布局/失败任务条目类型 + 读时迁移（DD11），消除升级用户静默丢板。
+- **先例参考**：Excalidraw 的文件 version 字段与 "convert to new format" 迁移流程（MIT，可读源码）；tldraw store 迁移（商业许可，只看公开文档）。只借「版本字段 + 懒迁移函数 + 迁移测试」三件事，不拷代码。
 - **前置**：无逻辑前置；批次 B。boards.ts/test/boards.test.mjs 属安全独占区；**studio-shared.ts 窗口与 T22 串行**（T20 挂载已被 C13 取代，无在途竞争）。
 - **写入范围**：`src/boards.ts`（BoardFile/migrateBoardFile/readBoardFile/isBoardItem 按 kind 分支/GRID_PITCH_X 516）、`src/studio-shared.ts`（BoardItem 加法字段 + LayoutDraft 结构等价类型内联）、`test/boards.test.mjs`（网格间距断言更新 + 共享删文件护栏预留）、`test/board-migration.test.mjs`（新增）、`package.json`（仅 test 脚本行）。
 - **步骤**：
@@ -674,6 +682,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C05 几何 D8：宽高比保真纯函数层
 
 - **目标**：节点显示尺寸按原图比例（DD3），几何常量与测试同步更新——纯函数 + 样式层，不动 view。
+- **先例参考**：React Flow 的 NodeResizer / 各画布产品按源图比例显示（模式先例）；clamp 公式自研即可，无依赖。查重报告 §4-C05。
 - **前置**：无。安全独占区，批次 A 先行。
 - **写入范围**：`src/studio-canvas.ts`（nodeDisplaySize/MIN/MAX/IMAGE_AREA_HEIGHT 常量、CANVAS_NODE_WIDTH 语义注释改兜底）、`src/client-styles.ts`（:92-94 节点宽内联化 + img contain）、`test/studio-canvas.test.mjs`（新增尺寸断言 + 既有断言核对）。
 - **步骤**：
@@ -688,6 +697,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C06 画布渲染接线：变宽节点 + zoom 放开 + 宣言改写
 
 - **目标**：D8 在画布上真正生效；zoom 0.1–4（DD8）；旧「节点=结果」宣言注释按 D6 改写。
+- **先例参考**：同 C05；zoom 0.1–4 与 Figma/Krea 的常见区间一致（产品行为口径，二手）。
 - **前置**：C05、C02（view 链）。串行竞争面：studio-view.ts。
 - **写入范围**：`src/studio-view.ts`（nodeRect 按 kind/尺寸计算、节点内联宽、zoom 常量引用处、:20-27 与 :99-105 注释改写）、`src/studio-canvas.ts`（CANVAS_MIN_ZOOM 0.1 / CANVAS_MAX_ZOOM 4）、`test/studio-canvas.test.mjs`（钳位边界断言更新）。
 - **步骤**：
@@ -701,6 +711,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C07 视口裁剪 + 边索引 + 手势节流
 
 - **目标**：渲染成本与板大小解耦（§5.2、§10）。
+- **先例参考**：@xyflow/system 的可见性/裁剪计算、Excalidraw 的 scene culling、LiteGraph 的「数百节点」优化（均 MIT，读源码后按本项目风格重写，不 vendor）。查重报告 §4-C07。
 - **前置**：C06（view 链）。
 - **写入范围**：`src/studio-canvas.ts`（visibleNodes/rectsIntersect/边包围盒相交纯函数）、`src/studio-view.ts`（渲染层裁剪 + Map 索引 + 邻接预计算 + rAF 节流）、`test/studio-canvas.test.mjs`（裁剪纯函数断言）。
 - **步骤**：
@@ -714,6 +725,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C08 交互纯函数层
 
 - **目标**：框选/多选/对齐分布/撤销栈/快捷键映射全部沉淀为可单测纯函数（§6），沿用 studio-canvas 模式。
+- **先例参考**：Excalidraw 的 selection/marquee/align/undo 语义（MIT，读源码）；tldraw 只看文档与产品行为（生产许可限制）。按本项目纯函数风格重写。
 - **前置**：无。安全独占区（新文件），批次 A 先行，与 C01/C05/C03 并行。
 - **写入范围**：`src/canvas-interactions.ts`（新增）、`test/canvas-interactions.test.mjs`（新增；若 C02 已建则追加）、`package.json`（仅 test 脚本行）。
 - **步骤**：
@@ -729,6 +741,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C09 交互接线：多选/框选/快捷键/右键/撤销重做/对齐
 
 - **目标**：C08 纯函数接进画布，§6 全部交互落地。
+- **先例参考**：同 C08；DOM 手势层无自动化，沿用「纯函数全覆盖 + 实机抽查」策略（与 T20 同口径）。
 - **前置**：C08、C07（view 链）。
 - **写入范围**：`src/studio-view.ts`（selection 状态替换 selectedNodeId、手势联合扩展、键盘/右键监听、对齐工具条、撤销栈实例）、`src/client-styles.ts`（框选矩形/菜单/多选高亮样式）、`test/studio.test.mjs`（**仅新增**交互相关断言，既有 SSE/线缆断言不动；与 T22 串行）。
 - **步骤**：
@@ -744,6 +757,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C10 任务节点后端关联链（clientId + run 注册表 + SSE 扩展）
 
 - **目标**：DD7 四步接线落地，SSE 事件可关联到面板发起的 run；向后兼容。
+- **先例参考**：clientId + run 注册表是任务队列标准做法；ComfyUI Frontend 的队列/ws（GPL-3.0，只看文档与产品行为，不读拷源码）、InvokeAI（Apache-2.0，可读思路）。本项目已有 T16 的 /ws→SSE 归一化。
 - **前置**：C01（studio-service.ts 串行）、C04（studio-shared.ts 串行）、C03（comfyui.ts 注释窗口先过）。**comfyui.ts 代码窗口与 T21 串行**（T21 未开始，先做；若 T21 已开工则协调者排程）。
 - **写入范围**：`src/studio-shared.ts`（StudioGenerateRequest + clientId?、StudioProgressEvent + clientId?/boardId? + run 事件）、`src/studio-routes.ts`（generate parse 收 clientId、字符集/长度校验）、`src/studio-service.ts`（提交前登记注册表、onPromptId 接线、结束清理）、`src/comfyui.ts`（ComfyOptions + onPromptId? 钩子，:1186 处回调）、`src/runs.ts`（新增，内存注册表 + TTL）、`src/progress.ts`（归一化后附加 clientId/boardId、登记时发 run 事件）、`test/progress.test.mjs`（附加断言）、`test/studio.test.mjs`（线缆向后兼容断言）、`test/runs.test.mjs`（新增）、`package.json`（仅 test 脚本行）。
 - **步骤**：
@@ -759,6 +773,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C11 任务节点前端：占位/进度/失败重试/原地转换
 
 - **目标**：D6 核心体验——生成即节点（§4 全部）。
+- **先例参考**：产品先例 Figma Weave / FLORA / Krea 的任务节点 UX（占位→进度→失败重试→原地转结果）；InvokeAI 队列 UI 可参照（Apache-2.0，读思路）。无可直接复用的代码。
 - **前置**：C10、C09（view 链）。
 - **写入范围**：`src/studio-view.ts`（CanvasNode 联合扩展、startGeneration 动作、任务节点渲染、reduceTaskEvent、重试/编辑参数、完成转换 DD5）、`src/client-styles.ts`（任务节点样式：进度条/状态色/参数摘要）、`test/studio.test.mjs`（任务 reducer 断言，沿用自制 hook runtime + 假 EventSource 基建）、`test/studio-canvas.test.mjs`（task 节点尺寸兜底断言）。
 - **步骤**：
@@ -775,6 +790,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C12 素材双向流：拖入/跨板复制移动/外部文件/定位移相机
 
 - **目标**：§7 全部落地。
+- **先例参考**：通用 drop/上传路由模式，无专门库；宿主无既有上传路由，DD10 的 import 路由是新增契约（见画布设计 §15.2-1）。
 - **前置**：C04（boards v2）、C10（routes 串行）、C11（view 链）。boards.ts API 部分可在 C10 后提前与 view 链并行。
 - **写入范围**：`src/boards.ts`（copyItem/moveItem/删文件共享护栏）、`src/studio-shared.ts`（BoardRequest + copy-item/move-item、import 请求/响应类型、STUDIO_IMPORT_ROUTE 常量）、`src/studio-routes.ts`（board action 封闭集 6→8：copy-item/move-item；import 是独立路由不占 action；readBody 上限参数化）、`src/studio-view.ts`（素材卡片 draggable、画布 onDragOver/onDrop、定位 centerOn、Ctrl+C/V）、`src/studio-canvas.ts`（centerOn 纯函数）、`test/boards.test.mjs`（copy/move/共享护栏断言）、`test/studio.test.mjs`（新 action 线缆 + import 路由断言）、`test/studio-canvas.test.mjs`（centerOn 断言）。
 - **步骤**：
@@ -788,6 +804,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C13 布局节点：mountLayoutEditor 嵌进画布（取代 T20 挂载）
 
 - **目标**：D7 布局节点落地（§8.1–8.3、8.5），双坐标映射 + pointerScale 修正。
+- **先例参考**：Figma Weave 的工具节点/蒙版、Krea 的 region 控制（UX 参考）；**无开源实现，本项目差异化**，不要期待可抄实现。
 - **前置**：C04（v2 kind:'layout'）、C06（变宽渲染）、C11（view 链）。layout-editor.ts 所有权自 T20 移交（核心已提交，无在途冲突）。
 - **写入范围**：`src/layout-editor.ts`（LayoutEditorOptions + pointerScale?、mount 内 delta 换算除 scale，**纯函数层与 14 测试语义零改动**）、`src/studio-view.ts`（layout 节点渲染/标题栏拖拽/resize 手柄/编辑器挂载与销毁/键盘让位）、`src/client-styles.ts`（布局节点样式）、`test/layout-editor.test.mjs`（pointerScale 默认行为回归 + delta 换算纯函数断言）、`test/studio.test.mjs`（layout 节点落盘/重建断言）。
 - **步骤**：
@@ -802,6 +819,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C14 布局闭环：布局节点 → 生成 → 结果回画布（依赖 T21）
 
 - **目标**：§8.4 完整闭环；T21 落地前过渡路径（发送到表单）在 C13 已可用，本任务做完整路径。
+- **先例参考**：Regional Prompter / Attention Couple / InvokeAI regional prompts（思路层）；契约以 T21 落定为准，无可抄实现。
 - **前置**：**T21 完成**（外部依赖：MOSSImageLayoutPrompt/MOSSImageControl 接线 + 布局入参契约）+ C13。与 T21 共享 comfyui.ts/tools.ts/model-profiles.ts 的窗口必须串行；GPU 实机验收与 T21/T22 互斥排程。
 - **写入范围**：`src/studio-shared.ts`（StudioGenerateRequest + layout? 可选字段，形状以 T21 定的契约为准）、`src/studio-routes.ts`（layout 透传校验）、`src/studio-service.ts`（layout 传给适配器）、`src/studio-view.ts`（布局节点生成按钮激活、ratio 最近档映射与提示、任务节点 parents 含布局 id）、`test/studio.test.mjs`（layout 线缆断言）、`docs/usage-reference.md`（布局闭环用法；与 T22 串行）。
 - **步骤**：
@@ -816,6 +834,7 @@ studio-view.ts 串行链全序：**C02 → C06 → C07 → C09 → C11 → C12 �
 ### C15 增量保存 + 导出 + 压测收口
 
 - **目标**：DD12/DD14 落地 + §10.4 压测口径实测回填；usage 文档统一更新。
+- **先例参考**：Excalidraw 的导出工具与边界计算（MIT，读源码）、tldraw export（商业只看文档）、Fabric/Konva 的 toDataURL（MIT，读思路）；PNG 拼版用 offscreen canvas 是标准做法。
 - **前置**：C07（裁剪）、C09（交互）；view 链末位。export 纯函数部分（contactSheetLayout）可提前并行（新文件无冲突）。
 - **写入范围**：`src/studio-view.ts`（dirtyIds 增量保存、导出入口）、`src/canvas-export.ts`（新增：contactSheetLayout 纯函数 + 画板 JSON 序列化）、`test/canvas-export.test.mjs`（新增）、`verify/canvas-perf/`（压测脚本 + 记录 md）、`docs/usage-reference.md`（画布交互/快捷键/素材流/布局节点/导出口径统一更新；与 T22 串行）、`package.json`（仅 test 脚本行）。
 - **步骤**：
