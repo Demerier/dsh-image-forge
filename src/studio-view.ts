@@ -108,6 +108,20 @@ import {
   type NodeRect,
 } from './canvas-interactions.ts'
 import {
+  DEFAULT_LAYOUT_HEIGHT,
+  DEFAULT_LAYOUT_WIDTH,
+  LAYOUT_EDITOR_CLASS,
+  LAYOUT_NODE_DEFAULT_WIDTH,
+  clampLayoutNodeWidth,
+  draftToState,
+  layoutNodeHeight,
+  mountLayoutEditor,
+  stateToDraft,
+  type LayoutDraft,
+  type LayoutEditorHandle,
+  type LayoutEditorState,
+} from './layout-editor.ts'
+import {
   STUDIO_ASSETS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CONFIG_ROUTE,
@@ -124,6 +138,7 @@ import {
   studioFileUrl,
   type BoardDetail,
   type BoardItem,
+  type BoardLayoutDraft,
   type BoardTaskParams,
   type BoardSummary,
   type StudioAsset,
@@ -187,6 +202,20 @@ interface ImageCanvasNode extends CanvasNodeBase {
  */
 type TaskStatus = 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'interrupted'
 
+/**
+ * A MOSS layout draft as a node (§8.1): the editor plus its display size.
+ *
+ * `draft` is in the draft's own pixels; `w`/`h` are world units on the canvas.
+ * Resizing only moves `w`/`h` — the draft is never rewritten (§8.2), which is
+ * what keeps the compiled text byte-identical across a resize (C14 sends it).
+ */
+interface LayoutCanvasNode extends CanvasNodeBase {
+  readonly kind: 'layout'
+  readonly w: number
+  readonly h: number
+  readonly draft: BoardLayoutDraft
+}
+
 /** A generation in flight, or one that ended without a picture (§4.2, §4.5). */
 interface TaskCanvasNode extends CanvasNodeBase {
   readonly kind: 'task'
@@ -200,7 +229,7 @@ interface TaskCanvasNode extends CanvasNodeBase {
   error?: string
 }
 
-type CanvasNode = ImageCanvasNode | TaskCanvasNode
+type CanvasNode = ImageCanvasNode | TaskCanvasNode | LayoutCanvasNode
 
 /** Narrowing helper: the render and lineage paths only read pictures' files. */
 function isImageNode(node: CanvasNode): node is ImageCanvasNode {
@@ -210,6 +239,11 @@ function isImageNode(node: CanvasNode): node is ImageCanvasNode {
 /** Narrowing helper for the task reducer and the task node. */
 function isTaskNode(node: CanvasNode): node is TaskCanvasNode {
   return node.kind === 'task'
+}
+
+/** Narrowing helper for the layout node and its editor mount. */
+function isLayoutNode(node: CanvasNode): node is LayoutCanvasNode {
+  return node.kind === 'layout'
 }
 
 /**
@@ -244,6 +278,16 @@ type Gesture =
     readonly left: number
     readonly top: number
   }
+  | {
+    kind: 'layout-resize'
+    readonly id: string
+    readonly startX: number
+    readonly startY: number
+    /** Display width at pointer-down, in world units. */
+    readonly startW: number
+    /** Node list at pointer-down, for the one undo step (§6.5). */
+    readonly before: readonly CanvasNode[]
+  }
 
 /** A marquee's on-screen rectangle, in viewport-relative pixels. */
 interface MarqueeBox {
@@ -262,6 +306,16 @@ interface MarqueeBox {
  * went to look at something else".
  */
 const NUDGE_MERGE_MS = 700
+
+/**
+ * Consecutive layout-draft edits inside this window merge into one undo step.
+ *
+ * Typing a caption fires one change per character; without the merge a ten-word
+ * caption would push a hundred steps and evict every real edit from the stack.
+ * Shorter than the nudge window because the commands are bigger and the user is
+ * less likely to be holding a key.
+ */
+const DRAFT_EDIT_MERGE_MS = 500
 
 /** One coalesced nudge session: the step on the stack, and the map it writes. */
 interface NudgeSession {
@@ -307,6 +361,9 @@ function nodeRect(node: CanvasNode): Rect {
     const size = nodeDisplaySize(node.image.width, node.image.height)
     return { x: node.x, y: node.y, width: size.width, height: size.height }
   }
+  // A layout node carries its own display box (§8.3: width-driven, height follows
+  // the draft proportion); the task node is the fixed default box.
+  if (isLayoutNode(node)) return { x: node.x, y: node.y, width: node.w, height: node.h }
   return { x: node.x, y: node.y, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
 }
 
@@ -366,7 +423,24 @@ function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
   const nodes: CanvasNode[] = []
   items.forEach((item, index) => {
     const spot = fallbackSpot(index)
-    if (item.kind === 'layout') return
+    if (item.kind === 'layout') {
+      const draft = item.draft
+      // The store's v2 validator drops a layout entry without a draft, so this
+      // is belt-and-braces against a hand-edited file.
+      if (draft === undefined) return
+      const width = clampLayoutNodeWidth(item.w ?? LAYOUT_NODE_DEFAULT_WIDTH)
+      nodes.push({
+        kind: 'layout',
+        id: item.id,
+        x: item.x ?? spot.x,
+        y: item.y ?? spot.y,
+        parents: item.parents,
+        w: width,
+        h: item.h ?? layoutNodeHeight(width, draft),
+        draft,
+      })
+      return
+    }
     if (item.kind === 'task') {
       const task = item.task
       // The store's v2 validator drops a task entry without one, so this is
@@ -747,6 +821,17 @@ function makeClientId(): string {
   return 'c' + (chunk() + chunk() + chunk()).slice(0, 18)
 }
 
+/**
+ * A layout node id.
+ *
+ * Not a board item id: this build cannot persist layout entries yet (the C13
+ * report says why), so the id only has to be unique on this canvas. The alphabet
+ * matches the board ids so a later persistence pass can adopt it unchanged.
+ */
+function makeLayoutNodeId(): string {
+  return 'l' + Math.random().toString(36).slice(2, 10)
+}
+
 /** First line of the prompt, for a caption that must stay small. */
 function taskPromptLine(params: BoardTaskParams): string {
   return firstLine(params.prompt, '（无提示词）')
@@ -860,6 +945,64 @@ function applyTaskEvent(nodes: CanvasNode[], event: StudioProgressEvent): Canvas
   return changed ? next : nodes
 }
 
+interface LayoutEditorMountProps {
+  readonly node: LayoutCanvasNode
+  readonly onDraft: (id: string, draft: BoardLayoutDraft) => void
+}
+
+/**
+ * Mount one editor instance for one layout node (§8.1).
+ *
+ * The editor is imperative (it owns its DOM), so it lives in an effect and is
+ * destroyed when the node unmounts or the board switches — that is the whole
+ * lifecycle contract §8.3 asks for. Draft changes flow out through `onDraft`;
+ * an undo replaces the node object, and the second effect pushes that draft back
+ * into the live editor so undo is visible from the inside too.
+ */
+function LayoutEditorMount(props: LayoutEditorMountProps): ReturnType<typeof createElement> {
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const editorRef = useRef<LayoutEditorHandle | undefined>(undefined)
+  const latestRef = useRef(props)
+  latestRef.current = props
+  const appliedDraftRef = useRef<BoardLayoutDraft>(props.node.draft)
+
+  useEffect(() => {
+    const host = hostRef.current
+    if (host === null) return undefined
+    const node = latestRef.current.node
+    appliedDraftRef.current = node.draft
+    const editor = mountLayoutEditor(host, {
+      draft: node.draft as unknown as LayoutDraft,
+      onChange: (state: LayoutEditorState) => {
+        const draft = stateToDraft(state)
+        appliedDraftRef.current = draft
+        const current = latestRef.current
+        current.onDraft(current.node.id, draft)
+      },
+    })
+    editorRef.current = editor
+    // Destroy on unmount / node id change. A strict-mode double mount creates,
+    // tears down and creates again; the editor's destroy removes its root, so
+    // the second mount starts from an empty host. See the C13 report for what
+    // was and was not verified about StrictMode in the host shell.
+    return () => {
+      editorRef.current = undefined
+      editor.destroy()
+    }
+  }, [props.node.id])
+
+  // Undo/redo swaps the node's draft object; mirror it into the live editor.
+  useEffect(() => {
+    const editor = editorRef.current
+    if (editor === undefined) return
+    if (appliedDraftRef.current === props.node.draft) return
+    appliedDraftRef.current = props.node.draft
+    editor.setState(draftToState(props.node.draft as unknown as LayoutDraft))
+  }, [props.node.draft])
+
+  return createElement('div', { ref: hostRef, className: 'dsh-forge-layout-host' })
+}
+
 /**
  * Render the workbench.
  *
@@ -950,6 +1093,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   // clipboard), and a reveal request can wait for the canvas to be mounted.
   const clipboardRef = useRef<{ readonly boardId: string; readonly itemIds: readonly string[] } | undefined>(undefined)
   const pendingRevealRef = useRef<string | undefined>(undefined)
+  // §6.5: layout draft edits are undoable, coalesced so typing is one step.
+  const draftEditRef = useRef<{ at: number; id: string; after: CanvasNode[]; command: Command } | undefined>(undefined)
   const referencesRef = useRef<HeldReference[]>([])
   referencesRef.current = references
   const nodesRef = useRef<CanvasNode[]>([])
@@ -1959,6 +2104,17 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       applyPositions(moved)
       return
     }
+    if (gesture.kind === 'layout-resize') {
+      // §8.3: resize changes the display width (clamped) and the height follows
+      // the draft proportion. The draft itself is never touched.
+      const width = clampLayoutNodeWidth(gesture.startW + (pointer.x - gesture.startX) / cameraRef.current.zoom)
+      writeNodes(nodesRef.current.map((node) => (
+        node.id === gesture.id && isLayoutNode(node)
+          ? { ...node, w: width, h: layoutNodeHeight(width, node.draft) }
+          : node
+      )))
+      return
+    }
     // Marquee: the two corners are viewport-relative, so the world rectangle is
     // exactly what `screenToWorld` says it is (C08 `marqueeWorldRect`). Hits are
     // tested against the full board, and the selection updates live so the
@@ -1974,7 +2130,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       width: Math.abs(current.x - start.x),
       height: Math.abs(current.y - start.y),
     })
-  }, [applyPositions])
+  }, [applyPositions, writeNodes])
 
   /**
    * Buffer the pointer and let one animation frame apply it.
@@ -2019,6 +2175,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (gesture.kind === 'marquee') {
       // Only the selection changed, and a selection is not a board change: no
       // save, and nothing for the undo stack (§6.5 lists node changes only).
+      return
+    }
+    if (gesture.kind === 'layout-resize') {
+      const resized = nodesRef.current.find((node) => node.id === gesture.id)
+      if (resized === undefined || !isLayoutNode(resized) || resized.w === gesture.startW) return
+      // One drag, one undo step; the draft (so the compiled text) is untouched,
+      // which is the §8.2 invariant.
+      pushCommand(snapshotCommand('layout-resize', gesture.before, nodesRef.current, (list) => { writeNodes([...list]) }))
+      scheduleLayout()
       return
     }
     if (gesture.kind === 'node' && pointer !== undefined) {
@@ -2275,6 +2440,98 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (created.length > 0) setSelection(new Set(created))
   }, [appendBoardItem])
 
+  /* ------------------------------------------------------------------------ */
+  /* Layout nodes (C13 §8): one editor per node, width-driven resize           */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Write an editor change back into the node (§8.1 step 2).
+   *
+   * The node keeps its display width; the height follows the draft proportion,
+   * so editing the draft canvas and resizing the node stay one mechanism. The
+   * change is one undo step, coalesced across a typing burst the way arrow-key
+   * nudges are.
+   *
+   * Persistence note: a layout node is a v2 board entry, but writing one needs a
+   * board action that does not exist yet (C13 report); this updates the canvas
+   * state only, and a reload does not rebuild it.
+   */
+  const updateLayoutDraft = useCallback((id: string, draft: BoardLayoutDraft) => {
+    const current = nodesRef.current
+    const node = current.find((entry) => entry.id === id)
+    if (node === undefined || !isLayoutNode(node)) return
+    const width = clampLayoutNodeWidth(node.w)
+    const updated: LayoutCanvasNode = { ...node, draft, w: width, h: layoutNodeHeight(width, draft) }
+    const next = current.map((entry) => (entry.id === id ? updated : entry))
+    writeNodes(next)
+    const now = Date.now()
+    const open = draftEditRef.current
+    if (open !== undefined && open.id === id && now - open.at <= DRAFT_EDIT_MERGE_MS) {
+      open.at = now
+      open.after.splice(0, open.after.length, ...next)
+    } else {
+      const after = [...next]
+      const command = snapshotCommand('layout-draft', current, after, (list) => { writeNodes([...list]) })
+      draftEditRef.current = { at: now, id, after, command }
+      pushCommand(command)
+    }
+    scheduleLayout()
+  }, [pushCommand, scheduleLayout, writeNodes])
+
+  /** Create a layout node with the default 1536×1024 draft (C13 step 5). */
+  const addLayoutNode = useCallback(() => {
+    const draft: BoardLayoutDraft = {
+      width: DEFAULT_LAYOUT_WIDTH,
+      height: DEFAULT_LAYOUT_HEIGHT,
+      bbox_coord_space: 'abs',
+      bbox_format: 'xyxy',
+      summary: { caption: '' },
+      items: [],
+    }
+    const spot = nextNodeSpot(nodesRef.current.map(nodeRect))
+    const node: LayoutCanvasNode = {
+      kind: 'layout',
+      id: makeLayoutNodeId(),
+      x: spot.x,
+      y: spot.y,
+      parents: [],
+      w: LAYOUT_NODE_DEFAULT_WIDTH,
+      h: layoutNodeHeight(LAYOUT_NODE_DEFAULT_WIDTH, draft),
+      draft,
+    }
+    const before = nodesRef.current
+    const after = [...before, node]
+    writeNodes(after)
+    // §6.5 lists "add node" among the undoable commands; creation is cheap to
+    // revert (the draft was never persisted), so it goes on the stack.
+    pushCommand(snapshotCommand('add-layout', before, after, (list) => { writeNodes([...list]) }))
+    setSelection(new Set([node.id]))
+    revealNodeId(node.id)
+    setNote('已新建布局节点：在节点里拖动画框；生成接线随 C14。')
+    scheduleLayout()
+  }, [pushCommand, revealNodeId, scheduleLayout, writeNodes])
+
+  /**
+   * Start dragging a layout node's resize handle (§8.3).
+   *
+   * The node has no drag handler of its own — the title bar is the drag handle,
+   * and the editor owns the rest — so this is the only other way to grab it.
+   */
+  const startLayoutResize = useCallback((event: ReactPointerEvent<HTMLDivElement>, node: LayoutCanvasNode) => {
+    if (event.button !== 0) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    pointerRef.current = undefined
+    gestureRef.current = {
+      kind: 'layout-resize',
+      id: node.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      startW: node.w,
+      before: nodesRef.current,
+    }
+  }, [])
+
   /** Hand a canvas result back to the form as an edit reference. */
   const referenceNode = useCallback((node: CanvasNode) => {
     // Only a picture can be a reference; a task node has no file to point at.
@@ -2341,7 +2598,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     const context = shortcutContext({
       tagName: target?.tagName,
       contentEditable: target?.isContentEditable === true,
-      inEditor: target?.closest?.('[data-dsh-layout-editor], .dsh-forge-layout-editor') != null,
+      // The mounted editor's root carries LAYOUT_EDITOR_CLASS; its inputs and
+      // its own Delete handler own every key while focus is inside it (§8.3).
+      inEditor: target?.closest?.(`[data-dsh-layout-editor], .${LAYOUT_EDITOR_CLASS}`) != null,
     })
     const action = resolveShortcut(
       event.key,
@@ -3188,6 +3447,20 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                 },
                 '平移',
               ),
+              // §8.1's creation entry. The blank right-click menu item that
+              // §13 C13 step 5 names lives in the frozen C09 menu table
+              // (canvas-interactions.ts, outside C13's write scope), so the
+              // toolbar is the shipped entry; reported to the lead.
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-forge-btn is-ghost',
+                  title: '新建 MOSS 布局节点（1536×1024 默认 draft）',
+                  onClick: () => { addLayoutNode() },
+                },
+                '新建布局',
+              ),
             )
             : createElement(
               'span',
@@ -3261,9 +3534,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                 // default box. Height stays with the stylesheet in both cases.
                 const frame = {
                   key: node.id,
-                  className: selected
-                    ? (node.kind === 'task' ? 'dsh-forge-node is-selected is-task' : 'dsh-forge-node is-selected')
-                    : (node.kind === 'task' ? 'dsh-forge-node is-task' : 'dsh-forge-node'),
+                  className: [
+                    'dsh-forge-node',
+                    selected ? 'is-selected' : '',
+                    node.kind === 'task' ? 'is-task' : '',
+                    node.kind === 'layout' ? 'is-layout' : '',
+                  ].filter((part) => part.length > 0).join(' '),
                   // What `onCanvasContextMenu` reads back to find the node it
                   // can only identify through `closest`.
                   'data-node-id': node.id,
@@ -3272,11 +3548,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                     left: `${String(node.x)}px`,
                     top: `${String(node.y)}px`,
                     width: `${String(item.width)}px`,
+                    // A layout node is width-driven but its height follows the
+                    // draft ratio (§8.3), so the box is explicit; pictures and
+                    // tasks size themselves from their content.
+                    ...(node.kind === 'layout' ? { height: `${String(item.height)}px` } : {}),
                   },
                   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onNodePointerDown(event, node) },
                 }
                 // A picture node: the shipped render, unchanged.
-                if (!isTaskNode(node)) {
+                if (isImageNode(node)) {
                   return createElement(
                     'div',
                     frame,
@@ -3327,6 +3607,57 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                         ),
                       )
                       : null,
+                  )
+                }
+                // §8.1's layout node: the title bar is the drag handle, the
+                // editor owns the body, the footnote carries the draft state,
+                // and the corner grip resizes the display box.
+                if (isLayoutNode(node)) {
+                  return createElement(
+                    'div',
+                    frame,
+                    createElement(
+                      'div',
+                      {
+                        className: 'dsh-forge-layout-head',
+                        onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onNodePointerDown(event, node) },
+                      },
+                      createElement('span', { className: 'dsh-forge-layout-title' }, 'MOSS 布局'),
+                      createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-forge-node-btn',
+                          disabled: true,
+                          title: '布局入参契约随 T21/C14；生成按钮在 C14 接线',
+                          onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => { event.stopPropagation() },
+                        },
+                        '生成',
+                      ),
+                    ),
+                    createElement(LayoutEditorMount, { node, onDraft: updateLayoutDraft }),
+                    createElement(
+                      'div',
+                      { className: 'dsh-forge-layout-foot' },
+                      `${String(node.draft.items.length)} 框 · ${String(node.draft.width)}×${String(node.draft.height)}`,
+                      sole
+                        ? createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'dsh-forge-node-btn is-danger',
+                            title: '从画布移除（不会删文件）',
+                            onClick: () => { removeNode(node.id) },
+                          },
+                          '移除',
+                        )
+                        : null,
+                    ),
+                    createElement('div', {
+                      className: 'dsh-forge-layout-grip',
+                      title: '拖动改变显示宽度（高度随 draft 比例）',
+                      onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { startLayoutResize(event, node) },
+                    }),
                   )
                 }
                 // §4.2's task node: state, parameter summary, progress, and the

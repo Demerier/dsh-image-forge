@@ -36,16 +36,23 @@ import { readFileSync } from 'node:fs'
 
 import {
   CAPTION_HINT,
+  DEFAULT_LAYOUT_HEIGHT,
+  DEFAULT_LAYOUT_WIDTH,
   LAYOUT_COMPILED_BBOX_COORD_SPACE,
   LAYOUT_COMPILED_BBOX_FORMAT,
   LAYOUT_DRAFT_BBOX_COORD_SPACE,
   LAYOUT_DRAFT_BBOX_FORMAT,
+  LAYOUT_NODE_CHROME,
+  LAYOUT_NODE_DEFAULT_WIDTH,
+  LAYOUT_NODE_MAX_WIDTH,
+  LAYOUT_NODE_MIN_WIDTH,
   LayoutEditorError,
   addBox,
   boxFromDrag,
   canvasBoxToDisplay,
   canvasToDisplay,
   clampBox,
+  clampLayoutNodeWidth,
   compileLayout,
   createLayoutState,
   decompileLayout,
@@ -56,11 +63,13 @@ import {
   formatDraft,
   fromCompiledBox,
   getLayoutItem,
+  layoutNodeHeight,
   moveBox,
   parseDraft,
   pointToCanvas,
   resizeBox,
   roundBox,
+  screenDeltaToDraft,
   selectBox,
   setBoxCaption,
   setBoxLabel,
@@ -569,4 +578,66 @@ test('draft and compiled exports match the contract shapes', () => {
   assert.ok(unicodeCompiled.includes('山海之间'), 'literal text is not \\u escaped')
   assert.equal(unicodeCompiled.includes('\n'), false, 'literal line breaks are escaped inside the JSON prompt')
   assert.ok(parsed.items[0].text.includes('\n'))
+})
+
+// ---------------------------------------------------------------------------
+// C13: the canvas node around the editor — the §8.2 delta conversion and the
+// §8.3 width-driven display box.
+// ---------------------------------------------------------------------------
+
+test('C13: one screen delta converts to the same draft delta at zoom 0.5/1/2', () => {
+  const canvas = { width: DEFAULT_LAYOUT_WIDTH, height: DEFAULT_LAYOUT_HEIGHT }
+  const display = { width: LAYOUT_NODE_DEFAULT_WIDTH, height: 320 }
+  // 10 screen px over a 480-wide box showing a 1536-wide draft = 32 draft px.
+  const expected = { x: (10 * canvas.width) / display.width, y: (-4 * canvas.height) / display.height }
+  const at = (zoom) => screenDeltaToDraft(
+    { x: 10 * zoom, y: -4 * zoom },
+    { width: display.width * zoom, height: display.height * zoom },
+    canvas,
+  )
+  assert.deepEqual(at(1), expected, 'zoom 1 is the plain display scale')
+  assert.deepEqual(at(0.5), expected, 'the measured box already contains the canvas zoom')
+  assert.deepEqual(at(2), expected, 'so the draft delta is invariant across the band')
+
+  // The pointerScale hook exists for hosts whose page pixels are not local
+  // pixels; 1 is the independent-editor default and invalid values fall back.
+  assert.deepEqual(screenDeltaToDraft({ x: 10, y: 0 }, { width: 480, height: 320 }, canvas, 1), { x: 32, y: 0 })
+  assert.deepEqual(screenDeltaToDraft({ x: 10, y: 0 }, { width: 480, height: 320 }, canvas, 2), { x: 64, y: 0 })
+  assert.deepEqual(screenDeltaToDraft({ x: 10, y: 0 }, { width: 480, height: 320 }, canvas, 0), { x: 32, y: 0 })
+  // A degenerate box yields no movement instead of corrupting a box.
+  assert.deepEqual(screenDeltaToDraft({ x: 10, y: 2 }, { width: 0, height: 0 }, canvas), { x: 0, y: 0 })
+})
+
+test('C13: the node height follows the draft proportion and resizing leaves the draft untouched', () => {
+  const draft = stateToDraft(addBox(createLayoutState({
+    width: DEFAULT_LAYOUT_WIDTH,
+    height: DEFAULT_LAYOUT_HEIGHT,
+    summary: { caption: '黄昏的山谷' },
+  }), {
+    bbox: { x1: 10, y1: 20, x2: 300, y2: 400 },
+    label: 'object',
+    caption: '山',
+  }))
+  // §8.1: the default 1536x1024 draft at the default 480 width is a 480x420 node.
+  assert.equal(LAYOUT_NODE_DEFAULT_WIDTH, 480)
+  assert.equal(layoutNodeHeight(LAYOUT_NODE_DEFAULT_WIDTH, draft), 420)
+
+  // §8.2/§8.3: resize only changes the display box; the draft — and therefore
+  // the compiled text a generation would send — is byte-identical afterwards.
+  const compiled = compileLayout(draft)
+  const before = JSON.stringify(draft)
+  for (const width of [LAYOUT_NODE_MIN_WIDTH, 480, 700, LAYOUT_NODE_MAX_WIDTH]) {
+    assert.equal(
+      layoutNodeHeight(width, draft),
+      LAYOUT_NODE_CHROME + Math.round((width * draft.height) / draft.width),
+      'height follows the draft proportion at width ' + String(width),
+    )
+    assert.equal(compileLayout(draft), compiled, 'a resize must not change the compiled layout')
+  }
+  assert.equal(JSON.stringify(draft), before, 'geometry never mutates the draft')
+
+  // Widths clamp into the §8.3 band; nonsense falls back to the default.
+  assert.equal(clampLayoutNodeWidth(100), LAYOUT_NODE_MIN_WIDTH)
+  assert.equal(clampLayoutNodeWidth(10000), LAYOUT_NODE_MAX_WIDTH)
+  assert.equal(clampLayoutNodeWidth(Number.NaN), LAYOUT_NODE_DEFAULT_WIDTH)
 })

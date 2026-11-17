@@ -2405,4 +2405,84 @@ test('C12: the import contract and the drag MIME ship to both halves', () => {
   assert.ok(client.includes('move-item'), 'the cross-board move action must ship')
 })
 
+// ---------------------------------------------------------------------------
+// C13: layout nodes on the canvas — board rebuild, creation and its undo.
+// The editor's DOM mount cannot be driven here (§14.5); what is asserted is
+// the node contract around it (data/geometry/footnote) that C14 consumes.
+// ---------------------------------------------------------------------------
+
+test('C13: a persisted layout node rebuilds with its draft and display box', async () => {
+  const board = {
+    id: 'cbrdlayout',
+    name: '布局板',
+    camera: { x: 0, y: 0, zoom: 1 },
+    items: [
+      {
+        id: 'ilayout1',
+        kind: 'layout',
+        x: 120,
+        y: 60,
+        parents: [],
+        w: 480,
+        draft: {
+          width: 1536,
+          height: 1024,
+          bbox_coord_space: 'abs',
+          bbox_format: 'xyxy',
+          summary: { caption: '黄昏的山谷' },
+          items: [{ label: 'object', caption: '山', bbox: [10, 20, 300, 400] }],
+        },
+      },
+    ],
+  }
+  const { network, panel } = await mountWorkbench({ board })
+  try {
+    const layouts = nodesOfKind(panel, 'layout')
+    assert.equal(layouts.length, 1, 'a v2 layout entry becomes a layout node')
+    const node = layouts[0]
+    assert.equal(node.props['data-node-id'], 'ilayout1')
+    assert.equal(node.props.style.left, '120px')
+    assert.equal(node.props.style.width, '480px')
+    assert.equal(node.props.style.height, '420px', 'height follows the draft ratio plus chrome')
+    assert.ok(fakeText(node).includes('MOSS 布局'))
+    assert.ok(fakeText(node).includes('1 框 · 1536×1024'), 'the footnote carries the draft state')
+    assert.equal(nodesOfKind(panel, 'image').length, 0)
+  } finally {
+    network.restore()
+  }
+})
+
+test('C13: the toolbar creates a default layout node, and creation is undoable', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    assert.equal(nodesOfKind(panel, 'layout').length, 0)
+    const create = buttonWithText(panel, '新建布局')
+    assert.ok(create !== undefined, 'the canvas toolbar must offer the layout entry')
+    create.props.onClick()
+    await settle(panel)
+
+    const layouts = nodesOfKind(panel, 'layout')
+    assert.equal(layouts.length, 1)
+    assert.equal(layouts[0].props.style.width, '480px')
+    assert.equal(layouts[0].props.style.height, '420px')
+    assert.ok(fakeText(layouts[0]).includes('0 框 · 1536×1024'), 'the default draft is 1536×1024')
+
+    // §6.5: creation is an undoable command.
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodesOfKind(panel, 'layout').length, 0, 'Ctrl+Z takes the new node back')
+
+    // Deleting a layout node is canvas-only until the persistence action lands
+    // (C13 report): no board write may be attempted for it.
+    buttonWithText(panel, '新建布局').props.onClick()
+    await settle(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('Delete'))
+    await settle(panel)
+    assert.equal(nodesOfKind(panel, 'layout').length, 0)
+    assert.equal(network.calls.filter((call) => call.method === 'POST').length, 0, 'layout nodes are canvas-only for now')
+  } finally {
+    network.restore()
+  }
+})
+
 

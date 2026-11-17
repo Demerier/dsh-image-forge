@@ -119,6 +119,16 @@ export const STUDIO_CSS = `
 .dsh-forge-task-status.is-failed{color:#dc2626;opacity:1}
 .dsh-forge-task-status.is-interrupted{color:#b45309;opacity:1}
 .dsh-forge-task-actions{display:flex;gap:4px;padding:6px 6px 6px;flex-wrap:wrap;margin-top:auto}
+/* C13 §8.1: the layout node. The title bar is the canvas drag handle, the
+   editor fills the body (it scrolls inside the node because the editor's own
+   toolbar/fields are taller than the default 420), and the corner grip is the
+   width-driven resize handle (§8.3). */
+.dsh-forge-node.is-layout{display:flex;flex-direction:column;background:rgba(127,127,127,.06);cursor:default}
+.dsh-forge-layout-head{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 8px;font-size:11px;cursor:grab;border-bottom:1px solid rgba(127,127,127,.22);flex:0 0 auto}
+.dsh-forge-layout-title{font-weight:600;opacity:.85;white-space:nowrap}
+.dsh-forge-layout-host{flex:1 1 auto;min-height:0;overflow:auto;padding:2px 6px 4px;position:relative}
+.dsh-forge-layout-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:2px 8px 5px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;flex:0 0 auto;white-space:nowrap;overflow:hidden}
+.dsh-forge-layout-grip{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;border-right:2px solid rgba(59,130,246,.7);border-bottom:2px solid rgba(59,130,246,.7);border-bottom-right-radius:4px;z-index:1}
 .dsh-forge-canvas-hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;margin:0;padding:0 28px;text-align:center;font-size:12.5px;line-height:1.7;opacity:.45;pointer-events:none}
 .dsh-forge-canvas-foot{position:absolute;left:0;right:0;bottom:0;padding:6px 10px;font-size:10.5px;opacity:.55;background:linear-gradient(transparent,rgba(127,127,127,.14));pointer-events:none;text-align:center}
 .dsh-forge-marquee{position:absolute;z-index:3;pointer-events:none;border:1px solid rgba(59,130,246,.85);background:rgba(59,130,246,.12);border-radius:2px}

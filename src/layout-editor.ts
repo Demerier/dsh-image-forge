@@ -69,6 +69,57 @@ export const DEFAULT_LAYOUT_HEIGHT = 1024
 /** Root class of the mounted editor; the host stylesheet can hang rules off it. */
 export const LAYOUT_EDITOR_CLASS = 'dsh-image-forge-layout-editor'
 
+// ---- Layout *node* geometry (C13, §8.1/§8.3) -------------------------------
+//
+// A layout node on the infinite canvas is the editor plus chrome: the declared
+// display width and a height that follows the draft's aspect ratio, exactly as
+// §8.3 asks ("resize only changes the width; the height follows the proportion").
+// The draft's own pixels never move when the node is resized (§8.2's
+// invariant), which is why these helpers read the draft and never write it.
+
+/** Display width a new layout node starts with, in world units (§8.1). */
+export const LAYOUT_NODE_DEFAULT_WIDTH = 480
+
+/** Narrowest a layout node may be resized to (§8.3). */
+export const LAYOUT_NODE_MIN_WIDTH = 320
+
+/** Widest a layout node may be resized to (§8.3). */
+export const LAYOUT_NODE_MAX_WIDTH = 960
+
+/**
+ * Title bar + status footnote + editor paddings around the draft canvas, in
+ * world units. Chosen so the default 1536×1024 draft reproduces §8.1's 480×420
+ * node exactly: 480 × 1024/1536 = 320, plus 100.
+ */
+export const LAYOUT_NODE_CHROME = 100
+
+/** Default display height of a layout node, in world units (480×420). */
+export const LAYOUT_NODE_DEFAULT_HEIGHT = LAYOUT_NODE_CHROME +
+  Math.round((LAYOUT_NODE_DEFAULT_WIDTH * DEFAULT_LAYOUT_HEIGHT) / DEFAULT_LAYOUT_WIDTH)
+
+/** Clamp a requested display width into the §8.3 band; invalid means default. */
+export function clampLayoutNodeWidth(width: number): number {
+  if (!Number.isFinite(width)) return LAYOUT_NODE_DEFAULT_WIDTH
+  return Math.min(LAYOUT_NODE_MAX_WIDTH, Math.max(LAYOUT_NODE_MIN_WIDTH, Math.round(width)))
+}
+
+/**
+ * Display height for a width and a draft: chrome plus the draft scaled to that
+ * width, which is what makes a resize **only** a display change.
+ */
+export function layoutNodeHeight(
+  width: number,
+  draft: { readonly width: number; readonly height: number },
+): number {
+  const displayWidth = clampLayoutNodeWidth(width)
+  const draftWidth = draft.width
+  const draftHeight = draft.height
+  if (!Number.isFinite(draftWidth) || draftWidth <= 0 || !Number.isFinite(draftHeight) || draftHeight <= 0) {
+    return LAYOUT_NODE_DEFAULT_HEIGHT
+  }
+  return LAYOUT_NODE_CHROME + Math.round((displayWidth * draftHeight) / draftWidth)
+}
+
 /**
  * The caption rule the editor shows next to the caption field.
  *
@@ -720,6 +771,51 @@ export function canvasToDisplay(point: LayoutPoint, viewport: LayoutViewport): L
   }
 }
 
+/**
+ * Screen-pixel delta → draft-pixel delta (§8.2's one conversion).
+ *
+ * Both the pointer delta and the editor's display box are page CSS pixels, so
+ * the same scale applies to both axes: `canvasWidth / displayWidth` equals
+ * `canvasHeight / displayHeight` whenever the display box preserves the draft's
+ * aspect ratio (which the mount enforces). A canvas that zooms the editor by an
+ * ancestor transform zooms `display` too, so the returned delta is **invariant
+ * under that zoom** — the property the pointerScale concern was about.
+ *
+ * `pointerScale` is the host hook for page coordinates that are not the
+ * element's local coordinates (default 1 = page px are local px). It divides the
+ * delta, per the design's "屏幕 delta → draft delta 除以 pointerScale" wording.
+ * Invalid scales and degenerate display boxes yield a zero delta instead of
+ * NaN/Infinity, which would corrupt a box.
+ *
+ * @param delta - pointer movement in page CSS pixels.
+ * @param display - the editor canvas's measured (rendered) box in page pixels.
+ * @param canvas - the draft canvas size in draft pixels.
+ * @param pointerScale - host page-px → local-px factor; default 1.
+ * @returns the movement in draft pixels.
+ */
+export function screenDeltaToDraft(
+  delta: LayoutPoint,
+  display: { readonly width: number; readonly height: number },
+  canvas: { readonly width: number; readonly height: number },
+  pointerScale = 1,
+): LayoutPoint {
+  const scale = Number.isFinite(pointerScale) && pointerScale > 0 ? pointerScale : 1
+  const displayWidth = display.width / scale
+  const displayHeight = display.height / scale
+  if (
+    !Number.isFinite(displayWidth) || displayWidth <= 0
+    || !Number.isFinite(displayHeight) || displayHeight <= 0
+    || !Number.isFinite(canvas.width) || canvas.width <= 0
+    || !Number.isFinite(canvas.height) || canvas.height <= 0
+  ) {
+    return { x: 0, y: 0 }
+  }
+  return {
+    x: (delta.x * canvas.width) / displayWidth,
+    y: (delta.y * canvas.height) / displayHeight,
+  }
+}
+
 /** A box as CSS pixel geometry for the display layer (left/top/width/height). */
 export function canvasBoxToDisplay(
   box: LayoutBox,
@@ -1006,6 +1102,17 @@ export interface LayoutEditorOptions {
   onChange?: (state: LayoutEditorState) => void
   /** Called when an export button is pressed. */
   onExport?: (kind: 'draft' | 'compiled', text: string) => void
+  /**
+   * Extra host scale between page pixels and the editor's local CSS pixels
+   * (§8.2's `pointerScale` hook). Default 1, which is the independent-editor
+   * behaviour and the only correct value when the editor's box is measured with
+   * `getBoundingClientRect` inside a CSS-transformed canvas layer: that
+   * measurement already contains the zoom, so passing the zoom here as well
+   * would **double-apply** it. The hook exists for hosts whose page coordinates
+   * differ from the element's local coordinates (e.g. a `zoom` on an ancestor);
+   * the canvas integration leaves it at the default.
+   */
+  pointerScale?: () => number
 }
 
 /** The host-facing editor handle; the host owns the container and its removal. */
@@ -1025,7 +1132,10 @@ interface LayoutDragState {
   mode: 'move' | 'resize' | 'create'
   id?: string
   handle?: LayoutResizeHandle
+  /** Pointer-down position in draft pixels (already through `eventPoint`). */
   start: LayoutPoint
+  /** Pointer-down position in page pixels, for the §8.2 delta conversion. */
+  startClient: LayoutPoint
   origin?: LayoutBox
 }
 
@@ -1173,6 +1283,13 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     }
   }
 
+  /** The host's page-px → local-px factor, validated (§8.2 hook). */
+  function pointerScale(): number {
+    if (options.pointerScale === undefined) return 1
+    const raw = options.pointerScale()
+    return Number.isFinite(raw) && raw > 0 ? raw : 1
+  }
+
   function eventPoint(event: PointerEvent): LayoutPoint {
     const rect = canvas.getBoundingClientRect()
     return pointToCanvas(
@@ -1270,7 +1387,14 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
         commit(selectBox(state, id))
         const item = getLayoutItem(state, id)
         if (item !== undefined) {
-          drag = { mode: 'resize', id, handle: handle as LayoutResizeHandle, start: point, origin: item.bbox }
+          drag = {
+            mode: 'resize',
+            id,
+            handle: handle as LayoutResizeHandle,
+            start: point,
+            startClient: { x: event.clientX, y: event.clientY },
+            origin: item.bbox,
+          }
         }
       }
     } else if (boxElement !== null) {
@@ -1279,12 +1403,18 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
         const item = getLayoutItem(state, id)
         if (item !== undefined) {
           commit(selectBox(state, id))
-          drag = { mode: 'move', id, start: point, origin: item.bbox }
+          drag = {
+            mode: 'move',
+            id,
+            start: point,
+            startClient: { x: event.clientX, y: event.clientY },
+            origin: item.bbox,
+          }
         }
       }
     } else {
       commit(selectBox(state, null))
-      drag = { mode: 'create', start: point }
+      drag = { mode: 'create', start: point, startClient: { x: event.clientX, y: event.clientY } }
       showPreview(point, point)
     }
     if (drag !== null) {
@@ -1295,14 +1425,23 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
 
   function onPointerMove(event: PointerEvent): void {
     if (drag === null) return
-    const point = eventPoint(event)
     if (drag.mode === 'create') {
-      showPreview(drag.start, point)
+      showPreview(drag.start, eventPoint(event))
       return
     }
     if (drag.id === undefined || drag.origin === undefined) return
-    const dx = point.x - drag.start.x
-    const dy = point.y - drag.start.y
+    // §8.2: one conversion — page-pixel delta through the measured box (and the
+    // host hook). Positions are not re-derived here, so the two sides of a drag
+    // cannot be measured against different boxes.
+    const rect = canvas.getBoundingClientRect()
+    const moved = screenDeltaToDraft(
+      { x: event.clientX - drag.startClient.x, y: event.clientY - drag.startClient.y },
+      { width: rect.width, height: rect.height },
+      { width: state.width, height: state.height },
+      pointerScale(),
+    )
+    const dx = moved.x
+    const dy = moved.y
     const box =
       drag.mode === 'move'
         ? moveLayoutBox(drag.origin, dx, dy, state.width, state.height)
