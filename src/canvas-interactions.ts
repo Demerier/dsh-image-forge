@@ -5,8 +5,9 @@
  * §14.5: no Playwright-class dependency), so everything a gesture *decides* is
  * extracted here as a pure function and asserted directly: which nodes a marquee
  * catches, what a multi-node drag does to coordinates, where an alignment puts
- * each node, which action a key press means, and how far the undo stack can be
- * rewound. What is left in `studio-view.ts` is the pointer capture plumbing.
+ * each node, which action a key press means, how far the undo stack can be
+ * rewound, and what a right-click menu offers. What is left in `studio-view.ts`
+ * is the pointer capture plumbing.
  *
  * Two rules hold for every function in this module:
  *
@@ -145,6 +146,29 @@ export function toggleSelection(current: ReadonlySet<string>, id: string, additi
   const next = new Set(current)
   if (next.has(id)) next.delete(id)
   else next.add(id)
+  return next
+}
+
+/**
+ * The selection after a marquee release (§6.1).
+ *
+ * A plain marquee **replaces** the selection — sweeping a box is a fresh
+ * statement about what is selected, and a zero-hit drag therefore clears it,
+ * which is what a click on blank canvas means. A `Shift` marquee unions onto the
+ * selection the drag started with, so a user can add a far-off node without
+ * losing what they already had.
+ *
+ * The hits are tested against the whole board by the caller, not against the
+ * culled subset, and the argument set is never mutated (it is React state).
+ */
+export function marqueeSelection(
+  current: ReadonlySet<string>,
+  hits: readonly string[],
+  additive: boolean,
+): ReadonlySet<string> {
+  if (!additive) return new Set(hits)
+  const next = new Set(current)
+  for (const id of hits) next.add(id)
   return next
 }
 
@@ -311,6 +335,36 @@ export interface Command {
 }
 
 /**
+ * One undoable change, paired with the two snapshots it switches between.
+ *
+ * The stack records commands that have **already been applied** (§6.5), so this
+ * does not apply anything on construction: `revert()` writes `before`, `apply()`
+ * writes `after` — the latter only ever from `CommandStack.redo()`.
+ *
+ * The payload is opaque (`before`/`after` of any type) because every step the
+ * canvas pushes is a snapshot: node positions for a drag, alignment or nudge,
+ * the whole node list for a removal. Keeping it to one generic shape is what
+ * makes a bad step reviewable — if a command swaps its two sides, the drag it
+ * undoes lands in the wrong place, and a test with a fake writer catches it.
+ */
+export function snapshotCommand<T>(
+  label: string,
+  before: T,
+  after: T,
+  write: (value: T) => void,
+): Command {
+  return {
+    label,
+    apply() {
+      write(after)
+    },
+    revert() {
+      write(before)
+    },
+  }
+}
+
+/**
  * The session-scoped undo stack (§6.5, DD9).
  *
  * Deliberately memory-only and deliberately ignorant of what a command means:
@@ -454,6 +508,31 @@ export interface Modifiers {
   readonly shift?: boolean
 }
 
+/** Which arrow key was pressed, in the canvas' own terms. */
+export type NudgeAxis = 'left' | 'right' | 'up' | 'down'
+
+/**
+ * The world-space delta of one arrow-key nudge (§6.3).
+ *
+ * `fast` is Shift held: §6.3's "Shift=10". Y grows downward on the canvas (the
+ * camera's own convention), so `up` subtracts.
+ */
+export function nudgeVector(axis: NudgeAxis, fast = false): Point {
+  const step = fast ? NUDGE_STEP_FAST : NUDGE_STEP
+  switch (axis) {
+    case 'left':
+      return { x: -step, y: 0 }
+    case 'right':
+      return { x: step, y: 0 }
+    case 'up':
+      return { x: 0, y: -step }
+    case 'down':
+      return { x: 0, y: step }
+    default:
+      return { x: 0, y: 0 }
+  }
+}
+
 /**
  * Map one key press to the action it means (§6.3).
  *
@@ -556,3 +635,111 @@ export function shortcutContext(flags: ShortcutTargetFlags): ShortcutContext {
   if (flags.contentEditable === true) return 'input'
   return 'canvas'
 }
+
+/* -------------------------------------------------------------------------- */
+/* Context menu (§6.4)                                                        */
+/* -------------------------------------------------------------------------- */
+
+/** The node kinds of §3.3; this build only ever makes image nodes. */
+export type NodeKind = 'image' | 'task' | 'layout'
+
+/** What a right-click landed on, flattened out of the DOM event. */
+export interface ContextMenuTarget {
+  /** A node, or the blank canvas. */
+  readonly kind: 'node' | 'blank'
+  /** Which node kind (defaults to `image`, the only one this build creates). */
+  readonly nodeKind?: NodeKind
+  /** How many nodes the menu acts on: §6.4 makes multi-selection menus batch. */
+  readonly selectionSize?: number
+  /** A task node's state decides between "cancel" and "retry" (§6.4). */
+  readonly taskState?: 'queued' | 'running' | 'failed' | 'interrupted' | 'done'
+}
+
+/** One entry of the right-click menu. */
+export interface ContextMenuItem {
+  /** Stable id; the view maps it to a handler and nothing else is trusted from a title. */
+  readonly id: string
+  /** Text the user reads, in the panel's language. */
+  readonly label: string
+  /** Destructive action: rendered in red and usually confirmed. */
+  readonly danger?: boolean
+  /** Known §6.4 action whose owner has not landed yet. Rendered, but not clickable. */
+  readonly disabled?: boolean
+  /** Why it is disabled, or what it will do. Shown as the tooltip. */
+  readonly hint?: string
+}
+
+/**
+ * The items for one right-click (§6.4), as data.
+ *
+ * Everything that *decides* the menu is here — which kind was hit, whether the
+ * menu acts on one node or on a multi-selection, and whether a task is running —
+ * so the shape §6.4 asks for is asserted directly in tests, while the view only
+ * maps ids to handlers.
+ *
+ * Items whose implementation belongs to a later task are present and `disabled`
+ * with the reason attached rather than omitted: the user sees that the action
+ * exists and is not wired, which is more honest than a menu that silently grows
+ * new entries between releases. Cross-board copy/move is C12 (§7.2), the layout
+ * node and its export are C13, board export is C15, and the task entries are C11
+ * — that last group is also why `nodeKind` is a parameter now (C11 turns the
+ * kind on, not this function).
+ *
+ * Batch (`selectionSize >= 2`) menus act on the whole selection, so they offer no
+ * single-image affordances: "用作参考" for two pictures is an ambiguous command.
+ * Alignment is deliberately *not* in the menu — it has §6.2's dedicated toolbar,
+ * which appears on the same selection.
+ */
+export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
+  if (target.kind === 'blank') {
+    return [
+      { id: 'new-layout', label: '新建布局节点', disabled: true, hint: '布局节点随 C13 落地' },
+      { id: 'paste', label: '粘贴', disabled: true, hint: '跨板粘贴随 C12 落地（服务端 copy-item）' },
+      { id: 'select-all', label: '全选' },
+      { id: 'fit', label: '适应视图' },
+      { id: 'export-board', label: '导出画板…', disabled: true, hint: '导出随 C15 落地' },
+    ]
+  }
+  const kind = target.nodeKind ?? 'image'
+  if (kind === 'task') {
+    const running = target.taskState === 'queued' || target.taskState === 'running'
+    return running
+      ? [
+        { id: 'task-cancel', label: '取消', disabled: true, hint: '任务节点随 C11 落地' },
+        { id: 'remove', label: '从画布移除（不删文件）' },
+      ]
+      : [
+        { id: 'task-retry', label: '重试', disabled: true, hint: '任务节点随 C11 落地' },
+        { id: 'task-edit', label: '编辑参数重发', disabled: true, hint: '任务节点随 C11 落地' },
+        { id: 'remove', label: '从画布移除（不删文件）' },
+      ]
+  }
+  if (kind === 'layout') {
+    return [
+      { id: 'layout-generate', label: '生成', disabled: true, hint: '布局入参契约随 T21/C14' },
+      { id: 'layout-send-form', label: '发送到表单', disabled: true, hint: '布局节点随 C13 落地' },
+      { id: 'layout-export-draft', label: '导出 draft', disabled: true, hint: '布局节点随 C13 落地' },
+      { id: 'layout-export-compiled', label: '导出 compiled', disabled: true, hint: '布局节点随 C13 落地' },
+      { id: 'remove', label: '删除节点' },
+    ]
+  }
+  const count = Math.max(1, Math.floor(target.selectionSize ?? 1))
+  if (count >= 2) {
+    return [
+      { id: 'remove', label: `从画布移除所选 ${String(count)} 张（不删文件）` },
+      { id: 'copy-item', label: '复制所选到画板…', disabled: true, hint: '跨板复制随 C12 落地（服务端 copy-item）' },
+      { id: 'move-item', label: '移动所选到画板…', disabled: true, hint: '跨板移动随 C12 落地（服务端 move-item）' },
+      { id: 'delete-file', label: `删除所选 ${String(count)} 个文件…`, danger: true, hint: '逐个二次确认太吵，这里只确认一次' },
+    ]
+  }
+  return [
+    { id: 'reference', label: '用作参考' },
+    { id: 'branch', label: '按这张图迭代（预填表单）' },
+    { id: 'original', label: '查看原图（新窗）' },
+    { id: 'copy-item', label: '复制到画板…', disabled: true, hint: '跨板复制随 C12 落地（服务端 copy-item）' },
+    { id: 'move-item', label: '移动到画板…', disabled: true, hint: '跨板移动随 C12 落地（服务端 move-item）' },
+    { id: 'remove', label: '从画布移除（不删文件）' },
+    { id: 'delete-file', label: '删除文件…', danger: true, hint: '二次确认后删除磁盘上的 PNG' },
+  ]
+}
+

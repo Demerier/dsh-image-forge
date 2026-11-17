@@ -55,6 +55,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import {
@@ -77,6 +78,29 @@ import {
   type Rect,
   type Viewport,
 } from './studio-canvas.ts'
+import {
+  ALIGN_MODES,
+  CommandStack,
+  DISTRIBUTE_AXES,
+  alignNodes,
+  contextMenuItems,
+  distributeNodes,
+  marqueeSelection,
+  marqueeWorldRect,
+  moveSelection,
+  nodesInRect,
+  nudgeVector,
+  resolveShortcut,
+  shortcutContext,
+  singleSelection,
+  snapshotCommand,
+  toggleSelection,
+  type AlignMode,
+  type Command,
+  type ContextMenuItem,
+  type DistributeAxis,
+  type NodeRect,
+} from './canvas-interactions.ts'
 import {
   STUDIO_ASSETS_ROUTE,
   STUDIO_BOARD_ROUTE,
@@ -136,10 +160,83 @@ interface CanvasNode {
   readonly parents: readonly string[]
 }
 
-/** A pointer gesture in progress; `null` when idle. */
+/**
+ * A pointer gesture in progress; `undefined` when idle.
+ *
+ * Three kinds now, not two (`docs/CANVAS-DESIGN.md` §6.6). Panning keeps the
+ * camera it started from; a node drag keeps the *whole* selection's origins so a
+ * multi-node move is one delta applied to a batch, never an accumulation; a
+ * marquee keeps the pointer origin in viewport space plus the selection it must
+ * union onto, so `Shift` can add to a selection the user already had.
+ */
 type Gesture =
   | { kind: 'pan'; startX: number; startY: number; camera: Camera }
-  | { kind: 'node'; id: string; startX: number; startY: number; origin: Point }
+  | {
+    kind: 'node'
+    /** Every node the drag moves: the selection at pointer-down (§6.1). */
+    readonly ids: readonly string[]
+    /** World positions at pointer-down, keyed by id — never re-read per frame. */
+    readonly origins: ReadonlyMap<string, Point>
+    readonly startX: number
+    readonly startY: number
+  }
+  | {
+    kind: 'marquee'
+    /** Pointer origin, already converted to viewport-relative pixels. */
+    readonly startX: number
+    readonly startY: number
+    /** Selection at pointer-down: a `Shift` marquee unions onto it. */
+    readonly base: ReadonlySet<string>
+    readonly additive: boolean
+    /** The canvas box's client offset, so a move event converts without a reflow. */
+    readonly left: number
+    readonly top: number
+  }
+
+/** A marquee's on-screen rectangle, in viewport-relative pixels. */
+interface MarqueeBox {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+/**
+ * Consecutive arrow-key nudges inside this window merge into one undo step.
+ *
+ * §6.3 asks for the merge ("合并连续微移为一条命令"); without a window every
+ * key press would put a step on the stack and Ctrl+Z would walk back one pixel at
+ * a time. 700 ms is longer than a held key's repeat rate and shorter than "I
+ * went to look at something else".
+ */
+const NUDGE_MERGE_MS = 700
+
+/** One coalesced nudge session: the step on the stack, and the map it writes. */
+interface NudgeSession {
+  /** When the last nudge of this run happened (`Date.now()`). */
+  at: number
+  /** The exact id set, so nudging a different selection starts a new step. */
+  readonly signature: string
+  /** Positions before the run started — what undo restores. */
+  readonly before: Map<string, Point>
+  /** Positions to restore on redo; mutated in place as the run continues. */
+  readonly after: Map<string, Point>
+  /** The command already on the stack; it reads `after` by reference. */
+  readonly command: Command
+}
+
+/** The §6.2 toolbar's six buttons, in the order §6.2 lists them. */
+const ALIGN_LABELS: Record<AlignMode, string> = {
+  left: '左对齐',
+  'center-h': '水平居中',
+  right: '右对齐',
+  top: '顶对齐',
+  'center-v': '垂直居中',
+  bottom: '底对齐',
+}
+
+/** The §6.2 distribute buttons, one per axis. */
+const DISTRIBUTE_LABELS: Record<DistributeAxis, string> = { x: '水平等距', y: '垂直等距' }
 
 /**
  * World-space rectangle a node occupies.
@@ -152,6 +249,18 @@ type Gesture =
 function nodeRect(node: CanvasNode): Rect {
   const size = nodeDisplaySize(node.image.width, node.image.height)
   return { x: node.x, y: node.y, width: size.width, height: size.height }
+}
+
+/**
+ * `nodeRect` for every node, carrying the id the interaction layer keys by.
+ *
+ * `nodeRect` alone drops the id (a node's rectangle is geometry, not identity),
+ * while every C08 function — marquee hit-testing, alignment, distribution —
+ * returns positions keyed by id. Composing the two here keeps that join in one
+ * place instead of at each call site.
+ */
+function nodeRects(nodes: readonly CanvasNode[]): NodeRect[] {
+  return nodes.map((node) => ({ id: node.id, ...nodeRect(node) }))
 }
 
 /**
@@ -513,12 +622,36 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   // Measured size of the canvas element. {0,0} until the first measurement,
   // which `visibleWorldRect` treats as "unbounded" — see the culling note below.
   const [viewport, setViewport] = useState<Viewport>({ width: 0, height: 0 })
-  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined)
+  // The selection is a set now, not one id: §6.1 makes multi-select the model and
+  // "single selected node" a special case of it (`singleSelection`). Every
+  // component that used to read one id reads the set instead.
+  const [selection, setSelection] = useState<ReadonlySet<string>>(new Set())
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const gestureRef = useRef<Gesture | undefined>(undefined)
   // Latest pointer position and the one queued frame that will apply it (§10.3).
   const pointerRef = useRef<Point | undefined>(undefined)
   const frameRef = useRef<number | undefined>(undefined)
+  // The marquee rectangle is screen-space DOM, not part of the scaled layer
+  // (§6.1: its border must not zoom).
+  const [marquee, setMarquee] = useState<MarqueeBox | undefined>(undefined)
+  // Right-click menu (§6.4): where it is, what it offers, and what it acts on.
+  const [menu, setMenu] = useState<{
+    readonly x: number
+    readonly y: number
+    readonly items: readonly ContextMenuItem[]
+    /** The node it was opened on; `undefined` for the blank-canvas menu. */
+    readonly target?: string
+  } | undefined>(undefined)
+  // Space is a *held* state, so it lives in a ref the pointer handler can read at
+  // pointer-down and in state only for the cursor affordance (§6.3, §6.6).
+  const panRef = useRef(false)
+  const [panHeld, setPanHeld] = useState(false)
+  // The third pan entry (§6.6 keeps three): a toolbar toggle for users who would
+  // rather not hold a key at all. It is sticky, unlike Space.
+  const [handMode, setHandMode] = useState(false)
+  // Undo history (§6.5, DD9): in memory, session-scoped, capped by the stack.
+  const historyRef = useRef<CommandStack>(new CommandStack())
+  const nudgeRef = useRef<NudgeSession | undefined>(undefined)
   // Board state: the library, the one on screen, and its rename editor.
   const [boards, setBoards] = useState<BoardSummary[]>([])
   const [boardId, setBoardId] = useState<string | undefined>(undefined)
@@ -553,7 +686,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setNodes([])
       setBatches([])
       setSelectedId(undefined)
-      setSelectedNodeId(undefined)
+      setSelection(new Set())
+      setMenu(undefined)
+      // The undo history is per board (§6.5: "session-scoped" and the stack holds
+      // ids this board no longer has once another one is open).
+      historyRef.current.clear()
+      nudgeRef.current = undefined
       return
     }
     setBoardBusy(true)
@@ -576,7 +714,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       const restored = batchesFromBoard(board.items)
       setBatches(restored)
       setSelectedId(restored[0]?.id)
-      setSelectedNodeId(undefined)
+      setSelection(new Set())
+      setMenu(undefined)
+      historyRef.current.clear()
+      nudgeRef.current = undefined
       setCamera(board.camera ?? { x: -28, y: -28, zoom: 1 })
       setBoardError(undefined)
     } catch (cause) {
@@ -945,7 +1086,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       scheduleLayout()
       if (created[0] !== undefined) {
         const first = created[0]
-        setSelectedNodeId(first.id)
+        setSelection(new Set([first.id]))
         // Only move the view when the new node would land off-screen: a user
         // who zoomed out to survey the session should not be yanked back in.
         // The margins are the node's own, not a shared constant: a 16:9 result
@@ -1059,30 +1200,263 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     scheduleLayout()
   }, [nodes, scheduleLayout])
 
+  /* ------------------------------------------------------------------------ */
+  /* Selection, movement and the undo stack (§6.1, §6.2, §6.5)                 */
+  /* ------------------------------------------------------------------------ */
+
+  /** Write the node list everywhere it is read: React state *and* the refs. */
+  const writeNodes = useCallback((next: CanvasNode[]) => {
+    // The ref is not a cache: gestures, undo and the save path all read it from
+    // callbacks that must see the change in the same tick (see `endGesture`).
+    nodesRef.current = next
+    setNodes(next)
+  }, [])
+
+  /** Set the coordinates of every node in `positions` in one write. */
+  const applyPositions = useCallback((positions: ReadonlyMap<string, Point>) => {
+    writeNodes(nodesRef.current.map((node) => {
+      const point = positions.get(node.id)
+      return point === undefined ? node : { ...node, x: point.x, y: point.y }
+    }))
+  }, [writeNodes])
+
+  /** Where those ids are right now — the `before` side of an undo step. */
+  const positionsOf = useCallback((ids: Iterable<string>): Map<string, Point> => {
+    const index = new Map(nodesRef.current.map((node) => [node.id, node]))
+    const positions = new Map<string, Point>()
+    for (const id of ids) {
+      const node = index.get(id)
+      if (node !== undefined) positions.set(id, { x: node.x, y: node.y })
+    }
+    return positions
+  }, [])
+
+  /**
+   * The selected nodes as world rectangles, from the **full** node list.
+   *
+   * Not `shown`: §6.1's hit rules run over every node on the board, so a marquee
+   * that leaves the viewport, a select-all, and an alignment of a selection that
+   * is partly culled must still see everything (the C07 note says the same).
+   */
+  const selectionRects = useCallback((ids: ReadonlySet<string>): NodeRect[] => (
+    nodeRects(nodesRef.current.filter((node) => ids.has(node.id)))
+  ), [])
+
+  /**
+   * Put an already-applied change on the undo stack.
+   *
+   * `CommandStack.push` does not apply: by the time a drag ends, the nodes have
+   * moved — the command only remembers where they were.
+   */
+  const pushCommand = useCallback((command: Command) => {
+    // Any command closes an open nudge run, so a later arrow key starts a step
+    // of its own instead of silently widening the previous one.
+    nudgeRef.current = undefined
+    historyRef.current.push(command)
+  }, [])
+
+  /** One undoable coordinate change, for a batch of nodes. */
+  const moveCommand = useCallback((label: string, before: Map<string, Point>, after: Map<string, Point>): Command => (
+    snapshotCommand(label, before, after, (positions) => { applyPositions(positions) })
+  ), [applyPositions])
+
+  /** Move a batch, record one step, save once. */
+  const applyPositionsCommand = useCallback((label: string, after: Map<string, Point>) => {
+    const before = positionsOf(after.keys())
+    applyPositions(after)
+    pushCommand(moveCommand(label, before, after))
+    scheduleLayout()
+  }, [applyPositions, moveCommand, positionsOf, pushCommand, scheduleLayout])
+
+  /** Align the selection to its own bounding box (§6.2); needs two nodes. */
+  const alignSelection = useCallback((mode: AlignMode) => {
+    const rects = selectionRects(selection)
+    if (rects.length < 2) return
+    applyPositionsCommand(`align-${mode}`, alignNodes(rects, mode))
+  }, [applyPositionsCommand, selection, selectionRects])
+
+  /** Space the selection's centres evenly (§6.2); needs three nodes. */
+  const distributeSelection = useCallback((axis: DistributeAxis) => {
+    const rects = selectionRects(selection)
+    if (rects.length < 3) return
+    applyPositionsCommand(`distribute-${axis}`, distributeNodes(rects, axis))
+  }, [applyPositionsCommand, selection, selectionRects])
+
+  /**
+   * Arrow-key nudge (§6.3), coalesced into one undo step per run.
+   *
+   * §6.3 asks for the merge: without it every key press would be its own step and
+   * Ctrl+Z would walk back one world unit at a time. The step already on the
+   * stack reads its `after` map *by reference*, so extending the run is a matter
+   * of rewriting that map — no second push, and the redo tail keeps pointing at
+   * the same command.
+   */
+  const nudge = useCallback((axis: 'left' | 'right' | 'up' | 'down', fast: boolean) => {
+    const ids = [...selection]
+    if (ids.length === 0) return
+    const delta = nudgeVector(axis, fast)
+    const from = positionsOf(ids)
+    const to = new Map<string, Point>()
+    for (const [id, point] of from) to.set(id, { x: point.x + delta.x, y: point.y + delta.y })
+    const signature = ids.join('\u0001')
+    const now = Date.now()
+    const open = nudgeRef.current
+    if (open !== undefined && open.signature === signature && now - open.at <= NUDGE_MERGE_MS) {
+      open.after.clear()
+      for (const [id, point] of to) open.after.set(id, point)
+      open.at = now
+      applyPositions(open.after)
+      scheduleLayout()
+      return
+    }
+    const before = new Map(from)
+    const after = new Map(to)
+    const command = snapshotCommand('nudge', before, after, (positions) => { applyPositions(positions) })
+    nudgeRef.current = { at: now, signature, before, after, command }
+    historyRef.current.push(command)
+    applyPositions(after)
+    scheduleLayout()
+  }, [applyPositions, positionsOf, scheduleLayout, selection])
+
+  const undoHistory = useCallback(() => {
+    // Undoing ends the nudge run: the next arrow key must not extend a command
+    // that has just moved into the redo tail.
+    nudgeRef.current = undefined
+    if (!historyRef.current.undo()) return
+    scheduleLayout()
+  }, [scheduleLayout])
+
+  const redoHistory = useCallback(() => {
+    nudgeRef.current = undefined
+    if (!historyRef.current.redo()) return
+    scheduleLayout()
+  }, [scheduleLayout])
+
+  /**
+   * Remove nodes from the board — unplace, never delete files (§6.3).
+   *
+   * `deleteFile` is the explicit second action a right-click offers (§6.4), and
+   * it keeps the shipped wording of the asset page's confirm.
+   *
+   * The host write is not part of the undo step: the stack restores the canvas,
+   * because DD9 keeps history in memory and the board is written by several
+   * actors (§6.5). Reloading after undoing a removal shows the item gone — the
+   * honest limit of a session-scoped stack, stated rather than papered over.
+   */
+  const removeNodes = useCallback((ids: readonly string[], deleteFile = false) => {
+    const drop = new Set(ids)
+    if (drop.size === 0) return
+    const before = nodesRef.current
+    const after = before.filter((node) => !drop.has(node.id))
+    if (after.length === before.length) return
+    writeNodes(after)
+    // A reference pointing at a removed node would draw an edge to nothing.
+    setReferences((current) => current.filter((entry) => entry.nodeId === undefined || !drop.has(entry.nodeId)))
+    setSelection((current) => {
+      const next = new Set<string>()
+      for (const id of current) if (!drop.has(id)) next.add(id)
+      return next
+    })
+    pushCommand(snapshotCommand('remove', before, after, (list) => { writeNodes([...list]) }))
+    const board = boardIdRef.current
+    if (board === undefined) return
+    for (const id of drop) {
+      void postBoard({
+        action: 'remove-item',
+        board,
+        item: id,
+        ...(deleteFile ? { deleteFile: true } : {}),
+      }).then((error) => {
+        if (error !== undefined) setBoardError(error)
+      })
+    }
+  }, [pushCommand, writeNodes])
+
+  /** The single-node form the inline node actions still use. */
+  const removeNode = useCallback((id: string) => { removeNodes([id]) }, [removeNodes])
+
+  /** Replace the selection with exactly one node (or with none). */
+  const selectOnly = useCallback((id: string | undefined) => {
+    setSelection(id === undefined ? new Set() : new Set([id]))
+  }, [])
+
+  /**
+   * Pointer-down on blank canvas: marquee by default, pan on Space / middle.
+   *
+   * §6.6 changes the old default on purpose — a blank drag used to pan and now
+   * boxes a selection, because that is the commoner gesture on a generation
+   * canvas. All three pan entries survive: Space+drag, middle-button drag, and
+   * the toolbar's hand toggle (`panRef`). The right-click menu is the other
+   * blank-canvas gesture and is handled by `onCanvasContextMenu`.
+   */
   const onCanvasPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return
+    if (event.button !== 0 && event.button !== 1) return
     const target = event.target as HTMLElement
-    // Nodes start their own drag; anything else pans the view.
+    // Any click outside the menu dismisses it (§6.4).
+    setMenu(undefined)
+    // Nodes start their own drag; anything else reaches this handler.
     if (target.closest('.dsh-forge-node') !== null) return
+    // §6.3 makes the canvas container `tabIndex=0`; clicking it is how it gets
+    // the keyboard back after the form had it.
+    event.currentTarget.focus()
     event.currentTarget.setPointerCapture(event.pointerId)
     pointerRef.current = undefined
-    gestureRef.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, camera }
-    setSelectedNodeId(undefined)
-  }, [camera])
+    if (event.button === 1 || panRef.current || handMode) {
+      gestureRef.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, camera }
+      return
+    }
+    const box = event.currentTarget.getBoundingClientRect()
+    gestureRef.current = {
+      kind: 'marquee',
+      startX: event.clientX - box.left,
+      startY: event.clientY - box.top,
+      base: selection,
+      additive: event.shiftKey,
+      left: box.left,
+      top: box.top,
+    }
+    // §6.1: a blank click clears the selection. A Shift drag keeps it, because
+    // it is adding to what is already there.
+    if (!event.shiftKey) setSelection(new Set())
+  }, [camera, handMode, selection])
 
+  /**
+   * Pointer-down on a node: select (or toggle) it and start the batch drag.
+   *
+   * Clicking a node that is already part of a multi-selection keeps the whole set
+   * — that is the only way to drag several nodes at once (§6.1). Ctrl/Cmd+click
+   * toggles membership; toggling a node *out* starts no drag, because the pointer
+   * is on something that just left the selection.
+   */
   const onNodePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>, node: CanvasNode) => {
     if (event.button !== 0) return
     event.stopPropagation()
+    setMenu(undefined)
     event.currentTarget.setPointerCapture(event.pointerId)
-    setSelectedNodeId(node.id)
+    const additive = event.ctrlKey || event.metaKey
+    let next: ReadonlySet<string>
+    if (additive) next = toggleSelection(selection, node.id, true)
+    else if (selection.has(node.id)) next = selection
+    else next = toggleSelection(selection, node.id, false)
+    setSelection(next)
     pointerRef.current = undefined
-    gestureRef.current = { kind: 'node', id: node.id, startX: event.clientX, startY: event.clientY, origin: { x: node.x, y: node.y } }
-  }, [])
+    if (!next.has(node.id)) {
+      gestureRef.current = undefined
+      return
+    }
+    gestureRef.current = {
+      kind: 'node',
+      ids: [...next],
+      origins: positionsOf(next),
+      startX: event.clientX,
+      startY: event.clientY,
+    }
+  }, [positionsOf, selection])
 
   /**
    * Apply the pointer position buffered by the latest move event.
    *
-   * Both gesture kinds are computed from the *gesture start*, never from the
+   * Every gesture kind is computed from the *gesture start*, never from the
    * previous frame, so applying only the last position is exact: nothing
    * accumulates and the end position is the same whether one frame ran or sixty
    * (§10.3). The pending frame is cancelled here so a manual flush (pointerup)
@@ -1101,13 +1475,33 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setCamera(panBy(gesture.camera, { x: pointer.x - gesture.startX, y: pointer.y - gesture.startY }))
       return
     }
-    // Screen delta → world delta: the node must track the pointer at any zoom.
-    const dx = (pointer.x - gesture.startX) / camera.zoom
-    const dy = (pointer.y - gesture.startY) / camera.zoom
-    setNodes((current) => current.map((node) => (
-      node.id === gesture.id ? { ...node, x: gesture.origin.x + dx, y: gesture.origin.y + dy } : node
-    )))
-  }, [camera.zoom])
+    if (gesture.kind === 'node') {
+      // Screen delta → world delta, divided once by the live zoom: the whole
+      // selection tracks the pointer at any zoom (§6.1, C08 `moveSelection`).
+      const moved = moveSelection(
+        gesture.origins,
+        { x: pointer.x - gesture.startX, y: pointer.y - gesture.startY },
+        cameraRef.current.zoom,
+      )
+      applyPositions(moved)
+      return
+    }
+    // Marquee: the two corners are viewport-relative, so the world rectangle is
+    // exactly what `screenToWorld` says it is (C08 `marqueeWorldRect`). Hits are
+    // tested against the full board, and the selection updates live so the
+    // highlight follows the box (§6.1).
+    const start = { x: gesture.startX, y: gesture.startY }
+    const current = { x: pointer.x - gesture.left, y: pointer.y - gesture.top }
+    const world = marqueeWorldRect(cameraRef.current, start, current)
+    const hits = nodesInRect(nodeRects(nodesRef.current), world)
+    setSelection(marqueeSelection(gesture.base, hits, gesture.additive))
+    setMarquee({
+      x: Math.min(start.x, current.x),
+      y: Math.min(start.y, current.y),
+      width: Math.abs(current.x - start.x),
+      height: Math.abs(current.y - start.y),
+    })
+  }, [applyPositions])
 
   /**
    * Buffer the pointer and let one animation frame apply it.
@@ -1124,6 +1518,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     frameRef.current = requestAnimationFrame(() => { flushPointer() })
   }, [flushPointer])
 
+  /**
+   * End the gesture: flush the last position, record the step, save once.
+   *
+   * The release position is read *before* `flushPointer` clears it — the undo
+   * step has to record where the nodes actually ended up. The step is built from
+   * the gesture's own origins plus the final delta (never from the state that
+   * `flushPointer` just wrote), which is what keeps a rubber-banded frame from
+   * recording a position the user never saw.
+   */
   const endGesture = useCallback(() => {
     const gesture = gestureRef.current
     if (gesture === undefined) {
@@ -1136,15 +1539,37 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       }
       return
     }
-    // Flush before dropping the gesture: the release position is the one the
-    // user chose, and a move that was still waiting for a frame must not be
-    // lost — the saved arrangement has to match what the drag looked like.
+    const pointer = pointerRef.current
     flushPointer()
     gestureRef.current = undefined
-    // Both a drag and a pan moved something worth keeping: node positions in the
-    // first case, the camera in both.
+    setMarquee(undefined)
+    if (gesture.kind === 'marquee') {
+      // Only the selection changed, and a selection is not a board change: no
+      // save, and nothing for the undo stack (§6.5 lists node changes only).
+      return
+    }
+    if (gesture.kind === 'node' && pointer !== undefined) {
+      const after = moveSelection(
+        gesture.origins,
+        { x: pointer.x - gesture.startX, y: pointer.y - gesture.startY },
+        cameraRef.current.zoom,
+      )
+      let moved = false
+      for (const [id, point] of after) {
+        const origin = gesture.origins.get(id)
+        if (origin === undefined || origin.x !== point.x || origin.y !== point.y) {
+          moved = true
+          break
+        }
+      }
+      // A click that never moved is not an undoable step, and not a save.
+      if (!moved) return
+      pushCommand(moveCommand('move', new Map(gesture.origins), after))
+    }
+    // A drag moved node positions, a pan moved the camera — both are worth
+    // keeping, and both go through the one debounced save.
     scheduleLayout()
-  }, [flushPointer, scheduleLayout])
+  }, [flushPointer, moveCommand, pushCommand, scheduleLayout])
 
   /** Hand a canvas result back to the form as an edit reference. */
   const referenceNode = useCallback((node: CanvasNode) => {
@@ -1192,12 +1617,193 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     })
   }, [])
 
+  /**
+   * The §6.3 keyboard, dispatched through the C08 table.
+   *
+   * The DOM inspection stays here — `tagName`, `contentEditable`, and the layout
+   * editor's container — and `shortcutContext` decides whether the canvas still
+   * owns the keys. Inside the form or the editor the table answers `none`, so a
+   * Delete key edits text and Ctrl+Z edits text, which is the whole point of the
+   * yield rule.
+   *
+   * Copy/paste are in the table but land with C12: the cross-board clipboard is a
+   * service-side action (§7.2), so those two actions are deliberately inert here
+   * rather than aliased onto something local.
+   */
+  const onCanvasKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null
+    const context = shortcutContext({
+      tagName: target?.tagName,
+      contentEditable: target?.isContentEditable === true,
+      inEditor: target?.closest?.('[data-dsh-layout-editor], .dsh-forge-layout-editor') != null,
+    })
+    const action = resolveShortcut(
+      event.key,
+      { ctrl: event.ctrlKey, meta: event.metaKey, shift: event.shiftKey },
+      context,
+    )
+    if (action === 'none') return
+    // Only keys the canvas actually handles are swallowed; everything else stays
+    // with the browser (find, reload, the host's own bindings).
+    event.preventDefault()
+    switch (action) {
+      case 'remove':
+        removeNodes([...selection])
+        break
+      case 'undo':
+        undoHistory()
+        break
+      case 'redo':
+        redoHistory()
+        break
+      case 'select-all':
+        // The board's nodes, not the culled subset: "all" means all.
+        setSelection(new Set(nodesRef.current.map((node) => node.id)))
+        break
+      case 'escape':
+        // §6.3: Esc clears the selection, closes the menu and exits a marquee.
+        // Dropping the gesture is what stops the next move from reopening the box.
+        if (gestureRef.current?.kind === 'marquee') {
+          gestureRef.current = undefined
+          pointerRef.current = undefined
+          if (frameRef.current !== undefined) {
+            cancelAnimationFrame(frameRef.current)
+            frameRef.current = undefined
+          }
+        }
+        setMenu(undefined)
+        setMarquee(undefined)
+        setSelection(new Set())
+        break
+      case 'pan-mode':
+        panRef.current = true
+        setPanHeld(true)
+        break
+      case 'fit':
+        fitView()
+        break
+      case 'zoom-in':
+        zoomBy(1.25)
+        break
+      case 'zoom-out':
+        zoomBy(1 / 1.25)
+        break
+      case 'nudge-left':
+        nudge('left', event.shiftKey)
+        break
+      case 'nudge-right':
+        nudge('right', event.shiftKey)
+        break
+      case 'nudge-up':
+        nudge('up', event.shiftKey)
+        break
+      case 'nudge-down':
+        nudge('down', event.shiftKey)
+        break
+      default:
+        // `copy` / `paste`: C12 (§7.2).
+        break
+    }
+  }, [fitView, nudge, redoHistory, removeNodes, selection, undoHistory, zoomBy])
+
+  /** Space is a held modifier: releasing it hands the pointer back to selection. */
+  const onCanvasKeyUp = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== ' ' && event.key !== 'Space' && event.key !== 'Spacebar') return
+    panRef.current = false
+    setPanHeld(false)
+  }, [])
+
+  /** The nodes a context action applies to: the selection, or one node. */
+  const menuIds = useCallback((target: string | undefined): string[] => {
+    if (target !== undefined && !selection.has(target)) return [target]
+    return [...selection]
+  }, [selection])
+
+  /**
+   * Open the §6.4 menu at the pointer.
+   *
+   * The item list is generated by the pure `contextMenuItems`, so what the menu
+   * offers is unit-testable and the handler below only maps ids to actions. A
+   * right-click on a node outside the selection selects it first — a menu acting
+   * on something the user cannot see selected is a trap.
+   */
+  const onCanvasContextMenu = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    // The element comes off the event, not the ref: this handler has to work
+    // even before the canvas has been measured (and it keeps the DOM inspection
+    // in one shape with the pointer handlers).
+    const box = event.currentTarget.getBoundingClientRect()
+    const hit = (event.target as HTMLElement).closest('.dsh-forge-node')
+    const target = hit === null ? undefined : (hit as HTMLElement).dataset.nodeId
+    let size = selection.size
+    if (target !== undefined && !selection.has(target)) {
+      setSelection(new Set([target]))
+      size = 1
+    }
+    const items = contextMenuItems(target === undefined
+      ? { kind: 'blank' }
+      : { kind: 'node', nodeKind: 'image', selectionSize: size })
+    setMenu({
+      x: event.clientX - box.left,
+      y: event.clientY - box.top,
+      items,
+      target,
+    })
+  }, [selection])
+
+  /**
+   * Run one menu item (§6.4).
+   *
+   * Items that belong to a node kind this build does not make yet (task, layout)
+   * or to a later task (cross-board copy is C12, export is C15) arrive disabled,
+   * so their ids never reach this switch. The `default` arm is therefore the
+   * "not wired yet" arm, not a silent bug.
+   */
+  const runContextAction = useCallback((id: string) => {
+    const target = menu?.target
+    setMenu(undefined)
+    switch (id) {
+      case 'select-all':
+        setSelection(new Set(nodesRef.current.map((node) => node.id)))
+        break
+      case 'fit':
+        fitView()
+        break
+      case 'remove':
+        removeNodes(menuIds(target))
+        break
+      case 'delete-file':
+        if (!window.confirm('同时删除磁盘上的这个 PNG？此操作不可撤销。')) break
+        removeNodes(menuIds(target), true)
+        break
+      case 'reference': {
+        const node = nodesRef.current.find((entry) => entry.id === target)
+        if (node !== undefined) referenceNode(node)
+        break
+      }
+      case 'branch': {
+        // "Branch from this image": prefill the form with it as the reference,
+        // which is what starting an edit from a result means here (§6.4).
+        const node = nodesRef.current.find((entry) => entry.id === target)
+        if (node !== undefined) referenceNode(node)
+        break
+      }
+      case 'original': {
+        const node = nodesRef.current.find((entry) => entry.id === target)
+        if (node !== undefined) window.open(studioFileUrl(node.image.markdownPath), '_blank', 'noreferrer')
+        break
+      }
+      default:
+        break
+    }
+  }, [fitView, menu?.target, menuIds, referenceNode, removeNodes])
+
   /** Open the board an asset lives on and select it there. */
   const showOnCanvas = useCallback(async (asset: StudioAsset) => {
     if (boardIdRef.current !== asset.boardId) await selectBoard(asset.boardId)
     setView('canvas')
-    setSelectedNodeId(asset.id)
-  }, [selectBoard])
+    selectOnly(asset.id)
+  }, [selectBoard, selectOnly])
 
   /**
    * Drop one asset from its board.
@@ -1231,20 +1837,13 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         },
       }))
       .filter((batch) => batch.response.images.length > 0))
-    setSelectedNodeId((current) => (current === asset.id ? undefined : current))
-    setReferences((current) => current.filter((entry) => !(entry.payload.path === asset.path)))
-  }, [])
-
-  const removeNode = useCallback((id: string) => {
-    setNodes((current) => current.filter((node) => node.id !== id))
-    nodesRef.current = nodesRef.current.filter((node) => node.id !== id)
-    setReferences((current) => current.filter((entry) => entry.nodeId !== id))
-    setSelectedNodeId((current) => (current === id ? undefined : current))
-    const board = boardIdRef.current
-    if (board === undefined) return
-    void postBoard({ action: 'remove-item', board, item: id }).then((error) => {
-      if (error !== undefined) setBoardError(error)
+    setSelection((current) => {
+      if (!current.has(asset.id)) return current
+      const next = new Set(current)
+      next.delete(asset.id)
+      return next
     })
+    setReferences((current) => current.filter((entry) => !(entry.payload.path === asset.path)))
   }, [])
 
   const ready = config?.ready === true
@@ -1777,6 +2376,37 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               label,
             )),
           ),
+          view === 'canvas' && selection.size >= 2
+            ? createElement(
+              'div',
+              { className: 'dsh-forge-align', role: 'group', 'aria-label': '对齐与分布' },
+              ...ALIGN_MODES.map((mode) => createElement(
+                'button',
+                {
+                  key: mode,
+                  type: 'button',
+                  className: 'dsh-forge-align-btn',
+                  title: ALIGN_LABELS[mode],
+                  onClick: () => { alignSelection(mode) },
+                },
+                ALIGN_LABELS[mode],
+              )),
+              // §6.2: distribution needs a middle node to space out.
+              ...(selection.size >= 3
+                ? DISTRIBUTE_AXES.map((axis) => createElement(
+                  'button',
+                  {
+                    key: `distribute-${axis}`,
+                    type: 'button',
+                    className: 'dsh-forge-align-btn is-distribute',
+                    title: DISTRIBUTE_LABELS[axis],
+                    onClick: () => { distributeSelection(axis) },
+                  },
+                  DISTRIBUTE_LABELS[axis],
+                ))
+                : []),
+            )
+            : null,
           view === 'canvas'
             ? createElement(
               'div',
@@ -1797,6 +2427,22 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                 { type: 'button', className: 'dsh-forge-btn is-ghost', onClick: fitView },
                 '适应',
               ),
+              // §6.6 keeps three pan entries; this is the one that needs no key
+              // held and no extra mouse button (Space+drag and middle-drag are
+              // the other two). Sticky, unlike Space.
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: handMode ? 'dsh-forge-btn is-ghost is-active' : 'dsh-forge-btn is-ghost',
+                  title: handMode
+                    ? '平移模式：拖空白处移动相机（点击回到框选）'
+                    : '切到平移模式：拖空白处移动相机',
+                  'aria-pressed': handMode,
+                  onClick: () => { setHandMode((current) => !current) },
+                },
+                '平移',
+              ),
             )
             : createElement(
               'span',
@@ -1808,19 +2454,31 @@ export function StudioPanel(): ReturnType<typeof createElement> {
           ? createElement(
             'div',
             {
-              className: 'dsh-forge-canvas',
+              // §6.3: `tabIndex=0` is what makes the canvas container the owner of
+              // the keyboard table; the shortcuts deliberately do not bubble from
+              // the form, which keeps Delete and Ctrl+Z editing text there.
+              className: panHeld || handMode ? 'dsh-forge-canvas is-pan' : 'dsh-forge-canvas',
+              tabIndex: 0,
               ref: canvasRef,
               onPointerDown: onCanvasPointerDown,
               onPointerMove: onCanvasPointerMove,
               onPointerUp: endGesture,
               onPointerCancel: endGesture,
               onPointerLeave: endGesture,
+              onKeyDown: onCanvasKeyDown,
+              onKeyUp: onCanvasKeyUp,
+              onContextMenu: onCanvasContextMenu,
+              onBlur: () => {
+                // Focus left with Space still down: the held state must not stick.
+                panRef.current = false
+                setPanHeld(false)
+              },
             },
             nodes.length === 0 && view === 'canvas'
               ? createElement(
                 'p',
                 { className: 'dsh-forge-canvas-hint' },
-                busy ? '正在生成…' : '这个画板还是空的。生成的第一张图会落在这里；拖动空白处平移，滚轮缩放，拖图可改位置。',
+                busy ? '正在生成…' : '这个画板还是空的。生成的第一张图会落在这里；拖空白处框选，Space 或中键平移，滚轮缩放，拖图可改位置。',
               )
               : null,
             createElement(
@@ -1844,7 +2502,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               ),
               ...shown.map((item) => {
                 const node = item.node
-                const selected = node.id === selectedNodeId
+                // Membership, not equality: two selected nodes both paint (§6.1).
+                const selected = selection.has(node.id)
+                // The inline action row is single-node by design (§13 C09 step 1:
+                // "单选语义 = 选择集大小 1"), so a multi-selection shows none and
+                // uses the context menu instead.
+                const sole = singleSelection(selection) === node.id
                 // The width is inline because it belongs to this picture: the
                 // stylesheet cannot know the aspect ratio, and a fixed node
                 // width is exactly what turned a 16:9 result into a letterboxed
@@ -1855,6 +2518,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   {
                     key: node.id,
                     className: selected ? 'dsh-forge-node is-selected' : 'dsh-forge-node',
+                    // What `onCanvasContextMenu` reads back to find the node it
+                    // can only identify through `closest`.
+                    'data-node-id': node.id,
                     style: {
                       left: `${String(node.x)}px`,
                       top: `${String(node.y)}px`,
@@ -1873,7 +2539,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                     { className: 'dsh-forge-node-meta' },
                     `${String(node.image.width)}×${String(node.image.height)} · ${String(Math.round(node.image.bytes / 1024))} KB`,
                   ),
-                  selected
+                  sole
                     ? createElement(
                       'div',
                       { className: 'dsh-forge-node-actions' },
@@ -1912,6 +2578,52 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                 )
               }),
             ),
+            // ---- screen-space overlays -------------------------------------
+            //
+            // Both live outside `dsh-forge-canvas-layer` on purpose (§6.1, §6.4):
+            // a selection rectangle whose border scaled with the zoom would be
+            // unreadable at 0.1, and a menu that scaled would be unusable.
+            marquee === undefined
+              ? null
+              : createElement('div', {
+                className: 'dsh-forge-marquee',
+                style: {
+                  left: `${String(marquee.x)}px`,
+                  top: `${String(marquee.y)}px`,
+                  width: `${String(marquee.width)}px`,
+                  height: `${String(marquee.height)}px`,
+                },
+              }),
+            menu === undefined
+              ? null
+              : createElement(
+                'div',
+                {
+                  className: 'dsh-forge-context',
+                  role: 'menu',
+                  style: { left: `${String(menu.x)}px`, top: `${String(menu.y)}px` },
+                  // The menu is part of the canvas element, so its own clicks must
+                  // not be mistaken for a blank-canvas click that dismisses it.
+                  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { event.stopPropagation() },
+                  onContextMenu: (event: ReactPointerEvent<HTMLDivElement>) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                  },
+                },
+                ...menu.items.map((item) => createElement(
+                  'button',
+                  {
+                    key: item.id,
+                    type: 'button',
+                    role: 'menuitem',
+                    className: item.danger === true ? 'dsh-forge-context-item is-danger' : 'dsh-forge-context-item',
+                    disabled: item.disabled === true,
+                    title: item.hint ?? item.label,
+                    onClick: () => { runContextAction(item.id) },
+                  },
+                  item.label,
+                )),
+              ),
             createElement(
               'div',
               { className: 'dsh-forge-canvas-foot' },

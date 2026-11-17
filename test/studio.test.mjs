@@ -58,7 +58,14 @@ import {
   splitOptimizerAnswer,
   stripWrappingQuotes,
 } from '../testlib/studio-prompt.js'
-import { STUDIO_EVENTS_ROUTE, STUDIO_MAX_COUNT, STUDIO_MAX_PROMPT_CHARS, STUDIO_RATIOS } from '../testlib/studio-shared.js'
+import {
+  STUDIO_BOARD_ROUTE,
+  STUDIO_CONFIG_ROUTE,
+  STUDIO_EVENTS_ROUTE,
+  STUDIO_MAX_COUNT,
+  STUDIO_MAX_PROMPT_CHARS,
+  STUDIO_RATIOS,
+} from '../testlib/studio-shared.js'
 import { resolveDefaultSize } from '../testlib/ratio.js'
 
 // The published surface is exactly `Config, apply, inject, name` (asserted in
@@ -858,6 +865,38 @@ const HARNESS_CONFIG = {
   activeBoard: null,
 }
 
+/**
+ * A board with three 1:1 nodes, for the interaction section.
+ *
+ * The x positions are far enough apart that a marquee can sweep exactly one node:
+ * a 1024×1024 picture is a 200×240 node (`nodeDisplaySize`), so these sit at
+ * 0–200, 600–800 and 1200–1400 world units.
+ */
+const HARNESS_BOARD = {
+  id: 'cbrdharness',
+  name: '交互测试板',
+  camera: { x: 0, y: 0, zoom: 1 },
+  items: ['iaaa1', 'ibbb2', 'iccc3'].map((id, index) => ({
+    id,
+    path: `C:/out/${id}.png`,
+    markdownPath: `C:/out/${id}.png`,
+    width: 1024,
+    height: 1024,
+    bytes: 1024,
+    mediaType: 'image/png',
+    batchId: 'bharness',
+    prompt: '一只橘猫坐在窗台上',
+    ratio: '1:1',
+    steps: 8,
+    seed: index + 1,
+    mode: 'generate',
+    backend: 'studio',
+    parents: [],
+    x: index * 600,
+    y: 0,
+  })),
+}
+
 /** A fetch-shaped response; the panel only ever asks for `json()`. */
 function fakeResponse(payload, status) {
   return {
@@ -1133,11 +1172,34 @@ function installFakeNetwork(options) {
   const previousEventSource = globalThis.EventSource
   const calls = []
   const sources = []
+  // C09: a stubbed board (and a config that names it as the active one) is what
+  // lets the interaction section mount a canvas with nodes on it. Without one the
+  // harness serves exactly what it always did: an empty library and a 404.
+  const board = options === undefined ? undefined : options.board
+  const config = board === undefined
+    ? HARNESS_CONFIG
+    : {
+      ...HARNESS_CONFIG,
+      boards: [{
+        id: board.id,
+        name: board.name,
+        itemCount: board.items.length,
+        createdAt: '2026-11-17T00:00:00.000Z',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }],
+      activeBoard: board.id,
+    }
   globalThis.fetch = async (input, init) => {
     const url = String(input)
     calls.push({ url, method: init === undefined || init.method === undefined ? 'GET' : init.method })
-    if (url.indexOf(STUDIO_CONFIG_ROUTE) === 0) return fakeResponse(HARNESS_CONFIG, 200)
-    if (url.indexOf(STUDIO_BOARD_ROUTE) === 0) return fakeResponse({ error: 'no board in this harness' }, 404)
+    if (url.indexOf(STUDIO_CONFIG_ROUTE) === 0) return fakeResponse(config, 200)
+    if (url.indexOf(STUDIO_BOARD_ROUTE) === 0) {
+      if (board === undefined) return fakeResponse({ error: 'no board in this harness' }, 404)
+      // A board mutation is accepted: the wiring section asserts the canvas, not
+      // the store, and the layout debounce fires after the test has moved on.
+      if (init !== undefined && init.method === 'POST') return fakeResponse({ ok: true }, 200)
+      return fakeResponse(board, 200)
+    }
     return fakeResponse({ error: 'unstubbed fetch: ' + url }, 500)
   }
   class FakeEventSource {
@@ -1395,4 +1457,354 @@ test('unmounting the panel closes the stream and late frames do nothing', async 
     network.restore()
   }
 })
+
+// ---------------------------------------------------------------------------
+// C09: canvas interactions — selection, marquee, keys, undo, menus.
+//
+// The T18 harness below drives the *real* bundle: the handlers a pointer or a key
+// would call are called directly, so selection state, the marquee's screen→world
+// arithmetic, the §6.3 dispatch, the undo stack's effect on the canvas and the
+// §6.4 menus are all executed rather than grepped. Pointer capture, paint and the
+// feel of a drag stay manual spot checks (§14.5) — no DOM, no browser here.
+// ---------------------------------------------------------------------------
+
+/** The canvas element the interaction handlers are attached to. */
+function canvasElement(panel) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found !== undefined) return
+    if (typeof entry.props.className !== 'string') return
+    // `dsh-forge-canvas` gains `is-pan` while Space is held.
+    if (entry.props.className.split(' ')[0] === 'dsh-forge-canvas') found = entry
+  })
+  assert.ok(found !== undefined, 'the panel must render the canvas')
+  return found
+}
+
+/** Every rendered node, in render order (`dsh-forge-node`, not its children). */
+function nodeElements(panel) {
+  const nodes = []
+  fakeVisit(panel.tree, (entry) => {
+    if (typeof entry.props.className !== 'string') return
+    if (entry.props.className.split(' ')[0] === 'dsh-forge-node') nodes.push(entry)
+  })
+  return nodes
+}
+
+/** The ids of the nodes painted as selected. */
+function selectedIds(panel) {
+  return nodeElements(panel)
+    .filter((entry) => entry.props.className.split(' ').includes('is-selected'))
+    .map((entry) => entry.props['data-node-id'])
+}
+
+/** Shaped like the pointer events the canvas reads. */
+function pointerEvent(options = {}) {
+  const box = { left: 0, top: 0, width: 800, height: 600 }
+  return {
+    button: 0,
+    pointerId: 1,
+    clientX: 0,
+    clientY: 0,
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+    stopPropagation() {},
+    ...options,
+    currentTarget: {
+      focus() {},
+      setPointerCapture() {},
+      getBoundingClientRect: () => box,
+    },
+    target: options.target === undefined ? { closest: () => null } : options.target,
+  }
+}
+
+/** Shaped like the keyboard events the canvas reads. */
+function keyEvent(key, modifiers = {}, targetFlags = {}) {
+  const event = {
+    key,
+    prevented: false,
+    ctrlKey: modifiers.ctrl === true,
+    metaKey: modifiers.meta === true,
+    shiftKey: modifiers.shift === true,
+    target: {
+      tagName: targetFlags.tagName ?? 'DIV',
+      isContentEditable: targetFlags.contentEditable === true,
+      closest: () => null,
+    },
+    preventDefault() { event.prevented = true },
+  }
+  return event
+}
+
+/** The first button whose text is exactly `text`. */
+function buttonWithText(panel, text) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found !== undefined || entry.type !== 'button') return
+    if (fakeText(entry) === text) found = entry
+  })
+  return found
+}
+
+/** The open context menu's entries, or `undefined` when no menu is open. */function menuEntries(panel) {
+  const menu = fakeElementWithClass(panel.tree, 'dsh-forge-context')
+  if (menu === undefined) return undefined
+  const entries = []
+  fakeVisit(menu, (entry) => {
+    if (typeof entry.props.className !== 'string') return
+    if (entry.props.className.split(' ')[0] === 'dsh-forge-context-item') entries.push(entry)
+  })
+  return entries
+}
+
+/** Mount the workbench with the three-node board, and give Node a rAF. */
+async function mountCanvasWorkbench() {
+  // §10.3 coalesces pointer moves into one animation frame; Node has none, so the
+  // test frames immediately. This is the only browser API the wiring needs here.
+  const requestFrame = globalThis.requestAnimationFrame
+  const cancelFrame = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = (callback) => { callback(); return 1 }
+  globalThis.cancelAnimationFrame = () => {}
+  const mounted = await mountWorkbench({ board: HARNESS_BOARD })
+  mounted.restoreFrames = () => {
+    if (requestFrame === undefined) delete globalThis.requestAnimationFrame
+    else globalThis.requestAnimationFrame = requestFrame
+    if (cancelFrame === undefined) delete globalThis.cancelAnimationFrame
+    else globalThis.cancelAnimationFrame = cancelFrame
+  }
+  return mounted
+}
+
+test('the canvas selects a node, toggles with Ctrl, and a blank drag boxes a selection', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    const canvas = canvasElement(panel)
+    assert.equal(nodeElements(panel).length, 3, 'every board item renders as a node')
+    assert.deepEqual(selectedIds(panel), [], 'nothing is selected on load')
+
+    // A plain click selects exactly that node.
+    nodeElements(panel)[0].props.onPointerDown(pointerEvent({ clientX: 10, clientY: 10 }))
+    await settle(panel)
+    assert.deepEqual(selectedIds(panel), ['iaaa1'])
+    canvasElement(panel).props.onPointerUp({})
+
+    // Ctrl+click adds a member; a click that does not move pushes no undo step.
+    nodeElements(panel)[1].props.onPointerDown(pointerEvent({ clientX: 610, clientY: 10, ctrlKey: true }))
+    await settle(panel)
+    assert.deepEqual([...selectedIds(panel)].sort(), ['iaaa1', 'ibbb2'], 'Ctrl+click adds to the selection')
+    canvasElement(panel).props.onPointerUp({})
+
+    // Ctrl+click on a member takes it back out.
+    nodeElements(panel)[1].props.onPointerDown(pointerEvent({ clientX: 610, clientY: 10, ctrlKey: true }))
+    await settle(panel)
+    assert.deepEqual(selectedIds(panel), ['iaaa1'], 'Ctrl+click on a member removes it')
+    canvasElement(panel).props.onPointerUp({})
+
+    // A blank drag is a marquee (§6.6's changed default) and it starts by
+    // clearing what was selected — the box is a fresh statement.
+    canvasElement(panel).props.onPointerDown(pointerEvent({ clientX: 1150, clientY: 20 }))
+    canvasElement(panel).props.onPointerMove(pointerEvent({ clientX: 1450, clientY: 260 }))
+    await settle(panel)
+    assert.ok(fakeElementWithClass(panel.tree, 'dsh-forge-marquee') !== undefined, 'the box paints while dragging')
+    assert.deepEqual(selectedIds(panel), ['iccc3'], 'the marquee highlights its hits live')
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    assert.equal(fakeElementWithClass(panel.tree, 'dsh-forge-marquee'), undefined, 'releasing removes the box')
+    assert.deepEqual(selectedIds(panel), ['iccc3'], 'the release settles the same selection')
+    assert.equal(nodeElements(panel).length, 3, 'selecting never removes anything')
+
+    // A Shift marquee adds to the existing selection instead of replacing it.
+    canvasElement(panel).props.onPointerDown(pointerEvent({ clientX: 10, clientY: 20, shiftKey: true }))
+    canvasElement(panel).props.onPointerMove(pointerEvent({ clientX: 210, clientY: 260, shiftKey: true }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    assert.deepEqual([...selectedIds(panel)].sort(), ['iaaa1', 'iccc3'], 'Shift+marquee unions')
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('Delete removes the selection, Ctrl+Z restores it, and Ctrl+Shift+Z redoes', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    canvasElement(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(panel)
+    assert.equal(selectedIds(panel).length, 3, 'Ctrl+A selects the whole board')
+
+    const removal = keyEvent('Delete')
+    canvasElement(panel).props.onKeyDown(removal)
+    await settle(panel)
+    assert.equal(removal.prevented, true, 'a handled key is swallowed')
+    assert.equal(nodeElements(panel).length, 0, 'Del unplaces every selected node')
+
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 3, 'Ctrl+Z puts them back')
+
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true, shift: true }))
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 0, 'Ctrl+Shift+Z is the second redo binding')
+
+    canvasElement(panel).props.onKeyDown(keyEvent('y', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 0, 'Ctrl+Y on an empty redo tail is a no-op')
+
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 3)
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('the shortcut table yields inside a text field, and Escape clears the selection', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    canvasElement(panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(panel)
+    assert.equal(selectedIds(panel).length, 3)
+
+    // §6.3: inside an input the canvas takes nothing back — Delete must edit text.
+    const inField = keyEvent('Delete', {}, { tagName: 'TEXTAREA' })
+    canvasElement(panel).props.onKeyDown(inField)
+    await settle(panel)
+    assert.equal(inField.prevented, false, 'the canvas must not swallow a key it yielded')
+    assert.equal(nodeElements(panel).length, 3, 'Delete inside the form does not delete nodes')
+
+    // Arrow keys nudge, the Shift variant nudge further, and Escape clears.
+    canvasElement(panel).props.onKeyDown(keyEvent('ArrowRight'))
+    await settle(panel)
+    assert.deepEqual(
+      nodeElements(panel).map((entry) => entry.props.style.left),
+      ['1px', '601px', '1201px'],
+      'one world unit at zoom 1',
+    )
+    canvasElement(panel).props.onKeyDown(keyEvent('ArrowRight', { shift: true }))
+    await settle(panel)
+    assert.deepEqual(
+      nodeElements(panel).map((entry) => entry.props.style.left),
+      ['11px', '611px', '1211px'],
+      'Shift nudges by ten',
+    )
+
+    // One run, one undo step: Ctrl+Z takes back both keys at once (§6.3's merge).
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.deepEqual(
+      nodeElements(panel).map((entry) => entry.props.style.left),
+      ['0px', '600px', '1200px'],
+      'consecutive nudges are one command, so one undo restores the start',
+    )
+
+    canvasElement(panel).props.onKeyDown(keyEvent('Escape'))
+    await settle(panel)
+    assert.deepEqual(selectedIds(panel), [], 'Escape clears the selection')
+
+    // Space is the held pan modifier (§6.3, §6.6): while down, the canvas says so.
+    canvasElement(panel).props.onKeyDown(keyEvent(' '))
+    await settle(panel)
+    assert.equal(canvasElement(panel).props.className, 'dsh-forge-canvas is-pan', 'Space switches the canvas to pan')
+    canvasElement(panel).props.onKeyUp(keyEvent(' '))
+    await settle(panel)
+    assert.equal(canvasElement(panel).props.className, 'dsh-forge-canvas', 'releasing Space restores marquee')
+
+    // The toolbar toggle is the third pan entry: sticky, no key to hold.
+    const before = fakeElementWithClass(panel.tree, 'dsh-forge-canvas-layer').props.style.transform
+    const hand = buttonWithText(panel, '平移')
+    assert.ok(hand !== undefined, 'the canvas toolbar must offer a pan toggle')
+    assert.equal(hand.props['aria-pressed'], false)
+    hand.props.onClick()
+    await settle(panel)
+    assert.equal(canvasElement(panel).props.className, 'dsh-forge-canvas is-pan', 'hand mode is sticky')
+
+    canvasElement(panel).props.onPointerDown(pointerEvent({ clientX: 120, clientY: 80 }))
+    canvasElement(panel).props.onPointerMove(pointerEvent({ clientX: 180, clientY: 120 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    assert.equal(fakeElementWithClass(panel.tree, 'dsh-forge-marquee'), undefined, 'hand mode never boxes a selection')
+    assert.notEqual(
+      fakeElementWithClass(panel.tree, 'dsh-forge-canvas-layer').props.style.transform,
+      before,
+      'a blank drag in hand mode moves the camera',
+    )
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('right-click offers the §6.4 menu for blank canvas and for an image node', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    canvasElement(panel).props.onContextMenu(pointerEvent({ clientX: 40, clientY: 40 }))
+    await settle(panel)
+    let entries = menuEntries(panel)
+    assert.ok(entries !== undefined, 'right-click opens a menu')
+    assert.deepEqual(
+      entries.filter((entry) => entry.props.disabled !== true).map((entry) => fakeText(entry)),
+      ['全选', '适应视图'],
+      'only the actions this build can run are clickable on blank canvas',
+    )
+
+    // The menu's 全选 runs.
+    entries.find((entry) => fakeText(entry) === '全选').props.onClick()
+    await settle(panel)
+    assert.equal(selectedIds(panel).length, 3)
+    assert.equal(menuEntries(panel), undefined, 'running an item closes the menu')
+
+    // §6.4: with a multi-selection the menu acts on the selection, so it is the
+    // batch menu — not one node's image menu.
+    canvasElement(panel).props.onContextMenu(pointerEvent({
+      clientX: 700,
+      clientY: 60,
+      target: { closest: (selector) => (selector === '.dsh-forge-node' ? { dataset: { nodeId: 'ibbb2' } } : null) },
+    }))
+    await settle(panel)
+    assert.deepEqual(
+      menuEntries(panel).map((entry) => fakeText(entry)),
+      ['从画布移除所选 3 张（不删文件）', '复制所选到画板…', '移动所选到画板…', '删除所选 3 个文件…'],
+      'a selected node keeps the selection, and the menu is the batch one',
+    )
+
+    // With nothing selected, the same right-click selects just that node and
+    // offers the full image menu (§6.4).
+    canvasElement(panel).props.onKeyDown(keyEvent('Escape'))
+    await settle(panel)
+    canvasElement(panel).props.onContextMenu(pointerEvent({
+      clientX: 700,
+      clientY: 60,
+      target: { closest: (selector) => (selector === '.dsh-forge-node' ? { dataset: { nodeId: 'ibbb2' } } : null) },
+    }))
+    await settle(panel)
+    assert.deepEqual(selectedIds(panel), ['ibbb2'], 'a right-click on an unselected node selects it')
+    entries = menuEntries(panel)
+    assert.deepEqual(
+      entries.map((entry) => fakeText(entry)),
+      ['用作参考', '按这张图迭代（预填表单）', '查看原图（新窗）', '复制到画板…', '移动到画板…', '从画布移除（不删文件）', '删除文件…'],
+    )
+    // Cross-board entries are visible but not yet wired (C12).
+    assert.deepEqual(
+      entries.filter((entry) => entry.props.disabled !== true).map((entry) => fakeText(entry)),
+      ['用作参考', '按这张图迭代（预填表单）', '查看原图（新窗）', '从画布移除（不删文件）', '删除文件…'],
+    )
+
+    // "Remove" acts on the right-clicked node and takes it off the canvas.
+    entries.find((entry) => fakeText(entry) === '从画布移除（不删文件）').props.onClick()
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 2, 'the removal is local to the canvas')
+    assert.ok(!selectedIds(panel).includes('ibbb2'))
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
 

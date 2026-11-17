@@ -19,15 +19,19 @@ import {
   NUDGE_STEP,
   NUDGE_STEP_FAST,
   alignNodes,
+  contextMenuItems,
   distributeNodes,
+  marqueeSelection,
   marqueeWorldRect,
   moveSelection,
   nodesInRect,
+  nudgeVector,
   rectsIntersect,
   resolveShortcut,
   selectionBounds,
   shortcutContext,
   singleSelection,
+  snapshotCommand,
   toggleSelection,
 } from '../src/canvas-interactions.ts'
 
@@ -346,4 +350,113 @@ test('shortcutContext classifies a flattened DOM target', () => {
   assert.equal(shortcutContext({ inEditor: true }), 'editor')
   // The editor wraps its own text fields, so it must win that tie.
   assert.equal(shortcutContext({ tagName: 'INPUT', inEditor: true }), 'editor')
+})
+
+/* -------------------------------------------------------------------------- */
+/* C09 wiring helpers: marquee release, undo snapshots, nudges, the menu      */
+/* -------------------------------------------------------------------------- */
+
+test('marqueeSelection replaces without additive and unions with it', () => {
+  const current = new Set(['a', 'b'])
+  assert.deepEqual([...marqueeSelection(current, ['c', 'd'], false)], ['c', 'd'], 'a plain marquee is a fresh statement')
+  assert.deepEqual([...marqueeSelection(current, [], false)], [], 'a box that caught nothing clears the selection')
+  assert.deepEqual([...marqueeSelection(current, ['b', 'c'], true)], ['a', 'b', 'c'], 'Shift adds, never drops')
+  assert.deepEqual([...marqueeSelection(new Set(), ['x'], true)], ['x'])
+  assert.deepEqual([...current], ['a', 'b'], 'the argument set is untouched (React state identity)')
+})
+
+test('snapshotCommand writes the before side on undo and the after side on redo', () => {
+  const writes = []
+  const before = [{ id: 'a', x: 0 }, { id: 'b', x: 10 }]
+  const after = [{ id: 'a', x: 5 }]
+  const command = snapshotCommand('remove', before, after, (value) => { writes.push(value) })
+  assert.deepEqual(writes, [], 'constructing a command writes nothing: the caller already applied it')
+  assert.equal(command.label, 'remove')
+  command.revert()
+  command.apply()
+  assert.deepEqual(writes, [before, after], 'revert restores the old set, apply restores the new one')
+  // `revert` writes the first snapshot it was given, `apply` the second —
+  // regardless of what the caller called them, which is the side that gets
+  // mixed up when an undo step is written by hand.
+  const reversed = snapshotCommand('reversed', after, before, (value) => { writes.push(value) })
+  reversed.revert()
+  reversed.apply()
+  assert.deepEqual(writes.slice(2), [after, before])
+  // The stack drives both sides of the same command.
+  const log = []
+  const stack = new CommandStack()
+  const move = snapshotCommand('move', 'origin', 'target', (value) => { log.push(value) })
+  stack.push(move)
+  stack.undo()
+  stack.redo()
+  assert.deepEqual(log, ['origin', 'target'])
+})
+
+test('nudgeVector is one world unit per arrow key, ten with Shift', () => {
+  assert.deepEqual(nudgeVector('left'), { x: -NUDGE_STEP, y: 0 })
+  assert.deepEqual(nudgeVector('right'), { x: NUDGE_STEP, y: 0 })
+  assert.deepEqual(nudgeVector('up'), { x: 0, y: -NUDGE_STEP }, 'y grows downward, so up subtracts')
+  assert.deepEqual(nudgeVector('down'), { x: 0, y: NUDGE_STEP })
+  assert.deepEqual(nudgeVector('left', true), { x: -NUDGE_STEP_FAST, y: 0 })
+  assert.deepEqual(nudgeVector('down', true), { x: 0, y: NUDGE_STEP_FAST })
+  assert.deepEqual(nudgeVector('diagonal'), { x: 0, y: 0 }, 'an unknown axis is a no-op, not a throw')
+})
+
+test('contextMenuItems: the image menu is the full §6.4 list', () => {
+  const items = contextMenuItems({ kind: 'node', nodeKind: 'image', selectionSize: 1 })
+  const ids = items.map((item) => item.id)
+  assert.deepEqual(ids, ['reference', 'branch', 'original', 'copy-item', 'move-item', 'remove', 'delete-file'])
+  // Deleting the file is the one irreversible item, and it is marked so.
+  assert.equal(items.find((item) => item.id === 'delete-file').danger, true)
+  assert.equal(items.find((item) => item.id === 'remove').danger, undefined, 'unplace is not destructive')
+  // Cross-board copy/move belong to C12 and are shown disabled with the reason.
+  for (const id of ['copy-item', 'move-item']) {
+    const item = items.find((entry) => entry.id === id)
+    assert.equal(item.disabled, true)
+    assert.ok(item.hint.includes('C12'))
+  }
+  // No label is empty: a menu of blanks would be unusable.
+  for (const item of items) assert.ok(item.label.length > 0)
+})
+
+test('contextMenuItems: a multi-selection gets a batch menu, not single-image actions', () => {
+  const items = contextMenuItems({ kind: 'node', nodeKind: 'image', selectionSize: 3 })
+  const ids = items.map((item) => item.id)
+  assert.deepEqual(ids, ['remove', 'copy-item', 'move-item', 'delete-file'])
+  assert.ok(!ids.includes('reference'), '"use as reference" is ambiguous for three pictures')
+  assert.ok(items[0].label.includes('3 张'), 'the batch size is stated')
+  // Batch items name the whole selection.
+  assert.ok(items[3].label.includes('3'))
+  // An unset size means "one node", the common case.
+  assert.deepEqual(
+    contextMenuItems({ kind: 'node' }).map((item) => item.id),
+    contextMenuItems({ kind: 'node', nodeKind: 'image', selectionSize: 1 }).map((item) => item.id),
+    'the default node kind is image',
+  )
+})
+
+test('contextMenuItems: blank canvas offers select-all and fit now, the rest by task', () => {
+  const items = contextMenuItems({ kind: 'blank' })
+  assert.deepEqual(items.map((item) => item.id), ['new-layout', 'paste', 'select-all', 'fit', 'export-board'])
+  const enabled = items.filter((item) => item.disabled !== true).map((item) => item.id)
+  assert.deepEqual(enabled, ['select-all', 'fit'], 'only what this build can do is clickable')
+  for (const item of items.filter((entry) => entry.disabled === true)) {
+    assert.ok(item.hint.length > 0, `${item.id} must say why it is disabled`)
+  }
+  // §6.4 names the layout menu's entries; they exist even before C13 renders one.
+  assert.deepEqual(
+    contextMenuItems({ kind: 'node', nodeKind: 'layout' }).map((item) => item.id),
+    ['layout-generate', 'layout-send-form', 'layout-export-draft', 'layout-export-compiled', 'remove'],
+  )
+  // A running task can be cancelled; a failed one retried (§6.4).
+  assert.deepEqual(
+    contextMenuItems({ kind: 'node', nodeKind: 'task', taskState: 'running' }).map((item) => item.id),
+    ['task-cancel', 'remove'],
+  )
+  assert.deepEqual(
+    contextMenuItems({ kind: 'node', nodeKind: 'task', taskState: 'failed' }).map((item) => item.id),
+    ['task-retry', 'task-edit', 'remove'],
+  )
+  // Every menu returns a fresh array, so a caller cannot corrupt the next one.
+  assert.notEqual(contextMenuItems({ kind: 'blank' }), contextMenuItems({ kind: 'blank' }))
 })
