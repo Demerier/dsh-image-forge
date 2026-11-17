@@ -64,6 +64,26 @@ export const STUDIO_EVENTS_ROUTE = '/plugins/dsh-image-forge/studio/events'
  */
 export const STUDIO_IMPORT_ROUTE = '/plugins/dsh-image-forge/studio/import'
 
+/**
+ * Same-origin route the workbench starts, stops and inspects ComfyUI through.
+ *
+ * Deliberately one POST route with an `action` discriminator rather than three
+ * near-identical routes: the three verbs share the same body shape, the same
+ * origin check and the same single-flight lock, and a typo in the action is
+ * refused at the host instead of 404ing with no explanation.
+ *
+ * It is a **POST** even for `status`, because the answer depends on mutating
+ * state (the launch record) and must never be served from a cache or prefetched
+ * by a browser.
+ */
+export const STUDIO_ENVIRONMENT_ROUTE = '/plugins/dsh-image-forge/studio/environment'
+
+/** Actions {@link STUDIO_ENVIRONMENT_ROUTE} accepts. */
+export const STUDIO_ENVIRONMENT_ACTIONS = ['status', 'start', 'stop'] as const
+/** One environment action. */
+export type StudioEnvironmentAction = (typeof STUDIO_ENVIRONMENT_ACTIONS)[number]
+
+
 /** Largest single imported file accepted, in bytes (32 MB, DD10). */
 export const STUDIO_IMPORT_MAX_ITEM_BYTES = 32 * 1024 * 1024
 
@@ -208,8 +228,75 @@ export interface StudioConfigResponse {
   boardsNote?: string
 }
 
-/** One chat turn handed to the prompt optimiser for context. */
-export interface StudioOptimizeTurn {
+/**
+ * The environment as the workbench sees it, after one action.
+ *
+ * `owned` is the load-bearing field: only an instance **this plugin** started
+ * may be stopped from here. A ComfyUI the user launched themselves reports
+ * `owned: false` even though `state` is `ready`, and the panel says so instead of
+ * offering a button that would have to guess which process to kill.
+ */
+export interface StudioEnvironmentSnapshot {
+  /** One of the environment layer's five states. */
+  state: string
+  /** Why the state is what it is, safe to print verbatim. */
+  note?: string
+  /** Endpoint a backend answered on, when one did. */
+  endpoint?: string
+  /** Port the backend answers on / that a launch used. */
+  port?: number
+  /** Pid of the instance this plugin started, when it is alive. */
+  pid?: number
+  /** Log file of the last launch, so a failure has somewhere to be read. */
+  logPath?: string
+  /** How long the launch wait ran, in milliseconds. */
+  waitedMs?: number
+  /** True only when the running backend is provably the one this plugin started. */
+  owned: boolean
+  /** The argv a launch ran — or would run — with (stage 3 preview). */
+  argvPreview?: string[]
+  /** What to do next, when the state is not `ready`. */
+  hint?: string
+  /** Why `owned` is false although a pid is known, when that is the case. */
+  ownershipNote?: string
+}
+
+/** What a `stop` action reports, on top of the refreshed snapshot. */
+export interface StudioEnvironmentStop {
+  stopped: boolean
+  /** Pid the launch record named, when there was one. */
+  pid?: number
+  /** `taskkill` exit code on Windows; absent on POSIX and on refusal. */
+  exitCode?: number
+  /** Why nothing was stopped; `null`/absent on success. */
+  reason?: string | null
+  /** Did `/system_stats` really stop answering? Absent when unverifiable. */
+  verified?: boolean | null
+  /** The explanation the panel prints. */
+  note?: string
+}
+
+/**
+ * Body of {@link STUDIO_ENVIRONMENT_ROUTE}.
+ *
+ * `action` is optional and defaults to `status`, so the panel's first read can be
+ * a body-less POST and an unknown action is answered as a read rather than as a
+ * destructive guess.
+ */
+export interface StudioEnvironmentRequest {
+  action?: StudioEnvironmentAction
+}
+
+/** Answer of {@link STUDIO_ENVIRONMENT_ROUTE}. */
+export interface StudioEnvironmentResponse {
+  environment?: StudioEnvironmentSnapshot
+  /** Present only for `stop`. */
+  stop?: StudioEnvironmentStop
+  /** Present when the action was refused (busy / bad body). */
+  error?: string
+}
+
+/** One chat turn handed to the prompt optimiser for context. */export interface StudioOptimizeTurn {
   role: 'user' | 'assistant'
   text: string
 }

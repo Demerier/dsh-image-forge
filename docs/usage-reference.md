@@ -203,6 +203,21 @@ MCP `fetch_outputs` 与 CLI `download` 的 `out_dir` 指向**工作区内**的
   `download`（默认 dry-run，`confirm: true` 才下载当前 `comfyModel` 三权重）。
 - 双底模口径：`qwen21-base` 40 步 / `qwen21-turbo` 8 步（缺 turbo 权重明确退化到 base）/ `moss-sft`
   MOSS-Image（25 步模板；缺权重直接报错，不静默）。
+
+### 状态行上的「启动 / 停止」
+
+标题行右侧的状态行（「ComfyUI 未就绪 / ComfyUI http://…」那一行）现在自带启停：
+
+| 显示 | 含义 | 点了会发生什么 |
+|---|---|---|
+| **启动**（主按钮） | 没探到在跑的 ComfyUI | `POST /studio/environment {"action":"start"}`：按 Comfy Desktop 记录的 Python 与参数后台拉起，等 `/system_stats` 就绪；`comfyEndpoint` 配了 loopback 端口就以它为 `--port` |
+| **停止**（次按钮） | 在跑，且**归属确认**（启动记录的 pid 还活着、命令行里仍是那个 `main.py`） | 先 `window.confirm`，再停；停完回报 `taskkill` 退出码并复核端口已关，成功则删启动记录 |
+| **停止**（禁用）+「由你自己启动的实例，插件不提供停止」 | 在跑，但不是本插件拉起的 | 什么都不会发生。插件不杀无法证明归属的进程 |
+| **启动中… / 停止中…** | 请求在路上（宿主侧单飞：连点第二次会被 409 拒绝） | 等它回来；面板不会拉起第二个实例 |
+
+- 「本次由插件拉起 · pid N」出现在端点后面时，说明进程**比窗口活得久**（已 `unref`），关面板不会关它。
+- 失败直接把宿主的 `note` 与日志路径显示在状态行下方，例如 `端口被占：8188 上已有进程在监听`。
+- 启动参数定制（`extraArgs`）属阶段 3：环境层接口已留（默认不追加任何 flag），UI 暂不暴露输入。
 ## 参考图编辑（图生图）
 
 用户给了参考图（一张或多张）时，这是**改图任务**，走 `qwen_image_edit`：

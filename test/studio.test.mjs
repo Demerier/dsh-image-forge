@@ -23,10 +23,10 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   decodeImportData,
@@ -70,6 +70,7 @@ import {
   STUDIO_BOARD_ROUTE,
   STUDIO_CLIENT_ID_MAX_CHARS,
   STUDIO_CONFIG_ROUTE,
+  STUDIO_ENVIRONMENT_ROUTE,
   STUDIO_EVENTS_ROUTE,
   STUDIO_GENERATE_ROUTE,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
@@ -1149,6 +1150,14 @@ async function settle(panel) {
 
 /** Load the built client bundle the way `window.__ModuleLoader__` does. */
 let loadedClient
+/**
+ * What the panel's `window.confirm` answers.
+ *
+ * The bundle is evaluated with a *parameter* named `window` (that is how the real
+ * loader shapes it), so the panel's `window.confirm` resolves to this fake window,
+ * not to `globalThis`. Tests flip this before a click that must be cancelled.
+ */
+let harnessConfirm = () => true
 function clientEntry() {
   if (loadedClient !== undefined) return loadedClient
   const loaded = []
@@ -1158,6 +1167,7 @@ function clientEntry() {
         loaded.push(spec)
       },
     },
+    confirm: (message) => harnessConfirm(message),
   }
   // The bundle is plain CJS wrapped by the loader; it is evaluated, not
   // imported, because `require("react")` is what the web client resolves.
@@ -1249,6 +1259,9 @@ function installFakeNetwork(options) {
   // T22: tests need snapshots that are *not* ready (stepper failure states).
   const overrides = options === undefined ? undefined : options.configOverrides
   const config = overrides === undefined ? baseConfig : { ...baseConfig, ...overrides }
+  // P2: the environment line is its own route. A test owns the answer, so the
+  // start/stop/owned cases are deterministic; the default is a plain read.
+  const environment = options === undefined ? undefined : options.environment
   globalThis.fetch = async (input, init) => {
     const url = String(input)
     calls.push({
@@ -1257,6 +1270,18 @@ function installFakeNetwork(options) {
       body: init === undefined ? undefined : init.body,
     })
     if (url.indexOf(STUDIO_CONFIG_ROUTE) === 0) return fakeResponse(config, 200)
+    if (url.indexOf(STUDIO_ENVIRONMENT_ROUTE) === 0) {
+      let body = {}
+      try {
+        body = init !== undefined && typeof init.body === 'string' ? JSON.parse(init.body) : {}
+      } catch {
+        body = {}
+      }
+      const answer = environment === undefined
+        ? { environment: { state: config.ready === true ? 'ready' : 'not-running', owned: false } }
+        : environment(body)
+      return fakeResponse(answer, 200)
+    }
     if (url.indexOf(STUDIO_GENERATE_ROUTE) === 0) {
       if (generate === undefined) return fakeResponse({ error: 'no generate stub' }, 500)
       return generate(init === undefined ? {} : init)
@@ -3017,6 +3042,252 @@ test('C15: the blank menu creates a layout node from its now-live entry', async 
     await settle(panel)
     assert.equal(nodesOfKind(panel, 'layout').length, 1)
     assert.equal(menuEntries(panel), undefined, 'running a menu item closes the menu')
+  } finally {
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// P2: start / stop ComfyUI from the workbench.
+//
+// Two layers, tested separately on purpose: the *route* owns the guards (origin,
+// single-flight, ownership) and is exercised through a fake web server with
+// injected machine seams, so nothing here spawns Python or kills anything; the
+// *panel* is exercised through the built client bundle with a stubbed fetch.
+// ---------------------------------------------------------------------------
+
+/** A minimal Comfy Desktop fixture: a usable install plus the registry naming it. */
+function makeEnvironmentMachine() {
+  const root = mkdtempSync(join(tmpdir(), 'forge-studio-env-'))
+  const installPath = join(root, 'ComfyUI-Installs', 'ComfyUI')
+  const mainPy = join(installPath, 'ComfyUI', 'main.py')
+  mkdirSync(dirname(mainPy), { recursive: true })
+  writeFileSync(mainPy, '# fake ComfyUI main.py\n')
+  const venv = join(installPath, 'ComfyUI', '.venv')
+  const python = join(venv, 'Scripts', 'python.exe')
+  mkdirSync(dirname(python), { recursive: true })
+  writeFileSync(python, '')
+  mkdirSync(join(venv, 'Lib', 'site-packages', 'torch'), { recursive: true })
+  const desktop = join(root, 'Comfy Desktop')
+  mkdirSync(desktop, { recursive: true })
+  writeFileSync(join(desktop, 'installations.json'), JSON.stringify([
+    { id: 'inst-p2', name: 'ComfyUI', status: 'installed', installPath, port: 18188, launchArgs: '', envVars: {} },
+  ]))
+  return { root, installPath, mainPy, python }
+}
+
+/** The settings shape the routes read; the environment route never asks for more. */
+function environmentRouteSettings(machine) {
+  return {
+    comfyEndpoint: '',
+    comfyPorts: [18188],
+    comfyModelsDir: '',
+    timeoutMs: 500,
+    outputDir: machine.root,
+    defaultSteps: 20,
+    comfyuiSteps: undefined,
+    comfyModel: 'qwen21-base',
+    turboSteps: undefined,
+  }
+}
+
+/** Register the routes against a fake web server and return them by path. */
+function routeHandlers(deps) {
+  const routes = new Map()
+  const ctx = {
+    webServer: { register: ({ path, handler }) => { routes.set(path, handler); return () => {} } },
+    get: () => undefined,
+    logger: { warn() {} },
+  }
+  registerStudioRoutes(ctx, { ...deps, ctx })
+  return routes
+}
+
+/** One POST through a registered handler, captured as `{ status, body }`. */
+async function exchange(handler, body) {
+  const payload = Buffer.from(JSON.stringify(body))
+  const req = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', host: '127.0.0.1:51791', origin: 'http://127.0.0.1:51791' },
+    async *[Symbol.asyncIterator]() { yield payload },
+    once() {},
+  }
+  const res = {
+    status: 0,
+    headers: {},
+    text: '',
+    destroyed: false,
+    writableEnded: false,
+    headersSent: false,
+    writeHead(status, headers) { this.status = status; this.headers = headers ?? {}; this.headersSent = true; return this },
+    write(chunk) { this.text += String(chunk); return true },
+    end(chunk) { if (chunk !== undefined) this.text += String(chunk); this.writableEnded = true; return this },
+    once() {},
+    on() {},
+    removeListener() {},
+  }
+  await handler(req, res)
+  return { status: res.status, headers: res.headers, text: res.text, body: res.text.length > 0 ? JSON.parse(res.text) : undefined }
+}
+
+test('P2: the environment route answers status, and a second start in flight is refused', async () => {
+  const machine = makeEnvironmentMachine()
+  try {
+    const routes = routeHandlers({
+      settings: () => environmentRouteSettings(machine),
+      environment: {
+        options: () => ({ endpoint: '', ports: [18188], probeTimeoutMs: 60, installTimeoutMs: 120, waitIntervalMs: 20 }),
+        deps: {
+          env: {},
+          platform: 'win32',
+          appData: machine.root,
+          scanRoots: [],
+          fetchImpl: async () => { throw new Error('connect ECONNREFUSED') },
+          spawn: () => ({ pid: 3131, exitCode: null, unref() {} }),
+          // Blocks long enough for a second click to arrive, then reports free.
+          portProbe: () => new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+          commandLineOf: () => null,
+          kill: () => {},
+        },
+      },
+    })
+    const handler = routes.get(STUDIO_ENVIRONMENT_ROUTE)
+    assert.equal(typeof handler, 'function', 'the environment route must be registered')
+
+    const status = await exchange(handler, { action: 'status' })
+    assert.equal(status.status, 200)
+    assert.equal(status.body.environment.state, 'not-running')
+    assert.equal(status.body.environment.owned, false, 'a record-less install owns nothing')
+    assert.match(String(status.body.environment.note), /安装/)
+
+    // Click twice: the second must be refused instead of spawning a second Python.
+    const first = exchange(handler, { action: 'start' })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const second = await exchange(handler, { action: 'start' })
+    assert.equal(second.status, 409, 'one start at a time, even from a double click')
+    assert.match(String(second.body.error), /正在启动/)
+    const finished = await first
+    assert.equal(finished.status, 200)
+    assert.equal(finished.body.environment.state, 'timeout', 'the fake renderer never answers')
+    assert.equal(finished.body.environment.owned, false)
+
+    // An unknown action is a refusal, not a silent read.
+    const typo = await exchange(handler, { action: 'restart' })
+    assert.equal(typo.status, 400)
+    assert.match(String(typo.body.error), /未知的环境操作/)
+
+    // A stop after a failed start: the record from the failed attempt exists, but
+    // its pid cannot be proved to be ours (no command line), so nothing is killed.
+    // The refusal crosses the wire instead of the plugin guessing.
+    const stop = await exchange(handler, { action: 'stop' })
+    assert.equal(stop.status, 200)
+    assert.equal(stop.body.stop.stopped, false)
+    assert.equal(stop.body.stop.reason, 'unverified')
+    assert.match(String(stop.body.stop.note), /无法确认/)
+    assert.equal(stop.body.environment.state, 'not-running')
+  } finally {
+    rmSync(machine.root, { recursive: true, force: true })
+  }
+})
+
+test('P2: a not-ready panel offers 启动, and clicking it posts the action', async () => {
+  const { network, panel } = await mountWorkbench({
+    configOverrides: { ready: false, reason: 'ComfyUI 没在跑（connect ECONNREFUSED）' },
+    environment: (body) => (body.action === 'start'
+      ? { environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: '已后台拉起 ComfyUI' } }
+      : { environment: { state: 'not-running', owned: false, note: '找到安装，可以启动' } }),
+  })
+  try {
+    const start = buttonWithText(panel, '启动')
+    assert.ok(start !== undefined, 'a not-ready status line must offer 启动')
+    assert.equal(start.props.disabled, undefined, 'the start button is enabled')
+
+    start.props.onClick()
+    await settle(panel)
+
+    const posts = network.calls.filter((call) => call.url.indexOf(STUDIO_ENVIRONMENT_ROUTE) === 0 && call.method === 'POST')
+    // The mount already posted one `status`; the click must add a `start`.
+    const starts = posts.filter((call) => call.body === JSON.stringify({ action: 'start' }))
+    assert.equal(starts.length, 1, 'the click must post exactly one start')
+    // `loadConfig` re-reads the snapshot afterwards, so the line follows the host.
+    assert.ok(
+      posts.slice(posts.indexOf(starts[0]) + 1).some((call) => String(call.body).includes('"status"')),
+      'a start is followed by a status re-read',
+    )
+  } finally {
+    network.restore()
+  }
+})
+
+test('P2: a failed start prints the host note and the log path verbatim', async () => {
+  const { network, panel } = await mountWorkbench({
+    configOverrides: { ready: false, reason: '未就绪' },
+    environment: (body) => (body.action === 'start'
+      ? { environment: { state: 'launch-failed', owned: false, note: '端口被占：18188 上已有进程在监听', logPath: 'C:/logs/launch-x.log' } }
+      : { environment: { state: 'not-running', owned: false } }),
+  })
+  try {
+    const start = buttonWithText(panel, '启动')
+    assert.ok(start !== undefined)
+    start.props.onClick()
+    await settle(panel)
+
+    const hints = noteText(panel)
+    assert.ok(hints.includes('端口被占'), 'the host note must be shown: ' + hints)
+    assert.ok(hints.includes('C:/logs/launch-x.log'), 'the log path is what makes a failure actionable')
+  } finally {
+    network.restore()
+  }
+})
+
+test('P2: a running instance the plugin started offers 停止, and confirm gates it', async () => {
+  const answers = []
+  let confirmed = false
+  harnessConfirm = () => confirmed
+  const { network, panel } = await mountWorkbench({
+    environment: (body) => {
+      answers.push(body.action)
+      return body.action === 'stop'
+        ? { environment: { state: 'not-running', owned: false }, stop: { stopped: true, pid: 4242, exitCode: 0, note: '已停止本插件拉起的 pid 4242' } }
+        : { environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: 'ComfyUI 在跑' } }
+    },
+  })
+  try {
+    const endpointLine = fakeElementWithClass(panel.tree, 'dsh-forge-studio-endpoint')
+    assert.ok(endpointLine !== undefined)
+    assert.ok(fakeText(endpointLine).includes('本次由插件拉起'), 'the panel must say the process outlives it')
+    assert.ok(fakeText(endpointLine).includes('pid 4242'))
+
+    const stop = buttonWithText(panel, '停止')
+    assert.ok(stop !== undefined, 'an owned instance offers 停止')
+    assert.notEqual(stop.props.disabled, true)
+
+    const stopPosts = () => network.calls.filter((call) => call.url.indexOf(STUDIO_ENVIRONMENT_ROUTE) === 0 && String(call.body).includes('"stop"'))
+    confirmed = false
+    stop.props.onClick()
+    await settle(panel)
+    assert.equal(stopPosts().length, 0, 'a declined confirm must not stop anything')
+
+    confirmed = true
+    buttonWithText(panel, '停止').props.onClick()
+    await settle(panel)
+    assert.equal(stopPosts().length, 1, 'a confirmed stop is posted once')
+    assert.ok(answers.includes('stop'))
+  } finally {
+    harnessConfirm = () => true
+    network.restore()
+  }
+})
+
+test('P2: an instance the user started is not offered a stop button', async () => {
+  const { network, panel } = await mountWorkbench({
+    environment: () => ({ environment: { state: 'ready', owned: false, pid: 9001, endpoint: 'http://127.0.0.1:8188' } }),
+  })
+  try {
+    const stop = buttonWithText(panel, '停止')
+    assert.ok(stop !== undefined, 'the button stays visible, so the absence of an action is explicit')
+    assert.equal(stop.props.disabled, true, 'the plugin never offers to kill a process it cannot claim')
+    assert.ok(noteText(panel).includes('由你自己启动的实例'), 'the reason is printed next to it')
   } finally {
     network.restore()
   }

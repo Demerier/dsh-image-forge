@@ -32,6 +32,8 @@ import {
   appDataRoot,
   discoverComfyPlan,
   launchComfyPlan,
+  loopbackPortOf,
+  planForRun,
   readJsonFile,
   stopComfyPlan,
   systemStats,
@@ -149,21 +151,32 @@ async function doctor(plan, endpoint) {
   return 1
 }
 
-function stopStarted() {
+/**
+ * `--stop`: stop the instance a previous `--start` (or the plugin) launched.
+ *
+ * The discovery call here is deliberately the **same** one `--start` uses —
+ * `--dir` / `COMFYUI_DIR`, then the Desktop registry, then the bounded scan.
+ * Passing `scanRoots: []` (the old behaviour) found the Desktop record but not a
+ * portable install, so a `--stop` for a scanned install answered “nothing to
+ * stop” with exit code 4 while the process kept running.
+ */
+async function stopStarted() {
   const args = parseArgs(process.argv.slice(2))
   let plan
   try {
-    plan = discoverComfyPlan({ dir: args.dir, env: process.env, scanRoots: [] })
-  } catch {
-    log('[stop] no install discovered, nothing to stop')
+    plan = discoverComfyPlan({ dir: args.dir, env: process.env })
+  } catch (error) {
+    log(`[stop] no install discovered (${error?.message ?? error}), nothing to stop`)
     return 4
   }
-  const result = stopComfyPlan(plan)
-  if (!result.stopped) {
-    log(`[stop] ${result.note}`)
+  if (!plan) {
+    log('[stop] no ComfyUI install found. Pass --dir <install dir> or set COMFYUI_DIR.')
     return 4
   }
+  const result = await stopComfyPlan(plan, { endpoint: args.endpoint })
   log(`[stop] ${result.note}`)
+  if (!result.stopped) return 4
+  if (result.verified === false) return 4
   return 0
 }
 
@@ -182,7 +195,7 @@ async function main() {
     log(readFileSync(new URL(import.meta.url), 'utf8').split('*/')[0].replace(/^#!.*\n/, '').replace(/^\/\*\*?/, ''))
     return 0
   }
-  if (args.stop) return stopStarted()
+  if (args.stop) return await stopStarted()
 
   let plan
   try {
@@ -196,6 +209,10 @@ async function main() {
     return 1
   }
   const endpoint = (args.endpoint ?? process.env.COMFY_ENDPOINT ?? `http://127.0.0.1:${plan.port}`).replace(/\/$/, '')
+  // Same port-source rule as the plugin: a loopback endpoint pins the `--port`
+  // the launch uses, so argv, the wait and the health check cannot disagree.
+  const pinned = loopbackPortOf(endpoint)
+  if (pinned !== null) plan = planForRun(plan, { port: pinned })
 
   if (args.doctor) return await doctor(plan, endpoint)
 

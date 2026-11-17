@@ -35,6 +35,8 @@ import {
   STUDIO_BOARDS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CONFIG_ROUTE,
+  STUDIO_ENVIRONMENT_ACTIONS,
+  STUDIO_ENVIRONMENT_ROUTE,
   STUDIO_EVENTS_ROUTE,
   STUDIO_FILE_ROUTE,
   STUDIO_FILE_TYPES,
@@ -51,6 +53,11 @@ import {
   type BoardLayoutDraft,
   type BoardTaskInfo,
   type StudioBoardRequest,
+  type StudioEnvironmentAction,
+  type StudioEnvironmentRequest,
+  type StudioEnvironmentResponse,
+  type StudioEnvironmentSnapshot,
+  type StudioEnvironmentStop,
   type StudioGenerateRequest,
   type StudioImportRequest,
   type StudioImportResponse,
@@ -88,10 +95,33 @@ import {
   runStudioGeneration,
   type StudioSettings,
 } from './studio-service.ts'
+import {
+  ensureEnvironment,
+  environmentOptionsOf,
+  inspectEnvironment,
+  stopEnvironment,
+  type EnvironmentDeps,
+  type EnvironmentOptions,
+  type EnvironmentStatus,
+  type EnvironmentStopResult,
+} from './environment.ts'
 import { OptimizeUnavailableError, optimizeStudioPrompt } from './studio-prompt.ts'
 
 /** Heartbeat cadence while a long request is in flight; tests shrink it. */
 const HEARTBEAT_MS = 15_000
+
+/** Body cap for the environment route: three short strings, never a picture. */
+const ENVIRONMENT_MAX_BODY_BYTES = 8 * 1024
+
+/**
+ * Single-flight lock for the environment actions, module level on purpose.
+ *
+ * `isConcurrencySafe: false` on the Agent tool only serialises *tool* calls; the
+ * panel's buttons are HTTP requests and two fast clicks would otherwise spawn two
+ * renderers, each convinced it owns the only record. `status` deliberately does
+ * not take the lock — a read must not be refused because a start is in flight.
+ */
+let environmentActionInFlight: StudioEnvironmentAction | null = null
 
 /** Everything the routes need from the host. */
 export interface StudioRouteDeps {
@@ -114,6 +144,19 @@ export interface StudioRouteDeps {
    * can register a run without a live ComfyUI.
    */
   runs?: RunRegistry
+  /**
+   * Environment control (P2) — start/stop/status from the workbench.
+   *
+   * `options` resolves the environment options **per request**, so a settings
+   * save (a new endpoint, a new port) is observed without a host restart.
+   * `deps` carries the machine-facing seams; tests inject them so no case ever
+   * spawns Python, runs `taskkill` or probes a real port. Omitted entirely in
+   * production, which then resolves both from `settings()` and this machine.
+   */
+  environment?: {
+    options?(): EnvironmentOptions
+    deps?: EnvironmentDeps
+  }
 }
 
 /** Wrap one handler so a thrown error becomes a JSON 500 instead of a dead socket. */
@@ -157,6 +200,83 @@ export function registerStudioRoutes(
         res.once('close', () => { if (!res.writableEnded) controller.abort() })
         const snapshot = await describeStudio(deps.ctx, deps.settings(), controller.signal)
         json(res, 200, snapshot)
+      }),
+    }),
+
+    // ---- environment: start / stop / status ------------------------------
+    //
+    // The one route that may touch the machine. Three guards make that safe:
+    // same-origin (a hostile page cannot stop the user's renderer), POST+JSON
+    // (an HTML form cannot forge it), and the ownership proof inside
+    // `stopEnvironment` (only a process whose command line still names the
+    // recorded `main.py` is ever signalled). The heartbeat exists because a cold
+    // start legitimately waits minutes for `/system_stats`.
+    server.register({
+      kind: 'exact',
+      path: STUDIO_ENVIRONMENT_ROUTE,
+      handler: guard(async (req, res) => {
+        if (!sameOrigin(req)) return jsonError(res, 403, 'origin-rejected')
+        if (req.method !== 'POST') return jsonError(res, 405, 'method-not-allowed')
+        if (!isJson(req)) return jsonError(res, 415, 'json-required')
+
+        let request: StudioEnvironmentRequest
+        try {
+          request = parseEnvironmentAction(JSON.parse(await readBody(req, ENVIRONMENT_MAX_BODY_BYTES)))
+        } catch (error) {
+          return jsonError(res, 400, firstLine(error))
+        }
+        const action: StudioEnvironmentAction = request.action ?? 'status'
+        const options = deps.environment?.options?.() ?? environmentOptionsOf(deps.settings())
+        const machine = deps.environment?.deps ?? {}
+
+        if (action === 'status') {
+          const status = await inspectEnvironment(options, machine)
+          const body: StudioEnvironmentResponse = { environment: environmentSnapshotOf(status) }
+          return json(res, 200, body)
+        }
+
+        if (environmentActionInFlight !== null) {
+          return json(res, 409, {
+            error: environmentActionInFlight === 'start'
+              ? '正在启动 ComfyUI（一次只拉起一个），请等这次请求返回。'
+              : '正在停止 ComfyUI，请等这次请求返回。',
+          } satisfies StudioEnvironmentResponse)
+        }
+        environmentActionInFlight = action
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-accel-buffering': 'no',
+        })
+        const heartbeat = setInterval(() => {
+          if (!res.destroyed && !res.writableEnded) res.write('\n')
+        }, HEARTBEAT_MS)
+        try {
+          if (action === 'start') {
+            const status = await ensureEnvironment(options, machine)
+            if (!res.destroyed && !res.writableEnded) {
+              const body: StudioEnvironmentResponse = { environment: environmentSnapshotOf(status) }
+              res.end(JSON.stringify(body))
+            }
+            return
+          }
+          const stop = await stopEnvironment(machine)
+          const status = await inspectEnvironment(options, machine)
+          if (!res.destroyed && !res.writableEnded) {
+            const body: StudioEnvironmentResponse = {
+              environment: environmentSnapshotOf(status),
+              stop: environmentStopOf(stop),
+            }
+            res.end(JSON.stringify(body))
+          }
+        } catch (error) {
+          if (!res.destroyed && !res.writableEnded) {
+            res.end(JSON.stringify({ error: firstLine(error) } satisfies StudioEnvironmentResponse))
+          }
+        } finally {
+          clearInterval(heartbeat)
+          environmentActionInFlight = null
+        }
       }),
     }),
 
@@ -865,8 +985,58 @@ export function parseOptimize(value: unknown): StudioOptimizeRequest {
   }
 }
 
-/** One history turn, or `undefined` when it carries nothing usable. */
-function parseTurn(value: unknown): StudioOptimizeTurn | undefined {
+/**
+ * Validate the environment body.
+ *
+ * A missing action means `status` — a read, and the safe default for a body that
+ * only meant to ask. An *unknown* action is refused rather than coerced: a typo
+ * must not silently become a read the panel then reports as a successful start.
+ *
+ * @param value - parsed JSON of unknown shape.
+ * @returns the validated request.
+ * @throws With a message meant for the panel.
+ */
+export function parseEnvironmentAction(value: unknown): StudioEnvironmentRequest {
+  const body = record(value)
+  if (body === undefined) throw new Error('请求格式无效')
+  const action = body.action
+  if (action === undefined || action === null) return {}
+  if (typeof action !== 'string' || !(STUDIO_ENVIRONMENT_ACTIONS as readonly string[]).includes(action)) {
+    throw new Error(`未知的环境操作：${String(action)}`)
+  }
+  return { action: action as StudioEnvironmentAction }
+}
+
+/** The environment report, narrowed to the fields the panel renders. */
+export function environmentSnapshotOf(status: EnvironmentStatus): StudioEnvironmentSnapshot {
+  const snapshot: StudioEnvironmentSnapshot = { state: status.state, owned: status.owned === true }
+  if (status.note.length > 0) snapshot.note = status.note
+  if (status.endpoint !== null) snapshot.endpoint = status.endpoint
+  if (status.port !== null) snapshot.port = status.port
+  if (status.pid !== null) snapshot.pid = status.pid
+  if (status.logPath !== null) snapshot.logPath = status.logPath
+  if (status.waitedMs !== null) snapshot.waitedMs = status.waitedMs
+  if (status.argvPreview !== null && status.argvPreview.length > 0) snapshot.argvPreview = [...status.argvPreview]
+  if (status.hint !== null) snapshot.hint = status.hint
+  // The ownership note only exists when a live pid could not be proved ours.
+  // It is what lets the panel say "this is not yours" instead of showing a stop
+  // button that would have to refuse when clicked.
+  if (typeof status.ownershipNote === 'string' && status.ownershipNote.length > 0) snapshot.ownershipNote = status.ownershipNote
+  return snapshot
+}
+
+/** The stop report, narrowed to the fields the panel renders. */
+export function environmentStopOf(stop: EnvironmentStopResult): StudioEnvironmentStop {
+  const report: StudioEnvironmentStop = { stopped: stop.stopped === true }
+  if (stop.pid !== null) report.pid = stop.pid
+  if (stop.exitCode !== null) report.exitCode = stop.exitCode
+  report.reason = stop.reason
+  if (stop.verified !== null) report.verified = stop.verified
+  if (stop.note.length > 0) report.note = stop.note
+  return report
+}
+
+/** One history turn, or `undefined` when it carries nothing usable. */function parseTurn(value: unknown): StudioOptimizeTurn | undefined {
   const turn = record(value)
   if (turn === undefined) return undefined
   if (turn.role !== 'user' && turn.role !== 'assistant') return undefined

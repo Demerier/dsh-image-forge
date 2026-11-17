@@ -35,6 +35,8 @@ import {
 import {
   DEFAULT_INSTALL_TIMEOUT_MS,
   discoverComfyPlan,
+  loopbackPortOf,
+  planForRun,
   splitArgs,
 } from '../scripts/comfyui-discovery.mjs'
 
@@ -273,18 +275,32 @@ test('start spawns the recorded install detached, then waits for /system_stats',
       spawnCalls.push(args)
       return child
     }
+    // The pre-flight probe must see a *free* port before the spawn (that is the
+    // whole point of it), then the launch wait must see the child answering.
+    let probes = 0
+    const fetchImpl = async () => {
+      probes += 1
+      if (probes <= 1) throw new Error('connect ECONNREFUSED (fake pre-flight)')
+      return new Response(JSON.stringify({ system: { comfyui_version: 'fake-0.0' }, devices: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
     const options = {
       ...environmentOptionsOf({ comfyEndpoint: '', comfyPorts: String(closed), timeoutMs: 1000 }),
       installTimeoutMs: 5000,
       waitIntervalMs: 20,
     }
-    const status = await ensureEnvironment(options, depsOf(machine, { spawn }))
+    const status = await ensureEnvironment(options, depsOf(machine, { spawn, fetchImpl, portProbe: async () => false }))
 
     assert.equal(status.state, 'ready')
     assert.equal(status.source, 'launched')
     assert.equal(status.endpoint, `http://127.0.0.1:${fake.port}`)
     assert.equal(status.install?.installPath, machine.installPath)
     assert.equal(status.stats?.version, 'fake-0.0')
+    assert.equal(status.owned, true, 'a launch this call performed is owned')
+    assert.equal(status.pid, 4242)
+    assert.ok(Array.isArray(status.argvPreview), 'the argv preview must be reported')
     assert.equal(spawnCalls.length, 1)
     const [python, argv, spawnOptions] = spawnCalls[0]
     assert.equal(python, machine.winPython)
@@ -298,10 +314,169 @@ test('start spawns the recorded install detached, then waits for /system_stats',
     const record = JSON.parse(readFileSync(recordPath, 'utf8'))
     assert.equal(record.pid, 4242)
     assert.equal(record.endpoint, `http://127.0.0.1:${fake.port}`)
+    assert.equal(record.mainPy, machine.mainPy, 'the record must carry the identity the stop path checks')
+    assert.equal(record.port, fake.port)
+    assert.ok(Array.isArray(record.argv) && record.argv.length > 0)
     assert.ok(typeof status.logPath === 'string' && existsSync(status.logPath))
   } finally {
     await fake.close()
   }
+})
+
+test('a launch port that already answers is not spawned again', async () => {
+  // The realistic version of the port pre-flight: the Desktop record's port is
+  // already serving ComfyUI (the user opened it themselves), while the configured
+  // port table points somewhere else. The old code spawned a second renderer and
+  // then waited the full budget on a port the panel was not probing.
+  const fake = await startStatsServer()
+  try {
+    const closed = await freePort()
+    const machine = makeMachine(freshDir(), { port: fake.port })
+    const spawn = () => {
+      throw new Error('a port that already answers must not be spawned on')
+    }
+    const options = {
+      ...environmentOptionsOf({ comfyEndpoint: '', comfyPorts: String(closed), timeoutMs: 1000 }),
+      installTimeoutMs: 5000,
+      waitIntervalMs: 20,
+    }
+    const status = await ensureEnvironment(options, depsOf(machine, { spawn, portProbe: async () => true }))
+    assert.notEqual(status.state, 'timeout')
+    assert.ok(status.note.includes('没有重复拉起'), 'the note says why nothing was started: ' + status.note)
+    assert.equal(status.owned, false, 'an instance this call did not start is not owned')
+  } finally {
+    await fake.close()
+  }
+})
+
+test('a configured loopback endpoint pins the port argv, the wait and the record use', async () => {
+  // Bug 1: the launch used to take `plan.port` (the Desktop record's) while the
+  // panel probed `comfyEndpoint`. Setting `:18000` therefore launched `:18188`
+  // and waited there, so the panel never turned green.
+  const pinned = await freePort()
+  const machine = makeMachine(freshDir(), { port: 18188 })
+  const spawnCalls = []
+  const child = { pid: 7373, exitCode: null, unref() {} }
+  const probedUrls = []
+  const fetchImpl = async (url) => {
+    probedUrls.push(String(url))
+    if (probedUrls.length <= 1) throw new Error('connect ECONNREFUSED (fake pre-flight)')
+    return new Response(JSON.stringify({ system: { comfyui_version: 'fake-0.0' }, devices: [] }), { status: 200 })
+  }
+  const options = {
+    ...environmentOptionsOf({ comfyEndpoint: `http://127.0.0.1:${pinned}`, comfyPorts: '8188', timeoutMs: 1000 }),
+    installTimeoutMs: 1500,
+    waitIntervalMs: 20,
+  }
+  const status = await ensureEnvironment(options, depsOf(machine, {
+    spawn: (...args) => { spawnCalls.push(args); return child },
+    fetchImpl,
+    portProbe: async () => false,
+  }))
+
+  assert.equal(spawnCalls.length, 1, 'the pinned port does not prevent the launch')
+  const [, argv] = spawnCalls[0]
+  assert.deepEqual(argv.slice(0, 6), ['-s', machine.mainPy, '--listen', '127.0.0.1', '--port', String(pinned)])
+  assert.equal(status.port, pinned, 'plan, argv and the report agree on one port')
+  assert.equal(status.endpoint, `http://127.0.0.1:${pinned}`)
+  assert.ok(probedUrls.every((url) => url.includes(`:${pinned}/`)), 'the wait polls the pinned port: ' + probedUrls.join(', '))
+  const record = JSON.parse(readFileSync(join(machine.installPath, 'logs', 'dsh-image-forge-launch.json'), 'utf8'))
+  assert.equal(record.port, pinned, 'the record names the same port, so stop verifies the right one')
+  assert.equal(record.endpoint, `http://127.0.0.1:${pinned}`)
+})
+
+test('planForRun leaves the planned argv byte-identical unless it has something to change', () => {
+  const machine = makeMachine(freshDir())
+  const plan = discoverComfyPlan(depsOf(machine))
+  assert.equal(planForRun(plan), plan, 'no override, no copy: the default argv is untouched')
+  assert.deepEqual(planForRun(plan, { extraArgs: [] }).argv, plan.argv, 'an empty extraArgs appends nothing')
+
+  const moved = planForRun(plan, { port: 19000 })
+  assert.equal(moved.port, 19000)
+  assert.deepEqual(moved.argv.slice(0, 6), ['-s', machine.mainPy, '--listen', '127.0.0.1', '--port', '19000'])
+  assert.deepEqual(moved.argv.slice(6), plan.argv.slice(6), 'everything after the port pair is untouched')
+
+  const extra = planForRun(plan, { extraArgs: ['--lowvram-extra', '1'] })
+  assert.deepEqual(extra.argv.slice(-2), ['--lowvram-extra', '1'], 'stage 3 flags land after the planned argv')
+  assert.equal(plan.argv.includes('--lowvram-extra'), false, 'the input plan is not mutated')
+
+  assert.equal(loopbackPortOf('http://127.0.0.1:8000'), 8000)
+  assert.equal(loopbackPortOf('http://localhost:8000/'), 8000)
+  assert.equal(loopbackPortOf('http://192.168.1.7:8000'), null, 'a remote endpoint must not pin a local port')
+  assert.equal(loopbackPortOf(''), null)
+})
+
+test('a live instance this plugin already started is not started twice', async () => {
+  const closed = await freePort()
+  const machine = makeMachine(freshDir(), { port: closed })
+  writeLaunchRecord(machine, { pid: 9911, endpoint: `http://127.0.0.1:${closed}`, port: closed })
+  let spawns = 0
+  const options = {
+    ...environmentOptionsOf({ comfyEndpoint: '', comfyPorts: String(closed), timeoutMs: 1000 }),
+    installTimeoutMs: 1500,
+    waitIntervalMs: 20,
+  }
+  const status = await ensureEnvironment(options, depsOf(machine, {
+    spawn: () => { spawns += 1; throw new Error('must not spawn a second instance') },
+    commandLineOf: () => ownedCommandLine(machine),
+    // Deterministic liveness: signal 0 succeeds, so the recorded pid is "alive"
+    // without depending on which pids this machine happens to have.
+    kill: () => {},
+    fetchImpl: refusedFetch,
+    portProbe: async () => false,
+  }))
+  assert.equal(spawns, 0, 'the existing pid is the only handle; a second spawn would orphan it')
+  assert.equal(status.state, 'launch-failed')
+  assert.equal(status.pid, 9911)
+  assert.ok(status.note.includes('没有重复拉起'))
+})
+
+test('a launch record is kept as history instead of silently overwritten', async () => {
+  const closed = await freePort()
+  const machine = makeMachine(freshDir(), { port: closed })
+  // An earlier launch left a record whose process is gone.
+  writeLaunchRecord(machine, { pid: 1111 })
+  const child = { pid: 2222, exitCode: null, unref() {} }
+  const options = {
+    ...environmentOptionsOf({ comfyEndpoint: '', comfyPorts: String(closed), timeoutMs: 1000 }),
+    installTimeoutMs: 1500,
+    waitIntervalMs: 20,
+  }
+  let probes = 0
+  const fetchImpl = async () => {
+    probes += 1
+    if (probes <= 1) throw new Error('connect ECONNREFUSED (fake pre-flight)')
+    return new Response(JSON.stringify({ devices: [] }), { status: 200 })
+  }
+  await ensureEnvironment(options, depsOf(machine, {
+    spawn: () => child,
+    fetchImpl,
+    commandLineOf: () => null, // pid 1111 cannot be proved alive → not "alive"
+    kill: () => { const gone = new Error('kill ESRCH'); gone.code = 'ESRCH'; throw gone },
+    portProbe: async () => false,
+  }))
+  const record = JSON.parse(readFileSync(join(machine.installPath, 'logs', 'dsh-image-forge-launch.json'), 'utf8'))
+  assert.equal(record.pid, 2222)
+  assert.equal(Array.isArray(record.history), true, 'the previous pid must not vanish')
+  assert.equal(record.history.at(-1)?.pid, 1111)
+})
+
+test('an occupied port that is not ComfyUI is refused before spawning', async () => {
+  const closed = await freePort()
+  const machine = makeMachine(freshDir(), { port: closed })
+  const spawn = () => {
+    throw new Error('an occupied port must not be spawned on')
+  }
+  const options = {
+    ...environmentOptionsOf({ comfyEndpoint: '', comfyPorts: String(closed), timeoutMs: 1000 }),
+    installTimeoutMs: 5000,
+    waitIntervalMs: 20,
+  }
+  const status = await ensureEnvironment(options, depsOf(machine, { spawn, portProbe: async () => true }))
+  assert.equal(status.state, 'launch-failed')
+  assert.match(status.note, /端口被占/)
+  assert.equal(status.port, closed)
+  assert.ok(typeof status.hint === 'string' && status.hint.includes('comfyEndpoint'))
 })
 
 test('start is a no-op when the port table already answers (no second instance)', async () => {
@@ -357,37 +532,147 @@ test('a child that never answers is a timeout, and is not retried', async () => 
   assert.ok(status.note.includes('没有就绪'))
 })
 
-test('stop kills the recorded pid tree on Windows and signals it on POSIX', () => {
-  const machine = makeMachine(freshDir())
-  const plan = discoverComfyPlan(depsOf(machine))
-  const recordDir = join(plan.logDir)
-  mkdirSync(recordDir, { recursive: true })
-  writeFileSync(
-    join(recordDir, 'dsh-image-forge-launch.json'),
-    JSON.stringify({ pid: 4242, endpoint: 'http://127.0.0.1:18188', startedAt: '2026-01-01T00:00:00.000Z', logPath: join(recordDir, 'x.log') }),
-  )
+/** Write the launch record a previous start would have left behind. */
+function writeLaunchRecord(machine, overrides = {}) {
+  const dir = join(machine.installPath, 'logs')
+  mkdirSync(dir, { recursive: true })
+  const record = {
+    pid: 4242,
+    endpoint: 'http://127.0.0.1:18188',
+    port: 18188,
+    mainPy: machine.mainPy,
+    python: machine.winPython,
+    argv: ['-s', machine.mainPy, '--listen', '127.0.0.1', '--port', '18188'],
+    startedAt: '2026-01-01T00:00:00.000Z',
+    logPath: join(dir, 'x.log'),
+    ...overrides,
+  }
+  writeFileSync(join(dir, 'dsh-image-forge-launch.json'), JSON.stringify(record))
+  return record
+}
 
+/** A command line that really is the recorded install (the ownership proof). */
+function ownedCommandLine(machine) {
+  return `"${machine.winPython}" -s "${machine.mainPy}" --listen 127.0.0.1 --port 18188`
+}
+
+/** A fetch stub that says "nothing is listening" — the post-stop expectation. */
+const refusedFetch = async () => {
+  throw new Error('connect ECONNREFUSED')
+}
+
+test('stop kills the recorded pid tree on Windows and signals it on POSIX', async () => {
+  const machine = makeMachine(freshDir())
+  const recordPath = join(machine.installPath, 'logs', 'dsh-image-forge-launch.json')
+
+  writeLaunchRecord(machine)
   const winCalls = []
-  const win = stopEnvironment(depsOf(machine, { spawnSync: (...args) => { winCalls.push(args); return { status: 0 } } }))
+  const win = await stopEnvironment(depsOf(machine, {
+    spawnSync: (...args) => { winCalls.push(args); return { status: 0 } },
+    commandLineOf: () => ownedCommandLine(machine),
+    fetchImpl: refusedFetch,
+  }))
   assert.equal(win.stopped, true)
   assert.equal(win.pid, 4242)
+  assert.equal(win.exitCode, 0, 'the exit code of taskkill is part of the answer')
+  assert.equal(win.verified, true, 'the port probe decided the process really went away')
   assert.deepEqual(winCalls, [['taskkill', ['/PID', '4242', '/T', '/F'], { stdio: 'ignore' }]])
+  assert.equal(existsSync(recordPath), false, 'a successful stop deletes the record')
 
+  // The record is gone after the Windows half; a second stop is "no record".
+  const again = await stopEnvironment(depsOf(machine, { spawnSync: () => { throw new Error('must not run') } }))
+  assert.equal(again.stopped, false)
+  assert.equal(again.reason, 'no-record')
+
+  writeLaunchRecord(machine)
   const killed = []
-  const posix = stopEnvironment(depsOf(machine, {
+  const posix = await stopEnvironment(depsOf(machine, {
     platform: 'linux',
     kill: (pid, signal) => killed.push([pid, signal]),
     spawnSync: () => { throw new Error('taskkill must not run on POSIX') },
+    commandLineOf: () => ownedCommandLine(machine),
+    fetchImpl: refusedFetch,
   }))
   assert.equal(posix.stopped, true)
   assert.deepEqual(killed, [[4242, 'SIGTERM']])
 })
 
-test('stop with no launch record reports nothing to stop', () => {
+test('stop refuses a pid whose command line is not the recorded main.py', async () => {
   const machine = makeMachine(freshDir())
-  const result = stopEnvironment(depsOf(machine))
+  const recordPath = join(machine.installPath, 'logs', 'dsh-image-forge-launch.json')
+  writeLaunchRecord(machine)
+  const winCalls = []
+  const killed = []
+  const result = await stopEnvironment(depsOf(machine, {
+    // Same pid, different program: the OS may have recycled it.
+    commandLineOf: () => '"C:\\\\other\\\\python.exe" -m http.server 8188',
+    spawnSync: (...args) => { winCalls.push(args); return { status: 0 } },
+    kill: (pid, signal) => killed.push([pid, signal]),
+    fetchImpl: refusedFetch,
+  }))
+  assert.equal(result.stopped, false)
+  assert.equal(result.reason, 'not-owned')
+  assert.match(result.note, /未执行停止/)
+  assert.deepEqual(winCalls, [], 'taskkill must not run for a process we cannot claim')
+  assert.deepEqual(killed, [], 'no signal either')
+  assert.ok(existsSync(recordPath), 'the record survives a refused stop')
+})
+
+test('stop refuses when the command line cannot be read, and says so', async () => {
+  const machine = makeMachine(freshDir())
+  writeLaunchRecord(machine)
+  const winCalls = []
+  const result = await stopEnvironment(depsOf(machine, {
+    commandLineOf: () => null,
+    spawnSync: (...args) => { winCalls.push(args); return { status: 0 } },
+    fetchImpl: refusedFetch,
+  }))
+  assert.equal(result.stopped, false)
+  assert.equal(result.reason, 'unverified')
+  assert.match(result.note, /无法确认/)
+  assert.deepEqual(winCalls, [], 'an unprovable pid is never killed')
+})
+
+test('stop reports a still-answering port and keeps the record for a retry', async () => {
+  const machine = makeMachine(freshDir())
+  const recordPath = join(machine.installPath, 'logs', 'dsh-image-forge-launch.json')
+  writeLaunchRecord(machine)
+  const result = await stopEnvironment(depsOf(machine, {
+    spawnSync: () => ({ status: 0 }),
+    commandLineOf: () => ownedCommandLine(machine),
+    // The signal landed, but ComfyUI still answers /system_stats.
+    fetchImpl: async () => new Response(JSON.stringify({ devices: [] }), { status: 200 }),
+  }))
+  assert.equal(result.stopped, true)
+  assert.equal(result.reason, 'port-still-up')
+  assert.equal(result.verified, false)
+  assert.match(result.note, /仍在应答/)
+  assert.ok(existsSync(recordPath), 'the handle is kept so the next click can retry')
+})
+
+test('POSIX ESRCH means "already gone", not a thrown error', async () => {
+  const machine = makeMachine(freshDir())
+  const recordPath = join(machine.installPath, 'logs', 'dsh-image-forge-launch.json')
+  writeLaunchRecord(machine)
+  const esrch = new Error('kill ESRCH')
+  esrch.code = 'ESRCH'
+  const result = await stopEnvironment(depsOf(machine, {
+    platform: 'linux',
+    kill: () => { throw esrch },
+    commandLineOf: () => ownedCommandLine(machine),
+    fetchImpl: refusedFetch,
+  }))
+  assert.equal(result.stopped, true, 'a process that is already gone still counts as stopped')
+  assert.equal(result.reason, null)
+  assert.equal(existsSync(recordPath), false)
+})
+
+test('stop with no launch record reports nothing to stop', async () => {
+  const machine = makeMachine(freshDir())
+  const result = await stopEnvironment(depsOf(machine))
   assert.equal(result.stopped, false)
   assert.equal(result.pid, null)
+  assert.equal(result.reason, 'no-record')
   assert.ok(result.note.includes('no launch record'))
 })
 

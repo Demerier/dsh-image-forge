@@ -33,6 +33,7 @@ import {
   statSync,
 } from 'node:fs'
 import { open, rename } from 'node:fs/promises'
+import net from 'node:net'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
@@ -46,8 +47,14 @@ import {
 import {
   DEFAULT_INSTALL_TIMEOUT_MS,
   discoverComfyPlan,
+  isProcessAlive,
   launchComfyPlan,
+  loopbackPortOf,
+  planForRun,
+  processCommandLine,
+  readLaunchRecord,
   stopComfyPlan,
+  systemStats,
   waitForComfyStats,
 } from '../scripts/comfyui-discovery.mjs'
 import { resolveProfile } from './model-profiles.ts'
@@ -112,6 +119,34 @@ export interface EnvironmentStatus {
   readonly logPath: string | null
   /** How long the launch wait ran, in milliseconds. */
   readonly waitedMs: number | null
+  /**
+   * Pid of the instance this plugin started, when one is known to be alive.
+   *
+   * `null` means “no live launch record”, not “no ComfyUI”: a backend the user
+   * started themselves has no pid here on purpose — the workbench is not allowed
+   * to claim ownership of a process it did not start.
+   */
+  readonly pid: number | null
+  /**
+   * True only when the running backend is provably the one this plugin launched:
+   * a launch record exists, its pid is alive, and (when the platform lets us
+   * read it) its command line still names the recorded `main.py`.
+   */
+  readonly owned: boolean
+  /**
+   * The argv a launch ran — or would run — with.
+   *
+   * Stage 3 (user-specified launch flags) reads this preview; the panel only
+   * shows it as a tooltip, and nothing here accepts user input yet.
+   */
+  readonly argvPreview: readonly string[] | null
+  /**
+   * Why {@link owned} is false although a live pid is known, when that is the
+   * case: an unreadable command line, a recycled pid, a record without
+   * `main.py`. The panel prints it next to the disabled stop button, so a
+   * refusal is explained before it is clicked rather than after.
+   */
+  readonly ownershipNote?: string | null
   /** Wall clock spent in this call. */
   readonly elapsedMs: number
 }
@@ -128,16 +163,34 @@ export interface EnvironmentOptions {
   readonly installTimeoutMs: number
   /** Gap between `/system_stats` polls during that wait. */
   readonly waitIntervalMs: number
+  /**
+   * Extra launch flags (stage 3's interface, deliberately not wired to any UI).
+   *
+   * Omitted or empty means “append nothing”: the planned argv stays byte for
+   * byte what Comfy Desktop recorded.
+   */
+  readonly extraArgs?: readonly string[]
 }
 
 /** The config fields `environmentOptionsOf` reads. */
 export interface EnvironmentSettings {
   /** `comfyEndpoint` as the settings resolver produced it. */
   readonly comfyEndpoint: string
-  /** `comfyPorts` as configured (comma separated). */
-  readonly comfyPorts: string
+  /**
+   * `comfyPorts`: the raw comma separated string from the config, or the parsed
+   * array the Studio's settings carry. Both are accepted so the panel route does
+   * not have to re-format a list it already resolved.
+   */
+  readonly comfyPorts: string | readonly number[]
   /** The plugin's per-call budget; kept for parity with the other front doors. */
   readonly timeoutMs: number
+}
+
+/** Ports a settings value names; an unusable list falls back to the default table. */
+function portsOf(value: string | readonly number[]): number[] {
+  if (typeof value === 'string') return parseComfyPorts(value)
+  const usable = value.filter((port) => Number.isInteger(port) && port >= 1 && port <= 65535)
+  return usable.length > 0 ? [...new Set(usable)] : parseComfyPorts('')
 }
 
 /**
@@ -149,7 +202,7 @@ export interface EnvironmentSettings {
 export function environmentOptionsOf(settings: EnvironmentSettings): EnvironmentOptions {
   return {
     endpoint: settings.comfyEndpoint.replace(/\/+$/, ''),
-    ports: parseComfyPorts(settings.comfyPorts),
+    ports: portsOf(settings.comfyPorts),
     probeTimeoutMs: 800,
     installTimeoutMs: DEFAULT_INSTALL_TIMEOUT_MS,
     waitIntervalMs: 1000,
@@ -172,6 +225,21 @@ export interface EnvironmentDeps {
   readonly spawnSync?: (...args: any[]) => unknown
   /** `process.kill`-shaped hook, used by the POSIX stop. */
   readonly kill?: (pid: number, signal?: NodeJS.Signals | number) => void
+  /**
+   * Read one live process's command line, for the ownership proof.
+   *
+   * Defaults to the shared `powershell`/`wmic`/`ps` reader in
+   * `scripts/comfyui-discovery.mjs`. Tests inject it so no case ever runs
+   * `taskkill`, `wmic` or `ps` against this machine.
+   */
+  readonly commandLineOf?: (pid: number) => string | null
+  /**
+   * Is this TCP port already being listened on?
+   *
+   * Defaults to a real `net.connect` probe. Tests inject it so the “port is
+   * occupied” branch is a deterministic boolean instead of a race.
+   */
+  readonly portProbe?: (port: number) => Promise<boolean>
   /** `fetch`-shaped hook for `/system_stats` probes. */
   readonly fetchImpl?: typeof fetch
   /** Clock, for deterministic waits. */
@@ -210,18 +278,150 @@ function nowOf(deps: EnvironmentDeps): () => number {
  * A `COMFYUI_DIR` that points nowhere is "no install for this report", not a
  * crash: the environment tool has to be able to say `not-installed` and hand
  * that to the installer instead of dying with a stack trace.
+ *
+ * `cheap` keeps the bounded drive scan out of the way. Status calls use it: the
+ * Desktop registry (two small JSON files) is enough to find the launch record,
+ * while scanning `D:\`, `E:\` and `C:\` on every panel refresh is not.
  */
-function discoverInstall(deps: EnvironmentDeps): any {
+function discoverInstall(deps: EnvironmentDeps, options: { readonly cheap?: boolean } = {}): any {
   try {
     return discoverComfyPlan({
       env: deps.env ?? process.env,
       platform: deps.platform ?? process.platform,
       appData: deps.appData,
-      scanRoots: deps.scanRoots,
+      scanRoots: options.cheap === true ? [] : deps.scanRoots,
     })
   } catch {
     return null
   }
+}
+
+/** One launch record after the ownership checks, in the shape a report uses. */
+interface Ownership {
+  /** True when a recorded pid is alive and provably runs the recorded main.py. */
+  readonly owned: boolean
+  /** The pid the record names, when a record exists at all. */
+  readonly pid: number | null
+  /** True when the pid exists but the command line could not be read. */
+  readonly alive: boolean
+  /** argv the recorded launch used, for the preview. */
+  readonly argv: readonly string[] | null
+  /** Where the record lives (shown in failure notes so it can be looked at). */
+  readonly recordPath: string | null
+  /** Why ownership is false, when a record exists but could not be confirmed. */
+  readonly note: string | null
+}
+
+/** No record: nothing this plugin started is reachable from here. */
+const NO_OWNERSHIP: Ownership = { owned: false, pid: null, alive: false, argv: null, recordPath: null, note: null }
+
+/**
+ * Read the launch record and decide, conservatively, whether it is ours.
+ *
+ * Order matters: a record whose pid is dead is *not* ownership (the OS may have
+ * recycled that pid for anything). Only a live pid whose command line still
+ * contains the recorded `main.py` counts as ours; when the command line cannot
+ * be read the answer is `owned: false` with a note, never a hopeful `true`.
+ */
+function ownershipOf(deps: EnvironmentDeps): Ownership {
+  const plan = discoverInstall(deps, { cheap: true })
+  if (!plan) return NO_OWNERSHIP
+  let record: any
+  try {
+    record = readLaunchRecord(plan)
+  } catch {
+    return NO_OWNERSHIP
+  }
+  if (!record || !record.pid) return NO_OWNERSHIP
+  const pid = Number(record.pid)
+  const argv = Array.isArray(record.argv) && record.argv.length > 0 ? record.argv.map(String) : null
+  const recordPath = typeof record.logPath === 'string' ? record.logPath : null
+  const alive = isProcessAlive(pid, { kill: deps.kill ?? process.kill })
+  if (!alive) {
+    return { owned: false, pid, alive: false, argv, recordPath, note: `pid ${pid} 已经不在了（启动记录还在，下次启动会覆盖它）。` }
+  }
+  const read = deps.commandLineOf ?? ((wanted: number) => processCommandLine(wanted, { platform: deps.platform ?? process.platform, spawnSync: deps.spawnSync ?? undefined }))
+  let commandLine: string | null = null
+  try {
+    commandLine = read(pid)
+  } catch {
+    commandLine = null
+  }
+  if (typeof commandLine !== 'string' || commandLine.length === 0) {
+    return {
+      owned: false,
+      pid,
+      alive: true,
+      argv,
+      recordPath,
+      note: `pid ${pid} 还活着，但读不到它的命令行，无法确认是不是本插件拉起的实例。`,
+    }
+  }
+  const mainPy = typeof record.mainPy === 'string' ? record.mainPy : ''
+  if (mainPy.length === 0) {
+    return {
+      owned: false,
+      pid,
+      alive: true,
+      argv,
+      recordPath,
+      note: `启动记录里没有 main.py，无法确认 pid ${pid} 的归属（停止会被拒绝）。`,
+    }
+  }
+  const normalise = (value: string) => value.replace(/["']/g, '').replace(/\\/g, '/').toLowerCase()
+  if (!normalise(commandLine).includes(normalise(mainPy))) {
+    return {
+      owned: false,
+      pid,
+      alive: true,
+      argv,
+      recordPath,
+      note: `pid ${pid} 跑的不是记录的 main.py，本插件不认为它是自己拉起的实例。`,
+    }
+  }
+  return { owned: true, pid, alive: true, argv, recordPath, note: null }
+}
+
+/**
+ * Is the port already being listened on? A refused connection means "free".
+ *
+ * This is the cheap pre-flight that turns "waited the full 180 s and never came
+ * up" into "端口被占" before a single byte of Python runs.
+ */
+function realPortProbe(port: number, timeoutMs = 700): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const finish = (value: boolean) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    let socket: import('node:net').Socket
+    try {
+      socket = new net.Socket()
+    } catch {
+      finish(false)
+      return
+    }
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => {
+      socket.destroy()
+      finish(true)
+    })
+    socket.once('timeout', () => {
+      socket.destroy()
+      finish(false)
+    })
+    socket.once('error', () => {
+      socket.destroy()
+      finish(false)
+    })
+    try {
+      socket.connect(port, '127.0.0.1')
+    } catch {
+      finish(false)
+    }
+  })
 }
 
 /** Trim a discovery plan down to the summary the report exposes. */
@@ -287,9 +487,16 @@ async function readyStatus(
     readonly waitedMs: number | null
     readonly startedAt: number
     readonly deps: EnvironmentDeps
+    /** Ownership as resolved by the caller; `undefined` asks for a fresh look. */
+    readonly ownership?: Ownership
+    /** The launch's own pid, when this call started the process. */
+    readonly launchedPid?: number | null
+    /** argv preview; `undefined` means “whatever the record carries”. */
+    readonly argvPreview?: readonly string[] | null
   },
 ): Promise<EnvironmentStatus> {
   const stats = await comfySystemStats(target.endpoint, 5000)
+  const ownership = extras.ownership ?? ownershipOf(extras.deps)
   const sourceLabel =
     source === 'configured'
       ? `配置的端点 ${target.endpoint}`
@@ -304,10 +511,14 @@ async function readyStatus(
     install: extras.install,
     probed: attemptsOf(target.probed),
     stats: statsOf(stats),
-    note: `ComfyUI 在跑：${sourceLabel}。`,
+    note: `ComfyUI 在跑：${sourceLabel}。${ownership.owned ? `本次由插件拉起（pid ${String(ownership.pid)}）。` : ''}`,
     hint: null,
     logPath: extras.logPath,
     waitedMs: extras.waitedMs,
+    pid: extras.launchedPid ?? ownership.pid,
+    owned: ownership.owned,
+    ...(ownership.owned || ownership.note === null ? {} : { ownershipNote: ownership.note }),
+    argvPreview: extras.argvPreview ?? ownership.argv,
     elapsedMs: nowOf(extras.deps)() - extras.startedAt,
   }
 }
@@ -353,6 +564,9 @@ export async function inspectEnvironment(
         '装好后重跑本工具，或先用 node scripts/start-comfyui.mjs --print 确认能发现安装。',
       logPath: null,
       waitedMs: null,
+      pid: null,
+      owned: false,
+      argvPreview: null,
       elapsedMs,
     }
   }
@@ -366,10 +580,13 @@ export async function inspectEnvironment(
     stats: null,
     note: `ComfyUI 没在跑（${firstLine(probe.note)}），但找到了安装：${plan.installPath}（来源 ${plan.source}）。`,
     hint:
-      '把 action 改成 "start" 用本工具后台拉起（按 Comfy Desktop 记录的启动参数，不自行发明 flag），' +
+      '点工作台状态行的「启动」用本工具后台拉起（按 Comfy Desktop 记录的启动参数，不自行发明 flag），' +
       '或直接跑 node scripts/start-comfyui.mjs。',
     logPath: null,
     waitedMs: null,
+    pid: null,
+    owned: false,
+    argvPreview: Array.isArray(plan.argv) ? plan.argv.map(String) : null,
     elapsedMs,
   }
 }
@@ -390,9 +607,85 @@ export async function ensureEnvironment(
   const inspected = await inspectEnvironment(options, deps)
   if (inspected.state !== 'not-running') return inspected
 
-  const plan = discoverInstall(deps)
-  if (!plan) return inspected
-  const endpoint = plan.port ? `http://127.0.0.1:${plan.port}` : options.endpoint
+  const discovered = discoverInstall(deps)
+  if (!discovered) return inspected
+
+  // **One port for everything.** A loopback `comfyEndpoint` pins the launch:
+  // argv's `--port`, `plan.port`, the record and the endpoint this function
+  // waits on all come from the same value. The old code waited on `plan.port`
+  // while the panel probed `comfyEndpoint`, so a configured `:8000` launched
+  // `:8188`, waited there, and the panel never turned green.
+  const pinned = loopbackPortOf(options.endpoint)
+  const port = pinned ?? Number(discovered.port)
+  const endpoint = pinned !== null ? options.endpoint : `http://127.0.0.1:${String(port)}`
+  const plan = planForRun(discovered, { port: pinned, extraArgs: options.extraArgs ?? [] })
+  const argvPreview = Array.isArray(plan.argv) ? plan.argv.map(String) : null
+
+  // A pid this plugin already started must not be started again: the record is
+  // the only handle to it, and overwriting that record orphans the process.
+  const previous = ownershipOf(deps)
+  if (previous.alive) {
+    return {
+      state: 'launch-failed',
+      endpoint: null,
+      port,
+      source: null,
+      install: installSummaryOf(plan),
+      probed: [],
+      stats: null,
+      note: `没有重复拉起：${previous.note ?? `已有一个由本插件拉起的实例（pid ${String(previous.pid)}）`}；${endpoint} 还没应答，可能仍在加载权重。`,
+      hint: '等它就绪后点「重新检测」；要重启用状态行的「停止」再「启动」。',
+      logPath: previous.recordPath,
+      waitedMs: null,
+      pid: previous.pid,
+      owned: previous.owned,
+      argvPreview: previous.argv ?? argvPreview,
+      elapsedMs: nowOf(deps)() - startedAt,
+    }
+  }
+
+  // Port pre-flight. Two different facts, deliberately answered differently:
+  // something that *is* ComfyUI means "already running, don't spawn"; a listener
+  // that is not ComfyUI means "the port is taken" — either way, refusing now
+  // beats waiting the full timeout and then blaming the log.
+  const fetchImpl = deps.fetchImpl ?? fetch
+  const answering = await systemStats(endpoint, { timeoutMs: 1_500, fetchImpl })
+  if (answering) {
+    const ready = await readyStatus(
+      { endpoint, port, probed: [{ endpoint, ok: true, note: null }] },
+      options.endpoint.length > 0 ? 'configured' : 'port-probe',
+      {
+        install: installSummaryOf(plan),
+        logPath: null,
+        waitedMs: null,
+        startedAt,
+        deps,
+        ownership: NO_OWNERSHIP,
+        argvPreview,
+      },
+    )
+    return { ...ready, note: `端口 ${String(port)} 上已有 ComfyUI 在应答（可能是你自己启动的），没有重复拉起。` }
+  }
+  const occupied = await (deps.portProbe ?? realPortProbe)(port)
+  if (occupied) {
+    return {
+      state: 'launch-failed',
+      endpoint: null,
+      port,
+      source: null,
+      install: installSummaryOf(plan),
+      probed: [],
+      stats: null,
+      note: `端口被占：${String(port)} 上已有进程在监听，但不是 ComfyUI 的应答（可能是你已开的 ComfyUI 正在启动，或别的程序），没有拉起。`,
+      hint: '确认占用该端口的程序，或把 comfyEndpoint 改成一个空闲端口——下次启动会按它的端口传 --port，等待与探活也用它。',
+      logPath: null,
+      waitedMs: null,
+      pid: null,
+      owned: false,
+      argvPreview,
+      elapsedMs: nowOf(deps)() - startedAt,
+    }
+  }
 
   let launch: any
   try {
@@ -402,7 +695,7 @@ export async function ensureEnvironment(
     return {
       state: 'launch-failed',
       endpoint: null,
-      port: Number(plan.port),
+      port,
       source: null,
       install: installSummaryOf(plan),
       probed: [],
@@ -411,6 +704,9 @@ export async function ensureEnvironment(
       hint: '先用 node scripts/start-comfyui.mjs --print 看完整 argv 与 Python 路径，再确认 Desktop 记录的安装还能用。',
       logPath: null,
       waitedMs: null,
+      pid: null,
+      owned: false,
+      argvPreview,
       elapsedMs: nowOf(deps)() - startedAt,
     }
   }
@@ -419,17 +715,38 @@ export async function ensureEnvironment(
     child: launch.child,
     timeoutMs: options.installTimeoutMs,
     intervalMs: options.waitIntervalMs,
-    fetchImpl: deps.fetchImpl ?? fetch,
+    fetchImpl,
     now: deps.now,
     sleep: deps.sleep,
   })
   if (wait.ok) {
     const ready = await readyStatus(
-      { endpoint, port: Number(plan.port), probed: [{ endpoint, ok: true, note: null }] },
+      { endpoint, port, probed: [{ endpoint, ok: true, note: null }] },
       'launched',
-      { install: installSummaryOf(plan), logPath: launch.logPath, waitedMs: wait.waitedMs ?? null, startedAt, deps },
+      {
+        install: installSummaryOf(plan),
+        logPath: launch.logPath,
+        waitedMs: wait.waitedMs ?? null,
+        startedAt,
+        deps,
+        launchedPid: launch.pid ?? null,
+        argvPreview,
+        ownership: {
+          owned: true,
+          pid: launch.pid ?? null,
+          alive: true,
+          argv: argvPreview,
+          recordPath: launch.recordPath ?? null,
+          note: null,
+        },
+      },
     )
-    return { ...ready, note: `已后台拉起 ComfyUI：${endpoint}（pid ${launch.pid}）。`, logPath: launch.logPath }
+    return {
+      ...ready,
+      note: `已后台拉起 ComfyUI：${endpoint}（pid ${String(launch.pid)}，面板关闭后它继续跑）。`,
+      logPath: launch.logPath,
+      pid: launch.pid ?? null,
+    }
   }
 
   const waitedMs = wait.waitedMs ?? null
@@ -437,7 +754,7 @@ export async function ensureEnvironment(
   return {
     state: failed ? 'launch-failed' : 'timeout',
     endpoint: null,
-    port: Number(plan.port),
+    port,
     source: null,
     install: installSummaryOf(plan),
     probed: [],
@@ -448,6 +765,12 @@ export async function ensureEnvironment(
     hint: '看日志最后 25 行排障（端口被占、Python 环境损坏、首次启动很慢都可能在日志里点名）；本工具不自动重试、不下载权重。',
     logPath: launch.logPath,
     waitedMs,
+    // The child is not answering, so it is not "owned and running": the record
+    // stays (a retry or a stop can still use it) but the report must not claim a
+    // live instance.
+    pid: launch.pid ?? null,
+    owned: false,
+    argvPreview,
     elapsedMs: nowOf(deps)() - startedAt,
   }
 }
@@ -459,18 +782,76 @@ export async function ensureEnvironment(
  * plus workers, and leaving the children behind would hold the GPU. This is the
  * same interface P2's `comfy-mcp` child cleanup will reuse.
  */
-export function stopEnvironment(deps: EnvironmentDeps = {}): {
+/** What a stop call reports back. */
+export interface EnvironmentStopResult {
+  /** True when the recorded instance was signalled and its port went quiet. */
   readonly stopped: boolean
+  /** Pid the record named, when there was one. */
   readonly pid: number | null
+  /** Exit code of `taskkill` on Windows; `null` on POSIX and on refusal. */
+  readonly exitCode: number | null
+  /**
+   * Why nothing was stopped: `no-install` / `no-record` / `no-pid` /
+   * `unverified` / `not-owned` / `signal-failed` / `no-process` /
+   * `port-still-up`; `null` on success.
+   */
+  readonly reason: string | null
+  /** Did `/system_stats` really stop answering? `null` when unverifiable. */
+  readonly verified: boolean | null
+  /** One-paragraph explanation, safe to show to the user. */
   readonly note: string
-} {
+  /** The launch record this call read (deleted on success). */
+  readonly recordPath: string | null
+}
+
+/**
+ * Stop the instance this plugin/CLI started (never somebody else's).
+ *
+ * The safety property is the whole point of this function: it stops a process
+ * only when the launch record names a `main.py` **and** the live process's
+ * command line still contains it. “Cannot read the command line” is answered
+ * with `stopped: false, reason: 'unverified'`, not with a hopeful `taskkill` —
+ * a wrong kill takes down whatever Python the user was training.
+ *
+ * Discovery uses the same strategy as a start (explicit dir, Desktop registry,
+ * bounded scan), because the record lives inside the install tree: a stop that
+ * cannot find the install cannot find the record either.
+ *
+ * @param deps - machine-facing seams; tests inject every one of them.
+ * @returns the stop report; never throws.
+ */
+export async function stopEnvironment(deps: EnvironmentDeps = {}): Promise<EnvironmentStopResult> {
   const plan = discoverInstall(deps)
-  if (!plan) return { stopped: false, pid: null, note: '没找到 ComfyUI 安装，没有可停的实例（只停由插件/脚本拉起的实例）。' }
-  return stopComfyPlan(plan, {
-    platform: deps.platform ?? process.platform,
-    spawnSync: deps.spawnSync,
-    kill: deps.kill,
-  }) as { stopped: boolean; pid: number | null; note: string }
+  if (!plan) {
+    return {
+      stopped: false,
+      pid: null,
+      exitCode: null,
+      reason: 'no-install',
+      verified: null,
+      note: '没找到 ComfyUI 安装，没有可停的实例（只停由插件/脚本拉起的实例）。',
+      recordPath: null,
+    }
+  }
+  try {
+    return await stopComfyPlan(plan, {
+      platform: deps.platform ?? process.platform,
+      spawnSync: deps.spawnSync,
+      kill: deps.kill,
+      commandLineOf: deps.commandLineOf,
+      fetchImpl: deps.fetchImpl ?? fetch,
+    }) as EnvironmentStopResult
+  } catch (error) {
+    return {
+      stopped: false,
+      pid: null,
+      exitCode: null,
+      reason: 'signal-failed',
+      verified: null,
+      note: `停止失败：${error instanceof Error ? error.message : String(error)}`,
+      recordPath: null,
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,7 +1444,7 @@ export function registerEnvironmentTools(ctx: Context, getConfig: () => Config):
           options = { ...options, installTimeoutMs: Math.min(900_000, Math.max(5_000, Math.round(requested))) }
         }
         if (action === 'stop') {
-          const stop = stopEnvironment()
+          const stop = await stopEnvironment()
           return jsonSafe({ action, environment: null, stop, summary: stop.note, elapsed_ms: Date.now() - startedAt })
         }
         const environment = action === 'start' ? await ensureEnvironment(options) : await inspectEnvironment(options)

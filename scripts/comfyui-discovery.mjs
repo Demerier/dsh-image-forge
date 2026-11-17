@@ -21,7 +21,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, platform as osPlatform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -302,6 +302,133 @@ export function readLaunchRecord(plan) {
 }
 
 /**
+ * The plan a launch would actually run, with the port and any extra flags applied.
+ *
+ * **One source for the port.** `--port` in argv, `plan.port`, the record and the
+ * endpoint the caller waits on must all name the same port; when the caller
+ * pinned a port (the panel's `comfyEndpoint`), that port wins over whatever the
+ * Desktop record said — otherwise a `comfyEndpoint` of `:8000` launches `:8188`
+ * and then waits on `:8188` forever while the panel probes `:8000`.
+ *
+ * `extraArgs` is the seam later stages use for user-specified launch flags. It
+ * defaults to nothing: with no override this function returns the plan it was
+ * given, argv included, byte for byte.
+ *
+ * @param {object} plan - a plan from {@link discoverComfyPlan}.
+ * @param {object} [options]
+ * @param {number|null} [options.port] - port that must win over the planned one.
+ * @param {readonly string[]} [options.extraArgs] - flags appended after the
+ *   planned argv; empty/omitted appends nothing.
+ * @returns the plan, or a copy with `port`/`argv` adjusted.
+ */
+export function planForRun(plan, { port = null, extraArgs = [] } = {}) {
+  if (!plan) return plan
+  const extra = Array.isArray(extraArgs) ? extraArgs.filter((arg) => typeof arg === 'string' && arg.length > 0) : []
+  const wanted = Number(port)
+  const override = Number.isInteger(wanted) && wanted >= 1 && wanted <= 65535 && wanted !== Number(plan.port)
+  if (!override && extra.length === 0) return plan
+  const argv = Array.isArray(plan.argv) ? [...plan.argv] : []
+  if (override) {
+    const at = argv.indexOf('--port')
+    if (at >= 0 && at + 1 < argv.length) argv[at + 1] = String(wanted)
+    else argv.push('--port', String(wanted))
+  }
+  for (const arg of extra) argv.push(arg)
+  return { ...plan, ...(override ? { port: wanted } : {}), argv }
+}
+
+/**
+ * The port of a loopback endpoint, or `null` when it is not a local address.
+ *
+ * This is the rule behind “the configured endpoint wins”: only a loopback URL
+ * can be satisfied by a locally launched renderer, so only a loopback URL gets
+ * to pin the `--port` a launch uses.
+ */
+export function loopbackPortOf(endpoint) {
+  if (typeof endpoint !== 'string' || endpoint.length === 0) return null
+  try {
+    const url = new URL(endpoint)
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') return null
+    const port = Number(url.port.length > 0 ? url.port : (url.protocol === 'https:' ? 443 : 80))
+    return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The command line of one live process, or `null` when it cannot be read.
+ *
+ * Windows has no `/proc`, so this asks WMI (and the legacy `wmic` as a second
+ * try); POSIX reads `ps -o command=`. `null` is a real answer, not an error: the
+ * stop path treats "cannot read it" as "cannot prove ownership" and refuses
+ * rather than guessing, which is the only safe direction for a kill.
+ *
+ * @param {number} pid - process to inspect.
+ * @param {object} [options]
+ * @param {NodeJS.Platform} [options.platform] - platform to inspect for.
+ * @param {Function} [options.spawnSync] - `child_process.spawnSync`-shaped hook.
+ * @returns {string|null} the command line, or `null`.
+ */
+export function processCommandLine(pid, { platform = osPlatform(), spawnSync: sync = spawnSync } = {}) {
+  const target = Number(pid)
+  if (!Number.isInteger(target) || target <= 0) return null
+  const read = (command, args) => {
+    try {
+      const result = sync(command, args, { encoding: 'utf8', timeout: 5_000, windowsHide: true })
+      if (!result || result.status !== 0) return null
+      const text = typeof result.stdout === 'string' ? result.stdout.trim() : ''
+      return text.length > 0 ? text : null
+    } catch {
+      return null
+    }
+  }
+  if (platform === 'win32') {
+    const script = `(Get-CimInstance Win32_Process -Filter "ProcessId=${target}").CommandLine`
+    return (
+      read('powershell', ['-NoProfile', '-NonInteractive', '-Command', script]) ??
+      read('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script]) ??
+      read('wmic', ['process', 'where', `processid=${target}`, 'get', 'commandline', '/value'])
+    )
+  }
+  return read('ps', ['-o', 'command=', '-p', String(target)])
+}
+
+/**
+ * Is this pid alive right now? Deliberately weaker than {@link processCommandLine}:
+ * signal 0 asks the OS whether the process exists, nothing more.
+ */
+export function isProcessAlive(pid, { kill = process.kill } = {}) {
+  const target = Number(pid)
+  if (!Number.isInteger(target) || target <= 0) return false
+  try {
+    kill(target, 0)
+    return true
+  } catch (error) {
+    // EPERM means "exists but not ours" — that is still alive.
+    return error && error.code === 'EPERM'
+  }
+}
+
+/** Forget the launch record of an instance that is gone. */
+export function removeLaunchRecord(plan) {
+  try {
+    rmSync(launchRecordPath(plan), { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Two paths that name the same file, tolerating quoting and separators. */
+function samePathInCommandLine(commandLine, mainPy) {
+  if (!commandLine || !mainPy) return false
+  const normalise = (value) => String(value).replace(/["']/g, '').replace(/\\/g, '/').toLowerCase()
+  return normalise(commandLine).includes(normalise(mainPy))
+}
+
+/**
  * Ask one endpoint whether it is ComfyUI, via `/system_stats`.
  *
  * Deliberately shallow: callers that need the full contract (a 2xx whose body is
@@ -354,7 +481,26 @@ export function launchComfyPlan(plan, { spawn: spawnImpl = spawn, endpoint = nul
   }
   child.unref()
   const recordPath = launchRecordPath(plan)
-  const record = { pid: child.pid, endpoint, startedAt: new Date().toISOString(), logPath }
+  // Why the record carries more than a pid: `stop` has to prove that the process
+  // it is about to kill is the one this plugin started. A pid alone is not proof
+  // (the OS recycles pids), while `mainPy`/`argv`/`port` are checkable against
+  // the live process's command line. `history` keeps earlier launches visible:
+  // a second start overwrites the primary key, and silently forgetting the
+  // previous pid is how an orphan keeps holding the GPU.
+  const previous = readLaunchRecord(plan)
+  const history = Array.isArray(previous?.history) ? previous.history.slice(-4) : []
+  if (previous && previous.pid && previous.pid !== child.pid) history.push(previous)
+  const record = {
+    pid: child.pid,
+    endpoint,
+    port: Number.isFinite(Number(plan.port)) ? Number(plan.port) : null,
+    mainPy: plan.mainPy ?? null,
+    python: plan.python ?? null,
+    argv: Array.isArray(plan.argv) ? plan.argv : [],
+    startedAt: new Date().toISOString(),
+    logPath,
+    history,
+  }
   try {
     mkdirSync(dirname(recordPath), { recursive: true })
   } catch {
@@ -394,22 +540,153 @@ export async function waitForComfyStats(
 }
 
 /**
- * Stop an instance that {@link launchComfyPlan} started.
+ * Stop an instance that {@link launchComfyPlan} started — and only that one.
  *
  * On Windows the whole process tree has to go (`taskkill /F /T`): ComfyUI is a
  * Python parent plus workers, and `process.kill` leaves the children behind.
  * This is the shared interface T15 reuses for its `comfy-mcp` child.
  *
- * @returns `{ stopped, pid, note }` — `stopped: false` when there was no record.
+ * Four things here are deliberate:
+ *
+ * - **Ownership is proved before anything is signalled.** The record names a
+ *   `mainPy`; the live process's command line is read back and must contain it.
+ *   No command line (WMI blocked, pid already gone) means *no kill* — the answer
+ *   is “无法确认该进程归属,未执行停止”, because killing an unrelated `python.exe`
+ *   is not a recoverable mistake.
+ * - **The exit code is part of the answer.** `spawnSync` used to be called with
+ *   `stdio: 'ignore'` and its result discarded, so `stopped: true` only meant
+ *   “a signal was sent”. A non-zero `taskkill` now reports `signal-failed`.
+ * - **The port is re-checked.** A signal is not a shutdown: after the kill, the
+ *   recorded endpoint is probed once more, and `verified` says whether
+ *   `/system_stats` really stopped answering.
+ * - **The record is deleted on success.** Otherwise the next click would try to
+ *   stop a pid that is already gone, forever.
+ *
+ * @returns `{ stopped, pid, exitCode, reason, verified, note, recordPath }` —
+ *   `stopped: false` when there was no record or ownership could not be proved.
  */
-export function stopComfyPlan(plan, { platform = osPlatform(), spawnSync: sync = spawnSync, kill = process.kill } = {}) {
+export async function stopComfyPlan(
+  plan,
+  {
+    platform = osPlatform(),
+    spawnSync: sync = spawnSync,
+    kill = process.kill,
+    commandLineOf = (pid) => processCommandLine(pid, { platform, spawnSync: sync }),
+    fetchImpl = fetch,
+    endpoint = null,
+    verifyTimeoutMs = 2_500,
+  } = {},
+) {
+  const recordPath = launchRecordPath(plan)
   const record = readLaunchRecord(plan)
-  if (!record) return { stopped: false, pid: null, note: `no launch record at ${launchRecordPath(plan)}` }
-  if (!record.pid) return { stopped: false, pid: null, note: `${launchRecordPath(plan)} has no pid` }
-  if (platform === 'win32') {
-    sync('taskkill', ['/PID', String(record.pid), '/T', '/F'], { stdio: 'ignore' })
-  } else {
-    kill(record.pid, 'SIGTERM')
+  if (!record) return { stopped: false, pid: null, exitCode: null, reason: 'no-record', verified: null, note: `no launch record at ${recordPath}`, recordPath }
+  const pid = Number(record.pid)
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { stopped: false, pid: null, exitCode: null, reason: 'no-pid', verified: null, note: `${recordPath} has no pid`, recordPath }
   }
-  return { stopped: true, pid: record.pid, note: `signalled pid ${record.pid}` }
+  // 1. Identity. A record written before this check existed has no `mainPy`:
+  //    it is not proof of ownership, so it is refused with an explanation.
+  if (!record.mainPy) {
+    return {
+      stopped: false,
+      pid,
+      exitCode: null,
+      reason: 'unverified',
+      verified: null,
+      note: `记录 ${recordPath} 里没有 mainPy，无法确认 pid ${pid} 是不是本插件拉起的进程，未执行停止（先手动确认，或重新用工作台的启动按钮拉起一次）。`,
+      recordPath,
+    }
+  }
+  let commandLine = null
+  try {
+    commandLine = commandLineOf(pid)
+  } catch {
+    commandLine = null
+  }
+  if (typeof commandLine !== 'string' || commandLine.length === 0) {
+    return {
+      stopped: false,
+      pid,
+      exitCode: null,
+      reason: 'unverified',
+      verified: null,
+      note: `无法确认 pid ${pid} 的进程归属（读不到命令行），未执行停止。`,
+      recordPath,
+    }
+  }
+  if (!samePathInCommandLine(commandLine, record.mainPy)) {
+    return {
+      stopped: false,
+      pid,
+      exitCode: null,
+      reason: 'not-owned',
+      verified: null,
+      note: `pid ${pid} 的命令行里没有记录的 main.py（${record.mainPy}），不是本插件拉起的进程，未执行停止。`,
+      recordPath,
+    }
+  }
+
+  // 2. Signal, keeping the exit code.
+  let exitCode = null
+  let reason = null
+  let note = ''
+  if (platform === 'win32') {
+    let result = null
+    try {
+      result = sync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+    } catch (error) {
+      note = `taskkill 执行失败：${error && error.message ? error.message : String(error)}`
+      reason = 'signal-failed'
+    }
+    if (result) exitCode = typeof result.status === 'number' ? result.status : null
+    if (exitCode !== null && exitCode !== 0) reason = 'signal-failed'
+  } else {
+    try {
+      kill(pid, 'SIGTERM')
+    } catch (error) {
+      // ESRCH: the process is already gone. That is not a crash — it is the
+      // answer "nothing to stop", and the record still gets cleaned up below.
+      const code = error && error.code ? String(error.code) : ''
+      reason = code === 'ESRCH' ? 'no-process' : 'signal-failed'
+      note = code === 'ESRCH'
+        ? `pid ${pid} 已经不在（ESRCH），没有发送信号`
+        : `发送 SIGTERM 失败：${error && error.message ? error.message : String(error)}`
+    }
+  }
+
+  // 3. Did the port really go quiet? Unverifiable without a recorded endpoint.
+  const target = typeof endpoint === 'string' && endpoint.length > 0 ? endpoint : (typeof record.endpoint === 'string' ? record.endpoint : '')
+  let verified = null
+  if (target.length > 0) {
+    const stats = await systemStats(target, { timeoutMs: Math.min(1_500, Math.max(400, verifyTimeoutMs)), fetchImpl })
+    verified = stats === null
+  }
+
+  const stopped = reason === null || reason === 'no-process'
+  if (!stopped) return { stopped: false, pid, exitCode, reason, verified, note: note.length > 0 ? note : `停止 pid ${pid} 失败（exit code ${String(exitCode)}）`, recordPath }
+  if (verified === false) {
+    // The signal landed but ComfyUI still answers: keep the record so the next
+    // click can try again instead of forgetting the handle.
+    return {
+      stopped: true,
+      pid,
+      exitCode,
+      reason: 'port-still-up',
+      verified,
+      note: `已向 pid ${pid} 发送停止信号（exit code ${String(exitCode)}），但 ${target} 仍在应答 /system_stats：进程可能正在退出，稍后再点一次停止。`,
+      recordPath,
+    }
+  }
+
+  removeLaunchRecord(plan)
+  return {
+    stopped: true,
+    pid,
+    exitCode,
+    reason: null,
+    verified,
+    note: `已停止本插件拉起的 pid ${pid}${verified === true ? `，${target} 已不再应答` : ''}（记录已删除）。`,
+    recordPath,
+  }
 }
+

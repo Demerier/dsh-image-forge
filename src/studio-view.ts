@@ -134,6 +134,7 @@ import {
   STUDIO_ASSETS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CONFIG_ROUTE,
+  STUDIO_ENVIRONMENT_ROUTE,
   STUDIO_EVENTS_ROUTE,
   STUDIO_GENERATE_ROUTE,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
@@ -157,6 +158,8 @@ import {
   type StudioAsset,
   type StudioAssetsResponse,
   type StudioConfigResponse,
+  type StudioEnvironmentResponse,
+  type StudioEnvironmentSnapshot,
   type StudioGenerateResponse,
   type StudioImage,
   type StudioImportResponse,
@@ -681,6 +684,41 @@ async function postBoard(body: Record<string, unknown>): Promise<string | undefi
   return (await postBoardRaw(body)).error
 }
 
+/**
+ * One environment action (`status` / `start` / `stop`).
+ *
+ * Resolves to the host's refusals as data instead of throwing: the status line
+ * has to render "启动失败 + 日志路径" as text, not as an unhandled rejection. The
+ * stop report's own note is kept apart from the snapshot's, because after a stop
+ * the fresh snapshot describes what is left, while the stop note describes what
+ * just happened.
+ */
+async function postEnvironment(action: 'status' | 'start' | 'stop'): Promise<{
+  environment?: StudioEnvironmentSnapshot
+  stopNote?: string
+  error?: string
+}> {
+  try {
+    const response = await fetch(STUDIO_ENVIRONMENT_ROUTE, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action }),
+    })
+    const payload = (await readJson(response)) as StudioEnvironmentResponse | undefined
+    if (!response.ok || payload === undefined) {
+      return { error: typeof payload?.error === 'string' ? payload.error : `环境操作失败（HTTP ${String(response.status)}）` }
+    }
+    if (typeof payload.error === 'string' && payload.error.length > 0) return { error: payload.error }
+    return {
+      ...(payload.environment === undefined ? {} : { environment: payload.environment }),
+      ...(typeof payload.stop?.note === 'string' ? { stopNote: payload.stop.note } : {}),
+    }
+  } catch (cause) {
+    return { error: cause instanceof Error ? cause.message : String(cause) }
+  }
+}
+
 /** The props the sidebar slots hand a `sidebar.panellist` entry. */
 interface StudioPanelIconProps {
   /** Rendered edge length in px (16 in the wide rail, 18 in the collapsed rail). */
@@ -1092,6 +1130,14 @@ function LayoutEditorMount(props: LayoutEditorMountProps): ReturnType<typeof cre
 export function StudioPanel(): ReturnType<typeof createElement> {
   const [config, setConfig] = useState<StudioConfigResponse | undefined>(undefined)
   const [configError, setConfigError] = useState<string | undefined>(undefined)
+  // P2: the environment snapshot (state/pid/owned/logPath) is its own concern,
+  // separate from the capability snapshot: the capability probe answers "can this
+  // workbench generate", while the environment answers "which process is running
+  // and is it mine to stop".
+  const [environment, setEnvironment] = useState<StudioEnvironmentSnapshot | undefined>(undefined)
+  const [environmentBusy, setEnvironmentBusy] = useState<'start' | 'stop' | undefined>(undefined)
+  const [environmentError, setEnvironmentError] = useState<string | undefined>(undefined)
+  const [environmentNote, setEnvironmentNote] = useState<string | undefined>(undefined)
   const [prompt, setPrompt] = useState('')
   const [ratio, setRatio] = useState<string>('1:1')
   const [steps, setSteps] = useState<string>('')
@@ -1270,6 +1316,21 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     }
   }, [])
 
+  /**
+   * Read the environment snapshot (`status`), silently.
+   *
+   * A failed status read is deliberately *not* turned into a red banner: the
+   * capability snapshot already says "ComfyUI 未就绪", and the environment line
+   * simply keeps whatever it had. Only an explicit start/stop failure is shown,
+   * because that is the one the user asked for and can act on.
+   */
+  const loadEnvironment = useCallback(async () => {
+    const result = await postEnvironment('status')
+    if (result.error !== undefined || result.environment === undefined) return
+    setEnvironment(result.environment)
+    setEnvironmentError(undefined)
+  }, [])
+
   /** Load (or reload) the capability snapshot, and the board library with it. */
   const loadConfig = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -1287,11 +1348,14 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       // The library is the display unit, so a snapshot always opens one: an
       // empty library means an empty canvas, not a stale one.
       await openBoard(snapshot.activeBoard ?? undefined, signal)
+      // Reading the environment is what tells the status line whether the
+      // running backend is *this plugin's* (and therefore stoppable).
+      await loadEnvironment()
     } catch (cause) {
       if (signal?.aborted === true) return
       setConfigError(cause instanceof Error ? cause.message : String(cause))
     }
-  }, [openBoard])
+  }, [loadEnvironment, openBoard])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -1302,6 +1366,42 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       // Revoke every preview URL the form still owns: a panel unmount must not
       // leak blob memory for images nobody can see any more.
       for (const reference of referencesRef.current) URL.revokeObjectURL(reference.previewUrl)
+    }
+  }, [loadConfig])
+
+  /**
+   * One start/stop, then both snapshots re-read.
+   *
+   * Re-reading the capability snapshot is part of the action, not decoration: it
+   * decides whether the form is usable, so a finished start that left `ready`
+   * false would show every control disabled next to a running renderer.
+   */
+  const runEnvironmentAction = useCallback(async (action: 'start' | 'stop') => {
+    setEnvironmentBusy(action)
+    setEnvironmentError(undefined)
+    setEnvironmentNote(undefined)
+    try {
+      const result = await postEnvironment(action)
+      if (result.environment !== undefined) setEnvironment(result.environment)
+      if (result.error !== undefined) {
+        setEnvironmentError(result.error)
+        return
+      }
+      // Compose the message here, from the action's *own* response: the snapshot
+      // `loadConfig` fetches next describes what is left afterwards, and its
+      // logPath may already be gone. A stop's note explains what it did; a
+      // start's note is the snapshot's.
+      const note = result.stopNote ?? result.environment?.note
+      const logPath = result.environment?.logPath
+      setEnvironmentNote(
+        note === undefined
+          ? undefined
+          : (logPath !== undefined && !note.includes(logPath) ? `${note} 日志：${logPath}` : note),
+      )
+      const controller = new AbortController()
+      await loadConfig(controller.signal)
+    } finally {
+      setEnvironmentBusy(undefined)
     }
   }, [loadConfig])
 
@@ -3441,6 +3541,21 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const ready = config?.ready === true
   const canGenerate = ready && !busy && prompt.trim().length > 0
 
+  // ---- P2: the environment line's own state machine ----------------------
+  //
+  // Four cases, exactly one action each: not running → 启动; running and ours →
+  // 停止; running but started by the user → no action, with the reason; busy →
+  // the button says what it is doing. `owned` comes from the host's launch
+  // record, never from the panel's optimism: a stop button that would have to
+  // guess which process to kill is worse than no button.
+  const environmentOwned = ready && environment?.owned === true
+  const environmentStatusText = ready
+    ? `ComfyUI ${config?.endpoint ?? ''}${environmentOwned && environment?.pid !== undefined ? ` · 本次由插件拉起 · pid ${String(environment.pid)}` : ''}`
+    : 'ComfyUI 未就绪'
+  const environmentArgvTitle = environment?.argvPreview === undefined || environment.argvPreview.length === 0
+    ? undefined
+    : environment.argvPreview.join(' ')
+
   /**
    * The asset page: one grid over every image the plugin has recorded, with the
    * three actions that matter after the fact — reuse it as a reference, jump to
@@ -3602,15 +3717,62 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       createElement('h2', { className: 'dsh-forge-studio-title' }, '图像工作台'),
       createElement(
         'div',
-        { className: 'dsh-forge-studio-status' },
+        { className: 'dsh-forge-studio-status', 'data-env-state': environment?.state ?? 'unknown', 'data-env-owned': environmentOwned ? 'yes' : 'no' },
         createElement('span', { className: ready ? 'dsh-forge-dot is-ok' : 'dsh-forge-dot is-bad' }),
         createElement(
           'span',
           { className: 'dsh-forge-studio-endpoint' },
-          ready
-            ? `ComfyUI ${config?.endpoint ?? ''}`
-            : 'ComfyUI 未就绪',
+          environmentStatusText,
         ),
+        // The one action this line owns. A started renderer keeps running after
+        // the panel closes (`unref`), so "本次由插件拉起 · pid" above is not
+        // decoration: it is the notice that a process outlived its window.
+        environmentBusy !== undefined
+          ? createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-forge-btn is-ghost dsh-forge-env-btn',
+              disabled: true,
+              'data-env-action': environmentBusy,
+            },
+            environmentBusy === 'start' ? '启动中…' : '停止中…',
+          )
+          : ready
+            ? createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-forge-btn is-ghost dsh-forge-env-btn',
+                disabled: !environmentOwned,
+                'data-env-action': 'stop',
+                title: environmentOwned
+                  ? (environmentArgvTitle === undefined ? '停止本次由插件拉起的 ComfyUI' : `停止本次由插件拉起的 ComfyUI（argv：${environmentArgvTitle}）`)
+                  : (environment?.ownershipNote ?? '这个 ComfyUI 不是本插件拉起的，插件不提供停止'),
+                onClick: () => {
+                  if (!environmentOwned) return
+                  if (!window.confirm('停止本次由插件拉起的 ComfyUI？正在跑的任务会中断。')) return
+                  void runEnvironmentAction('stop')
+                },
+              },
+              '停止',
+            )
+            : createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-forge-btn is-primary dsh-forge-env-btn',
+                'data-env-action': 'start',
+                title: environmentArgvTitle === undefined
+                  ? '按 Comfy Desktop 记录的启动参数后台拉起 ComfyUI'
+                  : `按 Comfy Desktop 记录的参数后台拉起 ComfyUI（argv：${environmentArgvTitle}）`,
+                onClick: () => { void runEnvironmentAction('start') },
+              },
+              '启动',
+            ),
+        ready && !environmentOwned && environment?.ownershipNote === undefined
+          ? createElement('span', { className: 'dsh-forge-studio-hint' }, '由你自己启动的实例，插件不提供停止')
+          : null,
         createElement(
           'button',
           {
@@ -3622,6 +3784,16 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         ),
       ),
     ),
+
+    // A start/stop failure is the one environment message worth a banner: it is
+    // what the user just asked for, and its `note` names the log to read.
+    environmentError === undefined
+      ? null
+      : createElement('div', { className: 'dsh-forge-studio-alert dsh-forge-env-error' }, environmentError),
+
+    environmentNote === undefined
+      ? null
+      : createElement('div', { className: 'dsh-forge-studio-hint dsh-forge-env-note' }, environmentNote),
 
     // ---- install → first picture stepper (T22) -----------------------------
     //
