@@ -14,35 +14,45 @@ import {
   CANVAS_MIN_ZOOM,
   CANVAS_NODE_HEIGHT,
   CANVAS_NODE_WIDTH,
+  CHILD_MAX_ROWS,
+  CHILD_OFFSET_X,
   IMAGE_AREA_HEIGHT,
   MAX_NODE_WIDTH,
   MIN_NODE_WIDTH,
+  NODE_GAP,
   VIEWPORT_CULL_MARGIN,
+  WHEEL_LINE_PIXELS,
+  WHEEL_PAGE_PIXELS,
+  WHEEL_ZOOM_STEP,
   buildEdges,
   centerOn,
   clampZoom,
   edgeBounds,
   edgePath,
   fitCamera,
+  fitNeedsClamp,
   nextNodeSpot,
   nodeDisplaySize,
   nodeIndex,
   panBy,
+  panByScroll,
   rectsIntersect,
   screenToWorld,
   visibleEdges,
   visibleNodes,
   visibleWorldRect,
+  wheelIntent,
+  wheelScrollPixels,
   worldToScreen,
   zoomAt,
   zoomLabel,
 } from '../testlib/studio-canvas.js'
 
 test('screen and world conversions are inverse at every zoom', () => {
-  // The extremes are the clamped bounds themselves (DD8: 0.1–4), so a silent
-  // change to either constant shows up here as a conversion that no longer maps
-  // back rather than as a zoom that merely feels wrong in the browser.
-  for (const zoom of [0.1, 0.75, 1, 1.8, 4]) {
+  // The extremes are the clamped bounds themselves (0.1–8), so a silent change
+  // to either constant shows up here as a conversion that no longer maps back
+  // rather than as a zoom that merely feels wrong in the browser.
+  for (const zoom of [0.1, 0.75, 1, 1.8, 4, 8]) {
     const camera = { x: -120, y: 48, zoom }
     for (const point of [{ x: 0, y: 0 }, { x: 37, y: -19 }, { x: 512.5, y: 300 }]) {
       const round = worldToScreen(camera, screenToWorld(camera, point))
@@ -64,10 +74,11 @@ test('zooming keeps the world point under the cursor pinned', () => {
 })
 
 test('zoom is clamped, and a clamped zoom is a no-op rather than a jump', () => {
-  // DD8: the supported range is 0.1–4, spelled out as literals so this test fails
-  // on the constant itself, not only on the code that uses it.
+  // The supported range is 0.1–8 spelled out as literals so this test fails on
+  // the constant itself, not only on the code that uses it. The ceiling moved
+  // 4 → 8 in G05: a 2048-px result is still unreachable at 4×.
   assert.equal(CANVAS_MIN_ZOOM, 0.1, 'zoom floor')
-  assert.equal(CANVAS_MAX_ZOOM, 4, 'zoom ceiling')
+  assert.equal(CANVAS_MAX_ZOOM, 8, 'zoom ceiling')
   assert.equal(clampZoom(0.05), 0.1, 'below the floor clamps to the floor')
   assert.equal(clampZoom(99), CANVAS_MAX_ZOOM)
   assert.equal(clampZoom(0), CANVAS_MIN_ZOOM)
@@ -84,6 +95,58 @@ test('panning converts a screen delta through the zoom', () => {
   const camera = { x: 0, y: 0, zoom: 2 }
   // Dragging 40 screen px right at 2× moves the camera 20 world units left.
   assert.deepEqual(panBy(camera, { x: 40, y: -10 }), { x: -20, y: 5, zoom: 2 })
+})
+
+test('a scroll delta moves the camera the opposite way from a drag', () => {
+  // G01. This is the sign the mainstream products agree on: wheeling *down* reads
+  // further down, so the camera advances in world space and the content slides
+  // up. `panBy` is the drag direction and must stay the mirror image of it.
+  const camera = { x: 100, y: 50, zoom: 2 }
+  assert.deepEqual(panByScroll(camera, { x: 0, y: 100 }), { x: 100, y: 100, zoom: 2 }, 'one notch down = 50 world units down at 2×')
+  assert.deepEqual(panByScroll(camera, { x: 0, y: -100 }), { x: 100, y: 0, zoom: 2 })
+  // Same screen delta, opposite camera delta: the two helpers are not aliases.
+  assert.notDeepEqual(panByScroll(camera, { x: 40, y: 40 }), panBy(camera, { x: 40, y: 40 }))
+  // The zoom is untouched: a wheel must never scale.
+  assert.equal(panByScroll(camera, { x: 300, y: 300 }).zoom, camera.zoom)
+})
+
+test('a wheel delta is normalised from pixels, lines and pages alike', () => {
+  // G01. The same physical notch is 100 in pixel mode, 3 in line mode and 1 in
+  // page mode; without normalisation Firefox scrolls 3 px where Chrome scrolls
+  // 100, and the "fast/slow" report has no actionable cause.
+  assert.deepEqual(wheelScrollPixels({ deltaX: 0, deltaY: 100, deltaMode: 0 }), { x: 0, y: 100 })
+  assert.deepEqual(wheelScrollPixels({ deltaY: 3, deltaMode: 1 }), { x: 0, y: 3 * WHEEL_LINE_PIXELS })
+  assert.deepEqual(wheelScrollPixels({ deltaY: 1, deltaMode: 2 }), { x: 0, y: WHEEL_PAGE_PIXELS })
+  // A horizontal-only trackpad gesture keeps its axis.
+  assert.deepEqual(wheelScrollPixels({ deltaX: -40, deltaY: 0 }), { x: -40, y: 0 })
+  // Garbage in the deltas is zero, not `NaN` propagating into the camera.
+  assert.deepEqual(wheelScrollPixels({ deltaX: Number.NaN, deltaY: undefined }), { x: 0, y: 0 })
+})
+
+test('a bare wheel pans and a Ctrl/⌘ wheel zooms', () => {
+  // G01: the whole point of the change. Every case below was the bug — the old
+  // handler zoomed on all of them.
+  const plain = wheelIntent({ deltaY: 120 })
+  assert.equal(plain.kind, 'pan', 'a bare wheel must pan, not zoom')
+  assert.deepEqual(plain.delta, { x: 0, y: 120 })
+
+  const ctrl = wheelIntent({ deltaY: -120, ctrlKey: true })
+  assert.deepEqual(ctrl, { kind: 'zoom', factor: WHEEL_ZOOM_STEP }, 'Ctrl+wheel zooms in')
+  assert.deepEqual(wheelIntent({ deltaY: 120, ctrlKey: true }), { kind: 'zoom', factor: 1 / WHEEL_ZOOM_STEP })
+  // ⌘ is the macOS pinch modifier, and it must take the same branch.
+  assert.deepEqual(wheelIntent({ deltaY: -120, metaKey: true }), { kind: 'zoom', factor: WHEEL_ZOOM_STEP })
+  // A pinch that reports no vertical delta is a no-op, not a zoom creep.
+  assert.deepEqual(wheelIntent({ deltaY: 0, ctrlKey: true }), { kind: 'zoom', factor: 1 })
+  // ...and a bare horizontal-only wheel is a horizontal pan.
+  assert.equal(wheelIntent({ deltaX: -30, deltaY: 0 }).kind, 'pan')
+})
+
+test('a line-mode wheel pans by pixels, not by three world units', () => {
+  // The normalisation has to reach the intent, not only the helper: this is the
+  // Firefox case that made the canvas feel broken at 0.1× zoom.
+  const intent = wheelIntent({ deltaY: 3, deltaMode: 1 })
+  assert.equal(intent.kind, 'pan')
+  assert.equal(intent.delta.y, 3 * WHEEL_LINE_PIXELS)
 })
 
 test('fit frames every node and centres it', () => {
@@ -134,6 +197,75 @@ test('a new node lands to the right of the last one, never on top', () => {
   const spot = nextNodeSpot([first])
   assert.equal(spot.y, 0, 'the new node keeps the top edge of the row')
   assert.ok(spot.x >= CANVAS_NODE_WIDTH, 'the new node must clear the previous one')
+  // The gap is the documented constant, not a magic 40 that a refactor can drop.
+  assert.equal(spot.x, first.x + first.width + NODE_GAP)
+})
+
+test('twenty children of one parent stack in columns instead of one endless row', () => {
+  // G15. The old rule appended every child to the right of the right-most node,
+  // so a 20-image batch became a 20×232 world-unit row: unreadable, and past
+  // ~36 nodes unframable at the 10% zoom floor.
+  const parent = { x: 0, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const spots = []
+  const rects = [parent]
+  for (let index = 0; index < 20; index += 1) {
+    const spot = nextNodeSpot(rects, parent)
+    spots.push(spot)
+    rects.push({ ...spot, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT })
+  }
+
+  // The first child is where the brief says: 320 world units to the parent's right.
+  assert.deepEqual(spots[0], { x: parent.x + CHILD_OFFSET_X, y: parent.y })
+  // No two children overlap, and no child overlaps its parent.
+  for (let a = 0; a < rects.length; a += 1) {
+    for (let b = a + 1; b < rects.length; b += 1) {
+      assert.equal(rectsIntersect(rects[a], rects[b]), false, `nodes ${String(a)} and ${String(b)} must not overlap`)
+    }
+  }
+  // Not a single row: the children occupy at least two columns, and the first
+  // column holds exactly CHILD_MAX_ROWS of them before wrapping.
+  const columns = new Set(spots.map((spot) => spot.x))
+  assert.ok(columns.size >= 2, 'twenty children must wrap into more than one column')
+  const firstColumn = spots.filter((spot) => spot.x === spots[0].x)
+  assert.equal(firstColumn.length, CHILD_MAX_ROWS, 'the first column fills before the next opens')
+  // A column is a column: within it, y strictly increases.
+  for (let index = 1; index < firstColumn.length; index += 1) {
+    assert.ok(firstColumn[index].y > firstColumn[index - 1].y, 'a stack grows downwards')
+  }
+  // The whole fan-out stays compact enough to frame at the zoom floor: no child
+  // is further than the searched columns' worth of world units from the parent.
+  const far = Math.max(...spots.map((spot) => spot.x))
+  assert.ok(far <= parent.x + CHILD_OFFSET_X + (CANVAS_NODE_WIDTH + NODE_GAP) * 4, 'a 20-child fan-out must stay near its parent')
+})
+
+test('a child lands in the next free slot when the first one is taken', () => {
+  const parent = { x: 0, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const squatter = { x: parent.x + CHILD_OFFSET_X, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const spot = nextNodeSpot([parent, squatter], parent)
+  assert.notDeepEqual(spot, { x: squatter.x, y: squatter.y }, 'an occupied slot must not be reused')
+  assert.equal(spot.x, squatter.x, 'the next row in the same column is preferred')
+  assert.equal(spot.y, CANVAS_NODE_HEIGHT + NODE_GAP)
+})
+
+test('fit tells the view when it had to clamp, so 适应 is not silently partial', () => {
+  // G15: past ~36 nodes the fit clamps at 0.1 and leaves the far ones off-screen
+  // with no message. This predicate is what the status line keys off.
+  const viewport = { width: 800, height: 400 }
+  const near = [
+    { x: 0, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT },
+    { x: 400, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT },
+  ]
+  assert.equal(fitNeedsClamp(near, viewport), false, 'a two-node board fits')
+  assert.equal(fitNeedsClamp([], viewport), false, 'an empty board has nothing to clamp')
+
+  // 40 nodes in one row: 40 × 248 = 9920 world units wide, which needs ≈0.08.
+  const row = []
+  for (let index = 0; index < 40; index += 1) {
+    row.push({ x: index * 248, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT })
+  }
+  assert.equal(fitNeedsClamp(row, viewport), true, 'the far columns cannot be framed at the zoom floor')
+  // And it agrees with what fitCamera actually did: the clamp is real, not assumed.
+  assert.equal(fitCamera(row, viewport).zoom, CANVAS_MIN_ZOOM, 'fitCamera clamped at the floor')
 })
 
 test('an edge runs from the right edge of one node to the left edge of the next', () => {
@@ -163,9 +295,9 @@ test('the zoom label rounds to whole percent', () => {
   assert.equal(zoomLabel(1), '100%')
   assert.equal(zoomLabel(0.333), '33%')
   assert.equal(zoomLabel(2.5), '250%')
-  // The ends of the new range (DD8), so the toolbar never shows "10.000000000000002%".
+  // The ends of the new range, so the toolbar never shows "10.000000000000002%".
   assert.equal(zoomLabel(CANVAS_MIN_ZOOM), '10%')
-  assert.equal(zoomLabel(CANVAS_MAX_ZOOM), '400%')
+  assert.equal(zoomLabel(CANVAS_MAX_ZOOM), '800%')
 })
 
 // --- Node geometry (D8): an image node is as wide as its picture wants. ------

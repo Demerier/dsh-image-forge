@@ -1955,6 +1955,91 @@ test('right-click offers the §6.4 menu for blank canvas and for an image node',
 })
 
 // ---------------------------------------------------------------------------
+// G01/G23/G05/G12: canvas feel — wheel semantics, edge width, zoom ceiling and
+// where a paste lands. The camera maths is unit-tested in studio-canvas.test.mjs;
+// what these assert is that the *bundle* actually ships that behaviour and that
+// the paste flows through the real handlers.
+// ---------------------------------------------------------------------------
+
+test('the canvas bundle ships the pan/zoom wheel split, a pixel-wide edge and the hint', () => {
+  // G01: the wheel handler is registered natively (React's wheel listener is
+  // passive, so `preventDefault` there is ignored), which means the harness
+  // cannot call it. The decision function is unit-tested; this is the other half
+  // — that the panel routes the wheel through it instead of the old
+  // "any wheel zooms" branch.
+  assert.ok(CLIENT_SOURCE.includes('wheelIntent('), 'the wheel handler must read the shared decision helper')
+  assert.ok(CLIENT_SOURCE.includes('panByScroll('), 'a bare wheel must pan through the scroll helper')
+  assert.ok(!CLIENT_SOURCE.includes('zoomAt(current, event.deltaY < 0'), 'the old zoom-on-every-wheel branch must be gone')
+  // The user-facing legend (§G01): one line in the canvas corner, no toast.
+  assert.ok(CLIENT_SOURCE.includes('滚轮平移 · Ctrl/⌘+滚轮缩放'), 'the wheel gesture has to be stated somewhere on screen')
+  // G23: an SVG stroke in the world layer scales with the zoom, so at 0.1× every
+  // wire was a fifth of a pixel wide. `vector-effect` is what pins it to screen px.
+  assert.ok(CLIENT_SOURCE.includes('vector-effect:non-scaling-stroke'), 'edges must keep a screen-pixel stroke width')
+})
+
+test('Ctrl+V lands under the pointer, and at the view centre only without one', async () => {
+  // G12. The clipboard is memory-only (§6.3), so the flow is: select → Ctrl+C →
+  // point the canvas somewhere → Ctrl+V, and the board write carries the spot.
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    const canvas = canvasElement(panel)
+    // Select the first picture and copy it.
+    nodeElements(panel)[0].props.onPointerDown(pointerEvent({ clientX: 10, clientY: 10 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('c', { ctrl: true }))
+    await settle(panel)
+
+    // Point at world (600, 300) — the camera is at 1:1 and the harness canvas box
+    // starts at 0,0, so clientX/clientY are the world coordinates.
+    canvasElement(panel).props.onPointerDown(pointerEvent({ clientX: 600, clientY: 300 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+
+    canvasElement(panel).props.onKeyDown(keyEvent('v', { ctrl: true }))
+    await settle(panel)
+
+    const copies = boardMutations(network).filter((body) => body.action === 'copy-item')
+    assert.equal(copies.length, 1, 'the paste must go through the cross-board copy route')
+    assert.equal(copies[0].x, 600, 'the paste lands at the pointer x, not at the view centre')
+    assert.equal(copies[0].y, 300, 'and at the pointer y')
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('a paste with no pointer history still lands at the view centre', async () => {
+  // The fallback matters: the keyboard-only path (a fresh panel, no click) has no
+  // pointer to land on, and inventing (0,0) would be worse than the centre.
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    const canvas = canvasElement(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('c', { ctrl: true }))
+    await settle(panel)
+    // Clear the selection without touching the canvas, so no pointer is recorded.
+    canvasElement(panel).props.onKeyDown(keyEvent('Escape'))
+    await settle(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('v', { ctrl: true }))
+    await settle(panel)
+    const copies = boardMutations(network).filter((body) => body.action === 'copy-item')
+    // No pointer was ever recorded, and the harness has no measurable canvas
+    // element (`canvasRef` stays null), so this is the documented bottom rung of
+    // the ladder: (0,0). The point is that the paste still writes — the pointer
+    // rule must not become a crash or a silent no-op.
+    assert.equal(copies.length, 3, 'every copied node is written')
+    assert.deepEqual(copies.map((body) => [body.x, body.y]), [[0, 0], [0, 0], [0, 0]])
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // T22: the install → first picture stepper (P6).
 // ---------------------------------------------------------------------------
 

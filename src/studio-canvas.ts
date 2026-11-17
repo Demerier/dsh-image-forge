@@ -50,10 +50,14 @@ export const CANVAS_MIN_ZOOM = 0.1
 /**
  * Largest zoom the canvas allows.
  *
- * Imported assets are worth inspecting pixel by pixel, so a node's 200-world-unit
- * picture area may be blown up to 800 screen pixels.
+ * A generated picture is 1024–2048 px wide and the picture area in a node is at
+ * most {@link MAX_NODE_WIDTH} world units: at 4× the largest node is still under
+ * 2000 screen pixels, so the detail a 2048-px PNG carries was unreachable. 8×
+ * is what "look at the eyes" needs (G05) and what the mainstream canvas tools
+ * allow (Figma 4–32×, tldraw 8×); the in-canvas lightbox (G22) is the path for
+ * pixel-peeping beyond that.
  */
-export const CANVAS_MAX_ZOOM = 4
+export const CANVAS_MAX_ZOOM = 8
 
 /** Camera as stored in component state. */
 export interface Camera {
@@ -150,6 +154,101 @@ export function panBy(camera: Camera, delta: Point): Camera {
 }
 
 /**
+ * Pan by a **scroll** delta (a wheel event's `deltaX`/`deltaY`), not a drag.
+ *
+ * The two directions are opposites and mixing them up is the classic "the canvas
+ * scrolls the wrong way" bug. A drag delta of `+100` means the content was pulled
+ * 100 px right, so the camera moves left. A scroll delta of `+100` means *read
+ * further down*, so the camera moves down in world space and the content slides
+ * up. Both are divided by the zoom so one wheel notch scrolls the same amount of
+ * content at any scale.
+ */
+export function panByScroll(camera: Camera, scroll: Point): Camera {
+  return {
+    zoom: camera.zoom,
+    x: camera.x + scroll.x / camera.zoom,
+    y: camera.y + scroll.y / camera.zoom,
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Wheel semantics (G01)                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** `WheelEvent.deltaMode`: the delta is in pixels. */
+export const WHEEL_MODE_PIXEL = 0
+/** `WheelEvent.deltaMode`: the delta is in lines of text. */
+export const WHEEL_MODE_LINE = 1
+/** `WheelEvent.deltaMode`: the delta is in pages. */
+export const WHEEL_MODE_PAGE = 2
+
+/** Pixels one line of a `deltaMode: 1` wheel event stands for. */
+export const WHEEL_LINE_PIXELS = 16
+/** Pixels one page of a `deltaMode: 2` wheel event stands for. */
+export const WHEEL_PAGE_PIXELS = 800
+/** How much one zoom notch multiplies the zoom (kept from the old handler). */
+export const WHEEL_ZOOM_STEP = 1.12
+
+/** The slice of a `WheelEvent` {@link wheelIntent} reads. */
+export interface WheelEventLike {
+  readonly deltaX?: number
+  readonly deltaY?: number
+  /** `WheelEvent.deltaMode`; Firefox reports lines, some drivers report pages. */
+  readonly deltaMode?: number
+  /** Ctrl makes a wheel event a zoom — and a trackpad pinch reports Ctrl too. */
+  readonly ctrlKey?: boolean
+  /** ⌘ does the same on macOS, where pinch arrives as a ctrlKey-less meta event. */
+  readonly metaKey?: boolean
+}
+
+/** What one wheel event should do to the camera. */
+export type WheelIntent =
+  | { readonly kind: 'zoom'; readonly factor: number }
+  | { readonly kind: 'pan'; readonly delta: Point }
+
+/**
+ * Normalise a wheel event's deltas to pixels.
+ *
+ * `deltaMode` is the reason a wheel can feel an order of magnitude too fast: one
+ * notch of a line-mode wheel is `3`, of a pixel-mode wheel `100`, of a page-mode
+ * wheel `1`. Without this the same physical gesture scrolls 3 px in Firefox and
+ * a whole page in an old driver.
+ */
+export function wheelScrollPixels(event: WheelEventLike): Point {
+  const rawX = Number.isFinite(event.deltaX) ? (event.deltaX as number) : 0
+  const rawY = Number.isFinite(event.deltaY) ? (event.deltaY as number) : 0
+  const mode = event.deltaMode === undefined ? WHEEL_MODE_PIXEL : event.deltaMode
+  const scale = mode === WHEEL_MODE_LINE ? WHEEL_LINE_PIXELS : mode === WHEEL_MODE_PAGE ? WHEEL_PAGE_PIXELS : 1
+  return { x: rawX * scale, y: rawY * scale }
+}
+
+/**
+ * What a wheel event means on the canvas (G01).
+ *
+ * The mainstream split, and the one the audit asked for: a bare wheel **scrolls**
+ * the canvas, while Ctrl/⌘+wheel **zooms**. A trackpad pinch is not a special
+ * case — browsers report it as a wheel event with `ctrlKey: true`, which is
+ * exactly the zoom branch. The old handler zoomed on every wheel event and
+ * ignored the modifier, so a two-finger scroll on a trackpad zoomed the canvas
+ * instead of moving it, which is what "feels nothing like 即梦/Figma" meant.
+ *
+ * A zero delta is not a zoom notch: a pinch that arrives with `deltaY === 0`
+ * (pure horizontal) must not creep the zoom.
+ *
+ * @param event - the wheel event, or anything shaped like its delta fields.
+ * @returns `zoom` with the factor to pass to {@link zoomAt}, or `pan` with the
+ *   scroll delta to pass to {@link panByScroll}.
+ */
+export function wheelIntent(event: WheelEventLike): WheelIntent {
+  const delta = wheelScrollPixels(event)
+  if (event.ctrlKey === true || event.metaKey === true) {
+    if (delta.y === 0) return { kind: 'zoom', factor: 1 }
+    return { kind: 'zoom', factor: delta.y < 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP }
+  }
+  return { kind: 'pan', delta }
+}
+
+/**
  * A camera that frames every node with `padding` world units of margin.
  *
  * Returns the unchanged camera when there is nothing to frame — an empty
@@ -204,22 +303,104 @@ export function centerOn(
   }
 }
 
+/** World-unit gap between two neighbouring nodes, in both axes. */
+export const NODE_GAP = 40
 /**
- * Where to drop a new node: just right of the right-most node, keeping its top
- * edge aligned with the top-most one.
+ * How far right of its parent a first child lands, in world units (G15).
  *
- * The point is that a fresh result is always visible without the user hunting
- * for it, and two results never land on top of each other.
+ * Deliberately wider than {@link NODE_GAP}: the wire from parent to child is a
+ * cubic that needs horizontal room to read as a wire rather than a slash, and
+ * 320 keeps two node-widths of air so a column stack never touches the parent
+ * column.
  */
-export function nextNodeSpot(rects: readonly Rect[]): Point {
-  if (rects.length === 0) return { x: 0, y: 0 }
-  let right = Number.NEGATIVE_INFINITY
+export const CHILD_OFFSET_X = 320
+/** How many rows one child column holds before the next column opens. */
+export const CHILD_MAX_ROWS = 6
+/** How many child columns are searched before giving up on the parent's side. */
+export const CHILD_MAX_COLUMNS = 16
+
+/**
+ * Whether {@link fitCamera} would have to clamp, i.e. the board does **not** fit
+ * at {@link CANVAS_MIN_ZOOM}.
+ *
+ * This is the "silent failure" the audit found (G15): `fitCamera` clamps at the
+ * zoom floor, so a board wider than the viewport at 10% is framed *around* its
+ * centre with the far columns still off-screen, and the user sees a 适应 that
+ * appears to do nothing wrong. `fitCamera` cannot report it without changing its
+ * return type, so the view asks this instead and says so in the status line.
+ */
+export function fitNeedsClamp(rects: readonly Rect[], viewport: { width: number; height: number }, padding = 48): boolean {
+  if (viewport.width <= 0 || viewport.height <= 0 || rects.length === 0) return false
+  let left = Number.POSITIVE_INFINITY
   let top = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
   for (const rect of rects) {
-    right = Math.max(right, rect.x + rect.width)
+    left = Math.min(left, rect.x)
     top = Math.min(top, rect.y)
+    right = Math.max(right, rect.x + rect.width)
+    bottom = Math.max(bottom, rect.y + rect.height)
   }
-  return { x: right + 40, y: top }
+  const width = Math.max(1, right - left + padding * 2)
+  const height = Math.max(1, bottom - top + padding * 2)
+  return Math.min(viewport.width / width, viewport.height / height) < CANVAS_MIN_ZOOM
+}
+
+/**
+ * Where to drop a new node.
+ *
+ * **Without an origin** — an imported file, a layout node, a copy from another
+ * board — the old placement stands: right of the right-most node, top-aligned
+ * with the top-most one. Such a node has no parent to grow from, and the eye
+ * already expects "append at the end".
+ *
+ * **With an origin** (G15) — the parent a result or a task belongs to — the
+ * first slot is {@link CHILD_OFFSET_X} world units to the parent's right, at the
+ * parent's top, and every later child of the same parent takes the next free
+ * row in that column before opening the column after it. Before this, N
+ * children of one node were laid out as one endless row: `fit` then reached the
+ * 10% zoom floor after roughly 36 nodes and (G15) silently stopped framing the
+ * far ones. A column stack keeps a fan-out compact enough to stay framable and
+ * keeps the lineage edges short enough to read.
+ *
+ * A slot counts as taken when its rectangle intersects anything already on the
+ * board — the parent included, so a child never lands on top of its own parent.
+ *
+ * @param rects - every node already on the board.
+ * @param origin - the parent to grow from; omitted for parent-less placement.
+ * @param size - the new node's own size; defaults to the origin's (or the
+ *   canvas default when there is no origin).
+ * @returns the world position of the top-left corner of the new node.
+ */
+export function nextNodeSpot(rects: readonly Rect[], origin?: Rect, size?: { width: number; height: number }): Point {
+  if (rects.length === 0 && origin === undefined) return { x: 0, y: 0 }
+  if (origin === undefined) {
+    let right = Number.NEGATIVE_INFINITY
+    let top = Number.POSITIVE_INFINITY
+    for (const rect of rects) {
+      right = Math.max(right, rect.x + rect.width)
+      top = Math.min(top, rect.y)
+    }
+    return { x: right + NODE_GAP, y: top }
+  }
+  const width = size?.width ?? origin.width
+  const height = size?.height ?? origin.height
+  const columnStep = width + NODE_GAP
+  const rowStep = height + NODE_GAP
+  for (let column = 0; column < CHILD_MAX_COLUMNS; column += 1) {
+    for (let row = 0; row < CHILD_MAX_ROWS; row += 1) {
+      const spot = {
+        x: origin.x + CHILD_OFFSET_X + column * columnStep,
+        y: origin.y + row * rowStep,
+      }
+      const candidate: Rect = { ...spot, width, height }
+      const taken = rects.some((rect) => rectsIntersect(candidate, rect))
+      if (!taken) return spot
+    }
+  }
+  // Every slot around this parent is full (a 96-slot fan-out): fall back to the
+  // append-at-the-end rule rather than stacking two nodes on one spot.
+  return nextNodeSpot(rects)
 }
 
 /**

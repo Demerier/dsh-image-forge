@@ -67,14 +67,17 @@ import {
   clampZoom,
   edgePath,
   fitCamera,
+  fitNeedsClamp,
   nextNodeSpot,
   nodeDisplaySize,
   nodeIndex,
   panBy,
+  panByScroll,
   screenToWorld,
   visibleEdges,
   visibleNodes,
   visibleWorldRect,
+  wheelIntent,
   zoomAt,
   zoomLabel,
   type Camera,
@@ -1172,6 +1175,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const gestureRef = useRef<Gesture | undefined>(undefined)
   // Latest pointer position and the one queued frame that will apply it (§10.3).
   const pointerRef = useRef<Point | undefined>(undefined)
+  // The last place the pointer was over the canvas, **viewport-relative** (G12).
+  // A paste lands there instead of at the view centre, which is where the eye is.
+  // Unset until the user has pointed at the canvas once, so the paste falls back
+  // to the centre rather than inventing a spot.
+  const pointerScreenRef = useRef<Point | undefined>(undefined)
   const frameRef = useRef<number | undefined>(undefined)
   // The marquee rectangle is screen-space DOM, not part of the scaled layer
   // (§6.1: its border must not zoom).
@@ -2224,17 +2232,24 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     setSelectedId(batch.id)
   }, [])
 
-  // Wheel zoom is registered natively, not through `onWheel`: React attaches
-  // wheel listeners passively, so `preventDefault` there is ignored and the
-  // whole settings page scrolls while the canvas zooms.
+  // Wheel semantics (G01): a bare wheel scrolls the canvas, Ctrl/⌘+wheel zooms.
+  // Registered natively, not through `onWheel`: React attaches wheel listeners
+  // passively, so `preventDefault` there is ignored and the whole settings page
+  // scrolls while the canvas moves.
   useEffect(() => {
     const element = canvasRef.current
     if (element === null || view !== 'canvas') return
     const onWheel = (event: WheelEvent): void => {
       event.preventDefault()
+      const intent = wheelIntent(event)
+      if (intent.kind === 'pan') {
+        setCamera((current) => panByScroll(current, intent.delta))
+        return
+      }
+      if (intent.factor === 1) return
       const box = element.getBoundingClientRect()
       const anchor = { x: event.clientX - box.left, y: event.clientY - box.top }
-      setCamera((current) => zoomAt(current, event.deltaY < 0 ? 1.12 : 1 / 1.12, anchor))
+      setCamera((current) => zoomAt(current, intent.factor, anchor))
     }
     element.addEventListener('wheel', onWheel, { passive: false })
     return () => { element.removeEventListener('wheel', onWheel) }
@@ -2506,6 +2521,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     const target = event.target as HTMLElement
     // Any click outside the menu dismisses it (§6.4).
     setMenu(undefined)
+    // G12: remember where the pointer is, in viewport pixels, so a later paste
+    // lands under it. Recorded before the node check because a click on a node
+    // is just as good a "the user is looking here" signal as a click on blank.
+    const wholeBox = event.currentTarget.getBoundingClientRect()
+    pointerScreenRef.current = { x: event.clientX - wholeBox.left, y: event.clientY - wholeBox.top }
     // Nodes start their own drag; anything else reaches this handler.
     if (target.closest('.dsh-forge-node') !== null) return
     // §6.3 makes the canvas container `tabIndex=0`; clicking it is how it gets
@@ -2544,6 +2564,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (event.button !== 0) return
     event.stopPropagation()
     setMenu(undefined)
+    // G12: the node stopped the event, so the canvas handler never saw it and
+    // this is the only place a click on a picture can record the pointer.
+    const canvasBox = canvasRef.current?.getBoundingClientRect()
+    if (canvasBox !== undefined) {
+      pointerScreenRef.current = { x: event.clientX - canvasBox.left, y: event.clientY - canvasBox.top }
+    }
     event.currentTarget.setPointerCapture(event.pointerId)
     const additive = event.ctrlKey || event.metaKey
     let next: ReadonlySet<string>
@@ -2907,16 +2933,27 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     setNote(`已复制 ${String(itemIds.length)} 个节点；切到目标画板后 Ctrl+V 粘贴。`)
   }, [selection])
 
-  /** Ctrl+V (§6.3): copy the clipboard onto the open board at the view centre. */
+  /**
+   * Ctrl+V (§6.3): copy the clipboard onto the open board.
+   *
+   * The landing point is the last place the pointer was over the canvas (G12) —
+   * pasting at the view centre put the copy somewhere the user was not looking,
+   * which on a 100-node board reads as "nothing happened". With no pointer
+   * history yet (the panel just mounted, or the keyboard was used only) the old
+   * centre rule stands.
+   */
   const pasteClipboard = useCallback(async () => {
     const stored = clipboardRef.current
     const board = boardIdRef.current
     if (stored === undefined || board === undefined) return
     const element = canvasRef.current
     const box = element === null ? undefined : element.getBoundingClientRect()
-    const center = box === undefined
-      ? { x: 0, y: 0 }
-      : screenToWorld(cameraRef.current, { x: box.width / 2, y: box.height / 2 })
+    const pointed = pointerScreenRef.current
+    const center = pointed !== undefined
+      ? screenToWorld(cameraRef.current, pointed)
+      : box === undefined
+        ? { x: 0, y: 0 }
+        : screenToWorld(cameraRef.current, { x: box.width / 2, y: box.height / 2 })
     const created: string[] = []
     let offset = 0
     for (const itemId of stored.itemIds) {
@@ -4592,6 +4629,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               references.length === 0
                 ? '选中图片后可「用作参考」，下一轮会从它拉一条线出来。'
                 : `已选 ${String(references.length)} 张参考图，下一轮将是改图。`,
+              // G01: the one-line hint the new wheel split needs. Not a toast and
+              // not a modal — the corner of the canvas is where the gesture is.
+              createElement('span', { className: 'dsh-forge-canvas-foot-hint' }, '滚轮平移 · Ctrl/⌘+滚轮缩放'),
             ),
           )
           : view === 'assets'
