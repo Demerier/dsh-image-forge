@@ -21,8 +21,10 @@ import { join } from 'node:path'
 import {
   activeBoardId,
   boardsRoot,
+  copyItem,
   createBoard,
   defaultBoardName,
+  moveItem,
   deleteBoard,
   listAssets,
   listBoards,
@@ -405,6 +407,100 @@ test('concurrent writeImages calls never overwrite each other', async () => {
     const indices = runs.flat().map((written) => written.index).sort((a, b) => a - b)
     assert.deepEqual(indices, [1, 2, 3, 4], 'each concurrent call must claim its own free index')
     for (const written of runs.flat()) assert.ok(existsSync(written.path))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('copying an item to another board shares the file but not the id', async () => {
+  const dir = makeDir()
+  try {
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, 'shared.png')
+    writeFileSync(path, 'png')
+    const source = await recordItems(dir, undefined, [
+      item(dir, 'shared', { path, markdownPath: path, parents: ['i-parent'] }),
+    ])
+    const target = await createBoard(dir, '目标板')
+    const copied = await copyItem(dir, source.board.id, source.items[0].id, target.id)
+    assert.ok(copied !== undefined)
+    assert.notEqual(copied.item.id, source.items[0].id, 'the copy gets a board-scoped id of its own')
+    assert.equal(copied.item.path, path, 'the two boards share the one PNG')
+    assert.deepEqual(copied.item.parents, ['i-parent'], 'lineage travels with the picture')
+
+    const sourceAfter = await readBoard(dir, source.board.id)
+    assert.equal(sourceAfter.items.length, 1, 'the source board is untouched')
+    const targetAfter = await readBoard(dir, target.id)
+    assert.deepEqual(targetAfter.items.map((entry) => entry.path), [path])
+
+    // A destination placement is respected; an omitted one uses the target grid.
+    const placed = await copyItem(dir, source.board.id, source.items[0].id, target.id, { x: 500, y: 12 })
+    assert.equal(placed.item.x, 500)
+    assert.equal(placed.item.y, 12)
+    // Unknown source/item/target are refusals, not partial writes.
+    assert.equal(await copyItem(dir, source.board.id, 'imissing', target.id), undefined)
+    assert.equal(await copyItem(dir, 'bmissing', source.items[0].id, target.id), undefined)
+    assert.equal(await copyItem(dir, source.board.id, source.items[0].id, 'bmissing'), undefined)
+
+    // A copy inside one board duplicates the item next to it, new id included.
+    const duplicate = await copyItem(dir, source.board.id, source.items[0].id, source.board.id)
+    assert.notEqual(duplicate.item.id, source.items[0].id)
+    assert.equal((await readBoard(dir, source.board.id)).items.length, 2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('moving an item keeps its id and leaves the source board', async () => {
+  const dir = makeDir()
+  try {
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, 'moving.png')
+    writeFileSync(path, 'png')
+    const source = await recordItems(dir, undefined, [item(dir, 'moving', { path, markdownPath: path })])
+    const target = await createBoard(dir, '目标板')
+    const itemId = source.items[0].id
+
+    const moved = await moveItem(dir, source.board.id, itemId, target.id, { x: 77, y: 88 })
+    assert.ok(moved !== undefined)
+    assert.equal(moved.item.id, itemId, 'ids are board-scoped, so the id survives the move')
+    assert.equal(moved.item.x, 77)
+    assert.equal(moved.item.y, 88)
+    assert.deepEqual((await readBoard(dir, source.board.id)).items, [], 'the source board no longer has it')
+    assert.deepEqual((await readBoard(dir, target.id)).items.map((entry) => entry.id), [itemId])
+    assert.ok(existsSync(path), 'moving metadata never moves the PNG')
+
+    // Unknown source/item/target are refusals, not partial writes.
+    assert.equal(await moveItem(dir, source.board.id, 'imissing', target.id), undefined)
+    assert.equal(await moveItem(dir, 'bmissing', itemId, target.id), undefined)
+    assert.equal(await moveItem(dir, target.id, itemId, 'bmissing'), undefined)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('deleting a file another board shares is refused, and the item still leaves', async () => {
+  const dir = makeDir()
+  try {
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, 'keep.png')
+    writeFileSync(path, 'png')
+    const source = await recordItems(dir, undefined, [item(dir, 'keep', { path, markdownPath: path })])
+    const target = await createBoard(dir, '目标板')
+    await copyItem(dir, source.board.id, source.items[0].id, target.id)
+
+    const removed = await removeItem(dir, source.board.id, source.items[0].id, { deleteFile: true })
+    assert.equal(removed.fileDeleted, false, 'a shared PNG must not be deleted')
+    assert.deepEqual(removed.sharedWith, [target.id], 'the refusal names the board that still points at it')
+    assert.ok(existsSync(path), 'the file is still on disk for the other board')
+    assert.deepEqual((await readBoard(dir, source.board.id)).items, [], 'the item still leaves the board')
+
+    // Once the last sharer is dropped, the opt-in delete goes through.
+    const targetItems = (await readBoard(dir, target.id)).items
+    const last = await removeItem(dir, target.id, targetItems[0].id, { deleteFile: true })
+    assert.equal(last.fileDeleted, true)
+    assert.deepEqual(last.sharedWith, [])
+    assert.equal(existsSync(path), false)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

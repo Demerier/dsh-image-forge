@@ -55,6 +55,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
@@ -62,6 +63,7 @@ import {
   CANVAS_NODE_HEIGHT,
   CANVAS_NODE_WIDTH,
   buildEdges,
+  centerOn,
   clampZoom,
   edgePath,
   fitCamera,
@@ -69,6 +71,7 @@ import {
   nodeDisplaySize,
   nodeIndex,
   panBy,
+  screenToWorld,
   visibleEdges,
   visibleNodes,
   visibleWorldRect,
@@ -110,6 +113,8 @@ import {
   STUDIO_CONFIG_ROUTE,
   STUDIO_EVENTS_ROUTE,
   STUDIO_GENERATE_ROUTE,
+  STUDIO_IMPORT_MAX_ITEM_BYTES,
+  STUDIO_IMPORT_ROUTE,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_MAX_REFERENCES,
@@ -126,6 +131,7 @@ import {
   type StudioConfigResponse,
   type StudioGenerateResponse,
   type StudioImage,
+  type StudioImportResponse,
   type StudioOptimizeResponse,
   type StudioPromptStyle,
   type StudioProgressEvent,
@@ -451,6 +457,36 @@ function batchesFromBoard(items: readonly BoardItem[]): Batch[] {
     .reverse()
 }
 
+/**
+ * Custom drag MIME for one asset card (§7.1).
+ *
+ * A private type keeps the canvas from accepting paragraph text or a dragged
+ * link as if it were a library item; the OS-file path uses `dataTransfer.files`
+ * instead and never carries this type.
+ */
+const FORGE_ASSET_MIME = 'application/x-dsh-forge-asset'
+
+/** What an asset drag carries: the board it lives on and the item. */
+interface DraggedAsset {
+  readonly boardId: string
+  readonly itemId: string
+}
+
+/** Parse the drag payload, refusing anything that is not exactly both strings. */
+function parseDraggedAsset(raw: string): DraggedAsset | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.boardId !== 'string' || record.boardId.length === 0) return undefined
+  if (typeof record.itemId !== 'string' || record.itemId.length === 0) return undefined
+  return { boardId: record.boardId, itemId: record.itemId }
+}
+
 /** Read a JSON body defensively: a proxy error page is not JSON. */
 async function readJson(response: Response): Promise<Record<string, unknown> | undefined> {
   try {
@@ -488,8 +524,15 @@ function upsertBoard(list: readonly BoardSummary[], board: BoardSummary): BoardS
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
 }
 
-/** One board mutation; resolves to the host's refusal message, if any. */
-async function postBoard(body: Record<string, unknown>): Promise<string | undefined> {
+/**
+ * One board mutation, keeping the host's JSON body on success.
+ *
+ * The cross-board verbs (C12) need the written item back — a copy's id, its
+ * landing spot — so they can put a node on the canvas without a second read.
+ * The older callers only care about the refusal, so {@link postBoard} stays the
+ * same one-line API they were written against.
+ */
+async function postBoardRaw(body: Record<string, unknown>): Promise<{ error?: string; payload?: Record<string, unknown> }> {
   try {
     const response = await fetch(STUDIO_BOARD_ROUTE, {
       method: 'POST',
@@ -498,11 +541,16 @@ async function postBoard(body: Record<string, unknown>): Promise<string | undefi
       body: JSON.stringify(body),
     })
     const payload = await readJson(response)
-    if (response.ok) return undefined
-    return typeof payload?.error === 'string' ? payload.error : `画板操作失败（HTTP ${String(response.status)}）`
+    if (response.ok) return payload === undefined ? {} : { payload }
+    return { error: typeof payload?.error === 'string' ? payload.error : `画板操作失败（HTTP ${String(response.status)}）` }
   } catch (cause) {
-    return cause instanceof Error ? cause.message : String(cause)
+    return { error: cause instanceof Error ? cause.message : String(cause) }
   }
+}
+
+/** One board mutation; resolves to the host's refusal message, if any. */
+async function postBoard(body: Record<string, unknown>): Promise<string | undefined> {
+  return (await postBoardRaw(body)).error
 }
 
 /** The props the sidebar slots hand a `sidebar.panellist` entry. */
@@ -898,6 +946,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   // §4.5: "编辑参数重发" refills the form and marks the failed node; the next
   // form generation replaces that node in place instead of adding a second one.
   const pendingReplaceRef = useRef<{ readonly id: string } | undefined>(undefined)
+  // C12: the cross-board clipboard is memory-only (§6.3: never the system
+  // clipboard), and a reveal request can wait for the canvas to be mounted.
+  const clipboardRef = useRef<{ readonly boardId: string; readonly itemIds: readonly string[] } | undefined>(undefined)
+  const pendingRevealRef = useRef<string | undefined>(undefined)
   const referencesRef = useRef<HeldReference[]>([])
   referencesRef.current = references
   const nodesRef = useRef<CanvasNode[]>([])
@@ -1992,6 +2044,237 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     scheduleLayout()
   }, [flushPointer, moveCommand, pushCommand, scheduleLayout])
 
+  /* ------------------------------------------------------------------------ */
+  /* Asset flow (C12 §7): cards → canvas, cross-board copy/move, OS drops      */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Centre the camera on one node (§7.4).
+   *
+   * If the canvas is not mounted yet (the panel was on the list/asset view),
+   * the id is remembered and the effect below reveals it as soon as the canvas
+   * exists — "wait for the board data, then compute the coordinates".
+   */
+  const revealNodeId = useCallback((id: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    const element = canvasRef.current
+    if (node === undefined || element === null) {
+      pendingRevealRef.current = id
+      return
+    }
+    pendingRevealRef.current = undefined
+    const box = element.getBoundingClientRect()
+    const rect = nodeRect(node)
+    setCamera(centerOn(
+      { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+      { width: box.width, height: box.height },
+      cameraRef.current.zoom,
+    ))
+  }, [])
+
+  useEffect(() => {
+    if (view !== 'canvas') return
+    const pending = pendingRevealRef.current
+    if (pending === undefined) return
+    revealNodeId(pending)
+  }, [boardId, revealNodeId, view])
+
+  /** Put one item returned by the host onto the canvas at its stored spot. */
+  const appendBoardItem = useCallback((item: BoardItem, board?: BoardSummary) => {
+    const fallback = nextNodeSpot(nodesRef.current.map(nodeRect))
+    const node: ImageCanvasNode = {
+      kind: 'image',
+      id: item.id,
+      image: {
+        id: item.id,
+        path: item.path,
+        markdownPath: item.markdownPath,
+        width: item.width,
+        height: item.height,
+        bytes: item.bytes,
+        mediaType: item.mediaType,
+      },
+      batchId: item.batchId,
+      x: item.x ?? fallback.x,
+      y: item.y ?? fallback.y,
+      parents: item.parents,
+    }
+    writeNodes([...nodesRef.current, node])
+    if (board !== undefined) setBoards((current) => upsertBoard(current, board))
+    scheduleLayout()
+    return node
+  }, [scheduleLayout, writeNodes])
+
+  /** Begin dragging one asset card (§7.1: a private MIME, not plain text). */
+  const startAssetDrag = useCallback((event: ReactDragEvent<HTMLDivElement>, asset: StudioAsset) => {
+    const data = event.dataTransfer
+    if (data === null || data === undefined) return
+    data.setData(FORGE_ASSET_MIME, JSON.stringify({ boardId: asset.boardId, itemId: asset.id } satisfies DraggedAsset))
+    data.setData('text/plain', asset.path)
+    data.effectAllowed = 'copyMove'
+  }, [])
+
+  /**
+   * A dropped library asset (§7.1).
+   *
+   * Same board means the node is already here, so the drop repositions it (one
+   * undo step, one debounced save). Cross-board goes through the §7.2 route:
+   * copy by default, move while Alt is held, landing at the pointer.
+   */
+  const dropAsset = useCallback(async (dragged: DraggedAsset, world: Point, move: boolean) => {
+    const board = boardIdRef.current
+    if (board === undefined) {
+      setBoardError('先打开一个画板，再把素材拖进来')
+      return
+    }
+    if (dragged.boardId === board) {
+      const node = nodesRef.current.find((entry) => entry.id === dragged.itemId)
+      if (node === undefined) return
+      if (node.x === world.x && node.y === world.y) return
+      const before = new Map([[node.id, { x: node.x, y: node.y }]])
+      const after = new Map([[node.id, { x: world.x, y: world.y }]])
+      writeNodes(nodesRef.current.map((entry) => (entry.id === node.id ? { ...entry, x: world.x, y: world.y } : entry)))
+      pushCommand(moveCommand('drag-in', before, after))
+      scheduleLayout()
+      return
+    }
+    const action = move ? 'move-item' : 'copy-item'
+    const { error, payload } = await postBoardRaw({
+      action,
+      board: dragged.boardId,
+      item: dragged.itemId,
+      toBoard: board,
+      x: world.x,
+      y: world.y,
+    })
+    if (error !== undefined) {
+      setBoardError(error)
+      return
+    }
+    const item = payload?.item as BoardItem | undefined
+    if (item === undefined) return
+    const node = appendBoardItem(item, payload?.board as BoardSummary | undefined)
+    setSelection(new Set([node.id]))
+    revealNodeId(node.id)
+  }, [appendBoardItem, moveCommand, pushCommand, revealNodeId, scheduleLayout, writeNodes])
+
+  /**
+   * Import OS files dropped on the canvas (DD10/§7.3).
+   *
+   * One request per file, landing rightwards from the drop point. A file that
+   * is not a picture is refused up front with a message instead of being
+   * uploaded only to be sniffed away.
+   */
+  const importFiles = useCallback(async (files: readonly File[], world: Point) => {
+    const board = boardIdRef.current
+    for (const [index, file] of files.entries()) {
+      if (!(file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name))) {
+        setBoardError(`只支持 PNG / JPEG / WebP，已跳过 ${file.name}`)
+        continue
+      }
+      if (file.size > STUDIO_IMPORT_MAX_ITEM_BYTES) {
+        setBoardError(`${file.name} 超过 32 MB 上限，已跳过`)
+        continue
+      }
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      try {
+        const response = await fetch(STUDIO_IMPORT_ROUTE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            name: file.name,
+            mediaType: mediaTypeOf(file),
+            data: toBase64(bytes),
+            ...(board === undefined ? {} : { board }),
+            x: world.x + index * (CANVAS_NODE_WIDTH + 36),
+            y: world.y,
+          }),
+        })
+        const payload = await readJson(response)
+        const item = payload?.item as BoardItem | undefined
+        if (!response.ok || item === undefined) {
+          setBoardError(typeof payload?.error === 'string' ? payload.error : `导入失败（HTTP ${String(response.status)}）`)
+          continue
+        }
+        const node = appendBoardItem(item, payload?.board as BoardSummary | undefined)
+        setSelection(new Set([node.id]))
+      } catch (cause) {
+        setBoardError(cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+  }, [appendBoardItem])
+
+  /** Allow a drop only when it carries a library asset or OS files. */
+  const onCanvasDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    const types = event.dataTransfer?.types
+    if (types === undefined) return
+    if ([...types].includes(FORGE_ASSET_MIME) || [...types].includes('Files')) event.preventDefault()
+  }, [])
+
+  /** The §7 network: same-board reposition, cross-board copy/move, or import. */
+  const onCanvasDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    const box = event.currentTarget.getBoundingClientRect()
+    const world = screenToWorld(cameraRef.current, { x: event.clientX - box.left, y: event.clientY - box.top })
+    const raw = event.dataTransfer?.getData(FORGE_ASSET_MIME)
+    if (typeof raw === 'string' && raw.length > 0) {
+      event.preventDefault()
+      const dragged = parseDraggedAsset(raw)
+      if (dragged !== undefined) void dropAsset(dragged, world, event.altKey)
+      return
+    }
+    const files = [...(event.dataTransfer?.files ?? [])]
+    if (files.length === 0) return
+    event.preventDefault()
+    void importFiles(files, world)
+  }, [dropAsset, importFiles])
+
+  /** Ctrl+C (§6.3): remember the selected pictures together with their board. */
+  const copySelection = useCallback(() => {
+    const board = boardIdRef.current
+    if (board === undefined) return
+    const itemIds = nodesRef.current
+      .filter((node) => isImageNode(node) && selection.has(node.id))
+      .map((node) => node.id)
+    if (itemIds.length === 0) return
+    clipboardRef.current = { boardId: board, itemIds }
+    setNote(`已复制 ${String(itemIds.length)} 个节点；切到目标画板后 Ctrl+V 粘贴。`)
+  }, [selection])
+
+  /** Ctrl+V (§6.3): copy the clipboard onto the open board at the view centre. */
+  const pasteClipboard = useCallback(async () => {
+    const stored = clipboardRef.current
+    const board = boardIdRef.current
+    if (stored === undefined || board === undefined) return
+    const element = canvasRef.current
+    const box = element === null ? undefined : element.getBoundingClientRect()
+    const center = box === undefined
+      ? { x: 0, y: 0 }
+      : screenToWorld(cameraRef.current, { x: box.width / 2, y: box.height / 2 })
+    const created: string[] = []
+    let offset = 0
+    for (const itemId of stored.itemIds) {
+      const { error, payload } = await postBoardRaw({
+        action: 'copy-item',
+        board: stored.boardId,
+        item: itemId,
+        toBoard: board,
+        x: center.x + offset,
+        y: center.y + offset,
+      })
+      if (error !== undefined) {
+        setBoardError(error)
+        continue
+      }
+      const item = payload?.item as BoardItem | undefined
+      if (item === undefined) continue
+      const node = appendBoardItem(item, payload?.board as BoardSummary | undefined)
+      created.push(node.id)
+      offset += 40
+    }
+    if (created.length > 0) setSelection(new Set(created))
+  }, [appendBoardItem])
+
   /** Hand a canvas result back to the form as an edit reference. */
   const referenceNode = useCallback((node: CanvasNode) => {
     // Only a picture can be a reference; a task node has no file to point at.
@@ -2123,11 +2406,16 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       case 'nudge-down':
         nudge('down', event.shiftKey)
         break
+      case 'copy':
+        copySelection()
+        break
+      case 'paste':
+        void pasteClipboard()
+        break
       default:
-        // `copy` / `paste`: C12 (§7.2).
         break
     }
-  }, [fitView, nudge, redoHistory, removeNodes, selection, undoHistory, zoomBy])
+  }, [copySelection, fitView, nudge, pasteClipboard, redoHistory, removeNodes, selection, undoHistory, zoomBy])
 
   /** Space is a held modifier: releasing it hands the pointer back to selection. */
   const onCanvasKeyUp = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -2237,12 +2525,20 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     }
   }, [cancelTask, editTaskParams, fitView, menu?.target, menuIds, referenceNode, removeNodes, retryTask])
 
-  /** Open the board an asset lives on and select it there. */
+  /**
+   * Open the board an asset lives on, select it **and travel to it** (§7.4).
+   *
+   * Switching boards is not enough: the item can be anywhere on the unbounded
+   * canvas, and selecting something off-screen looks like nothing happened.
+   * The reveal waits for the board read (and, when the panel was on another
+   * view, for the canvas to mount) — see `revealNodeId` and its effect.
+   */
   const showOnCanvas = useCallback(async (asset: StudioAsset) => {
     if (boardIdRef.current !== asset.boardId) await selectBoard(asset.boardId)
     setView('canvas')
     selectOnly(asset.id)
-  }, [selectBoard, selectOnly])
+    revealNodeId(asset.id)
+  }, [revealNodeId, selectBoard, selectOnly])
 
   /**
    * Drop one asset from its board.
@@ -2354,7 +2650,16 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         { className: 'dsh-forge-assets-grid' },
         ...assets.map((asset) => createElement(
           'div',
-          { key: `${asset.boardId}:${asset.id}`, className: 'dsh-forge-asset' },
+          {
+            key: `${asset.boardId}:${asset.id}`,
+            className: 'dsh-forge-asset',
+            // §7.1: the card itself is the drag handle; the thumbnail is a link,
+            // so it must not steal the drag with its own default behaviour.
+            draggable: true,
+            'data-asset-board': asset.boardId,
+            'data-asset-id': asset.id,
+            onDragStart: (event: ReactDragEvent<HTMLDivElement>) => { startAssetDrag(event, asset) },
+          },
           createElement(
             'a',
             {
@@ -2363,6 +2668,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               target: '_blank',
               rel: 'noreferrer',
               title: asset.path,
+              draggable: false,
             },
             createElement('img', { src: studioFileUrl(asset.markdownPath), alt: '素材', loading: 'lazy' }),
           ),
@@ -2907,6 +3213,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               onKeyDown: onCanvasKeyDown,
               onKeyUp: onCanvasKeyUp,
               onContextMenu: onCanvasContextMenu,
+              // §7.1/§7.3: a library card or an OS file can be dropped here.
+              onDragOver: onCanvasDragOver,
+              onDrop: onCanvasDrop,
               onBlur: () => {
                 // Focus left with Space still down: the held state must not stick.
                 panRef.current = false

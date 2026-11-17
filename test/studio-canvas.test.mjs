@@ -19,6 +19,7 @@ import {
   MIN_NODE_WIDTH,
   VIEWPORT_CULL_MARGIN,
   buildEdges,
+  centerOn,
   clampZoom,
   edgeBounds,
   edgePath,
@@ -424,4 +425,20 @@ test('a 1000-node board culls to the visible count and indexes every parent once
   const panned = visibleNodes(nodes, { x: 1500, y: 1500, zoom: 1 }, { width: 1200, height: 800 })
   assert.equal(panned.length, 30)
   assert.notDeepEqual(panned.map((entry) => entry.id), shown.map((entry) => entry.id))
+})
+
+test('centerOn puts a world point at the viewport centre and keeps the zoom', () => {
+  const viewport = { width: 800, height: 600 }
+  // C12 §7.4: "定位" must travel to the node, not only select it.
+  const camera = centerOn({ x: 100, y: 50 }, viewport, 2)
+  assert.deepEqual(camera, { x: 100 - 200, y: 50 - 150, zoom: 2 })
+  // The point maps back to exactly the viewport centre under that camera —
+  // the inverse is what makes the jump land where it claims to.
+  assert.deepEqual(worldToScreen(camera, { x: 100, y: 50 }), { x: 400, y: 300 })
+
+  // The user's scale survives the jump...
+  assert.equal(centerOn({ x: 0, y: 0 }, viewport, 0.5).zoom, 0.5)
+  // ...and an unusable zoom falls back to 1 instead of dividing by zero.
+  assert.deepEqual(centerOn({ x: 0, y: 0 }, viewport, 0), { x: -400, y: -300, zoom: 1 })
+  assert.deepEqual(centerOn({ x: 0, y: 0 }, viewport, Number.NaN), { x: -400, y: -300, zoom: 1 })
 })

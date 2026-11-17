@@ -688,6 +688,17 @@ function gridSpot(index: number): { x: number; y: number } {
 }
 
 /**
+ * Case- and separator-insensitive path key.
+ *
+ * Windows reports one file as both `C:\\x\\a.png` and `C:/x/a.png`, and the
+ * shared-file guard must treat a copied item's `path` as the same file as its
+ * source's. Parent resolution already applied the same rule.
+ */
+function pathKey(value: string): string {
+  return value.replace(/\\/g, '/').toLowerCase()
+}
+
+/**
  * Resolve `parentPaths` into item ids of **this board**.
  *
  * Matching is separator- and case-insensitive (Windows reports the same file
@@ -699,11 +710,10 @@ function resolveParents(existing: readonly BoardItem[], incoming: NewBoardItem):
   if (incoming.parents !== undefined) return [...incoming.parents]
   const paths = incoming.parentPaths ?? []
   if (paths.length === 0) return []
-  const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase()
-  const byPath = new Map(existing.map((item) => [normalize(item.path), item.id]))
+  const byPath = new Map(existing.map((item) => [pathKey(item.path), item.id]))
   const ids: string[] = []
   for (const path of paths) {
-    const id = byPath.get(normalize(path))
+    const id = byPath.get(pathKey(path))
     if (id !== undefined && !ids.includes(id)) ids.push(id)
   }
   return ids
@@ -743,6 +753,148 @@ export async function saveLayout(
   })
 }
 
+/** Where an item landed after a cross-board write. */
+export interface BoardTransfer {
+  /** The item as it now lives on the destination board. */
+  item: BoardItem
+  /** Destination board summary. */
+  board: BoardSummary
+}
+
+/** A fresh id that no item on `board` uses. */
+function unusedItemId(board: BoardFile): string {
+  const taken = new Set(board.items.map((item) => item.id))
+  let id = makeItemId()
+  while (taken.has(id)) id = makeItemId()
+  return id
+}
+
+/** Cap a destination board the way `recordItems` does, dropping the oldest. */
+function capItems(board: BoardFile): void {
+  if (board.items.length > MAX_BOARD_ITEMS) board.items = board.items.slice(board.items.length - MAX_BOARD_ITEMS)
+}
+
+/**
+ * Copy one item onto another board (§7.2).
+ *
+ * The copy gets a **new id** (ids are board-scoped) but keeps the file path,
+ * metadata and `parents` verbatim: the lineage travels with the picture, and a
+ * parent id that does not resolve on the destination is simply not drawn — the
+ * same "a missing edge never fails the write" rule `resolveParents` uses. The
+ * PNG is **not** copied, so both boards now share one file; that is exactly why
+ * {@link removeItem}'s `deleteFile` grew the shared-reference guard.
+ *
+ * @param outputDir - the configured output directory.
+ * @param id - source board id.
+ * @param itemId - item to copy.
+ * @param toBoard - destination board id.
+ * @param spot - landing position; omitted means the destination grid.
+ * @returns the copied item and the destination summary, or `undefined` when a
+ *   board or the item does not exist.
+ */
+export async function copyItem(
+  outputDir: string,
+  id: string,
+  itemId: string,
+  toBoard: string,
+  spot?: { x: number; y: number },
+): Promise<BoardTransfer | undefined> {
+  return serialized(boardsRoot(outputDir), async () => {
+    const source = await readBoardFile(outputDir, id)
+    if (source === undefined) return undefined
+    const original = source.items.find((item) => item.id === itemId)
+    if (original === undefined) return undefined
+    if (id === toBoard) {
+      // Same-board copy: a duplicate next to the original is still useful
+      // (branch the same picture twice); the write is one board.
+      const clone: BoardItem = {
+        ...original,
+        id: unusedItemId(source),
+        x: spot?.x ?? gridSpot(source.items.length).x,
+        y: spot?.y ?? gridSpot(source.items.length).y,
+      }
+      source.items.push(clone)
+      capItems(source)
+      source.updatedAt = new Date().toISOString()
+      await saveBoard(outputDir, source)
+      return { item: clone, board: summarize(source) }
+    }
+    const target = await readBoardFile(outputDir, toBoard)
+    if (target === undefined) return undefined
+    const clone: BoardItem = {
+      ...original,
+      id: unusedItemId(target),
+      x: spot?.x ?? gridSpot(target.items.length).x,
+      y: spot?.y ?? gridSpot(target.items.length).y,
+    }
+    target.items.push(clone)
+    capItems(target)
+    target.updatedAt = new Date().toISOString()
+    await saveBoard(outputDir, target)
+    return { item: clone, board: summarize(target) }
+  })
+}
+
+/**
+ * Move one item onto another board (§7.2), keeping its id.
+ *
+ * Cross-board writes cannot be atomic on two JSON files, so the order is
+ * chosen for the failure mode: **destination first, source second**. A crash
+ * between the two leaves the item on both boards (a copy), never on neither;
+ * that is the documented downgrade from §7.2's stop condition.
+ *
+ * @param outputDir - the configured output directory.
+ * @param id - source board id.
+ * @param itemId - item to move.
+ * @param toBoard - destination board id.
+ * @param spot - landing position; omitted means the destination grid.
+ * @returns the moved item and the destination summary, or `undefined`.
+ */
+export async function moveItem(
+  outputDir: string,
+  id: string,
+  itemId: string,
+  toBoard: string,
+  spot?: { x: number; y: number },
+): Promise<BoardTransfer | undefined> {
+  return serialized(boardsRoot(outputDir), async () => {
+    const source = await readBoardFile(outputDir, id)
+    if (source === undefined) return undefined
+    const index = source.items.findIndex((item) => item.id === itemId)
+    if (index < 0) return undefined
+    if (id === toBoard) {
+      // Within one board "move" is a reposition; nothing else changes.
+      const only = source.items[index]
+      if (spot !== undefined) {
+        only.x = spot.x
+        only.y = spot.y
+      }
+      source.updatedAt = new Date().toISOString()
+      await saveBoard(outputDir, source)
+      return { item: only, board: summarize(source) }
+    }
+    const target = await readBoardFile(outputDir, toBoard)
+    if (target === undefined) return undefined
+    const [moving] = source.items.splice(index, 1)
+    // Ids are unique per board, not globally: keep the original id, but mint a
+    // new one if a stale duplicate somehow occupies it on the destination.
+    const collision = target.items.some((item) => item.id === moving.id)
+    const item: BoardItem = {
+      ...moving,
+      ...(collision ? { id: unusedItemId(target) } : {}),
+      x: spot?.x ?? gridSpot(target.items.length).x,
+      y: spot?.y ?? gridSpot(target.items.length).y,
+    }
+    target.items.push(item)
+    capItems(target)
+    target.updatedAt = new Date().toISOString()
+    await saveBoard(outputDir, target)
+    source.updatedAt = new Date().toISOString()
+    await saveBoard(outputDir, source)
+    return { item, board: summarize(target) }
+  })
+}
+
 /** True when `target` is the root itself or lives under it. */
 function isInside(root: string, target: string): boolean {
   if (!isAbsolute(target)) return false
@@ -762,15 +914,18 @@ function isInside(root: string, target: string): boolean {
  * @param outputDir - the configured output directory.
  * @param id - board id.
  * @param itemId - item to drop.
- * @param options - `deleteFile` also removes the PNG from disk.
- * @returns what happened, or `undefined` when the board or item is gone.
+ * @param options - `deleteFile` also removes the PNG from disk, but only when
+ *   no other board still points at the same file (see below).
+ * @returns what happened, or `undefined` when the board or item is gone. When
+ *   `deleteFile` was asked but the file is shared, `fileDeleted` is false and
+ *   `sharedWith` names the boards that still use it.
  */
 export async function removeItem(
   outputDir: string,
   id: string,
   itemId: string,
   options: { deleteFile?: boolean } = {},
-): Promise<{ removed: BoardItem; fileDeleted: boolean } | undefined> {
+): Promise<{ removed: BoardItem; fileDeleted: boolean; sharedWith: string[] } | undefined> {
   return serialized(boardsRoot(outputDir), async () => {
     const board = await readBoardFile(outputDir, id)
     if (board === undefined) return undefined
@@ -780,15 +935,27 @@ export async function removeItem(
     board.updatedAt = new Date().toISOString()
     await saveBoard(outputDir, board)
     let fileDeleted = false
+    const sharedWith: string[] = []
     if (options.deleteFile === true && isInside(outputDir, removed.path)) {
-      try {
-        await unlink(removed.path)
-        fileDeleted = true
-      } catch {
-        fileDeleted = false
+      // copy-item makes two boards share one PNG (§7.2). Unlinking it here would
+      // blank the picture on every other board, so the shared case only
+      // unplaces: refusal must never be silent, hence the board list in the
+      // answer.
+      const key = pathKey(removed.path)
+      for (const other of await listBoardFiles(outputDir)) {
+        if (other.id === board.id) continue
+        if (other.items.some((entry) => pathKey(entry.path) === key)) sharedWith.push(other.id)
+      }
+      if (sharedWith.length === 0) {
+        try {
+          await unlink(removed.path)
+          fileDeleted = true
+        } catch {
+          fileDeleted = false
+        }
       }
     }
-    return { removed, fileDeleted }
+    return { removed, fileDeleted, sharedWith }
   })
 }
 

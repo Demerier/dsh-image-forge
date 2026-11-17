@@ -181,6 +181,30 @@ export function fitCamera(rects: readonly Rect[], viewport: { width: number; hei
 }
 
 /**
+ * A camera that puts one world point at the viewport's centre.
+ *
+ * §7.4's "定位" is not satisfied by switching boards and selecting an item: the
+ * item can be anywhere on an unbounded canvas, and the user is left hunting for
+ * the highlight. This moves the camera to it while **keeping the zoom**, so the
+ * scale the user chose survives the jump.
+ *
+ * A non-positive or non-finite zoom falls back to 1 rather than dividing by zero
+ * — the same defensive stance the rest of the camera arithmetic takes.
+ */
+export function centerOn(
+  target: Point,
+  viewport: { width: number; height: number },
+  zoom: number,
+): Camera {
+  const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1
+  return {
+    zoom: safeZoom,
+    x: target.x - viewport.width / (2 * safeZoom),
+    y: target.y - viewport.height / (2 * safeZoom),
+  }
+}
+
+/**
  * Where to drop a new node: just right of the right-most node, keeping its top
  * edge aligned with the top-most one.
  *

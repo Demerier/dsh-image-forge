@@ -39,12 +39,17 @@ import {
   STUDIO_FILE_ROUTE,
   STUDIO_FILE_TYPES,
   STUDIO_GENERATE_ROUTE,
+  STUDIO_IMPORT_MAX_BODY_BYTES,
+  STUDIO_IMPORT_MAX_ITEM_BYTES,
+  STUDIO_IMPORT_ROUTE,
   STUDIO_MAX_BODY_BYTES,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
   type StudioBoardRequest,
   type StudioGenerateRequest,
+  type StudioImportRequest,
+  type StudioImportResponse,
   type StudioOptimizeRequest,
   type StudioOptimizeTurn,
   type StudioProgressEvent,
@@ -56,16 +61,21 @@ import { createProgressBridge, type ProgressBridgeTiming } from './progress.ts'
 import { createRunRegistry, type RunRegistry } from './runs.ts'
 import {
   activeBoardId,
+  copyItem,
   createBoard,
   deleteBoard,
   listAssets,
   listBoards,
+  moveItem,
   readBoard,
+  recordItems,
   removeItem,
   renameBoard,
   saveLayout,
   setActiveBoard,
 } from './boards.ts'
+import { sanitizePrefix, writeImages } from './output.ts'
+import { probeImageSize } from './refs.ts'
 import {
   describeStudio,
   runStudioGeneration,
@@ -292,6 +302,22 @@ export function registerStudioRoutes(
             if (result === undefined) return jsonError(res, 404, '这张图不在画板里')
             return json(res, 200, { ok: true, removed: result.removed, fileDeleted: result.fileDeleted })
           }
+          case 'copy-item':
+          case 'move-item': {
+            const source = await targetBoardId(outputDir, action.board)
+            if (source === undefined) return jsonError(res, 404, '画板不存在')
+            const target = await targetBoardId(outputDir, action.toBoard)
+            if (target === undefined) return jsonError(res, 404, '目标画板不存在')
+            if (typeof action.item !== 'string' || action.item.length === 0) return jsonError(res, 400, '缺少 item 参数')
+            const spot = action.x === undefined || action.y === undefined
+              ? undefined
+              : { x: action.x, y: action.y }
+            const result = action.action === 'copy-item'
+              ? await copyItem(outputDir, source, action.item, target, spot)
+              : await moveItem(outputDir, source, action.item, target, spot)
+            if (result === undefined) return jsonError(res, 404, '这张图不在画板里')
+            return json(res, 200, { ok: true, item: result.item, board: result.board })
+          }
           case 'delete': {
             const id = await targetBoardId(outputDir, action.board)
             if (id === undefined) return jsonError(res, 404, '画板不存在')
@@ -306,6 +332,61 @@ export function registerStudioRoutes(
             return json(res, 200, { ok: true })
           }
         }
+      }),
+    }),
+
+    // ---- import (DD10) ----------------------------------------------------
+    //
+    // The one route that accepts image bytes. Its body cap is independent of
+    // the board route's 256 KB and enforced during the read; the container is
+    // sniffed from the decoded bytes rather than trusted, so a text file
+    // renamed `.png` is refused before anything reaches the disk.
+    server.register({
+      kind: 'exact',
+      path: STUDIO_IMPORT_ROUTE,
+      handler: guard(async (req, res) => {
+        if (!sameOrigin(req)) return jsonError(res, 403, 'origin-rejected')
+        if (req.method !== 'POST') return jsonError(res, 405, 'method-not-allowed')
+        if (!isJson(req)) return jsonError(res, 415, 'json-required')
+        let input: StudioImportRequest
+        try {
+          input = parseImport(JSON.parse(await readBody(req, STUDIO_IMPORT_MAX_BODY_BYTES)))
+        } catch (error) {
+          return jsonError(res, 400, firstLine(error))
+        }
+        let decoded: { bytes: Uint8Array; width: number; height: number; mime: string }
+        try {
+          const bytes = decodeImportData(input.data)
+          const size = probeImageSize(bytes)
+          if (size === undefined) throw new Error('只支持 PNG / JPEG / WebP 图片')
+          decoded = { bytes, ...size }
+        } catch (error) {
+          return jsonError(res, 400, firstLine(error))
+        }
+        const outputDir = deps.settings().outputDir
+        const prefix = sanitizePrefix(input.name.replace(/\.[^./\\]+$/, ''), 'import')
+        const [written] = await writeImages(outputDir, prefix, decoded.width, decoded.height, [
+          { bytes: decoded.bytes, mime: decoded.mime },
+        ])
+        const position = input.x === undefined || input.y === undefined
+          ? {}
+          : { x: input.x, y: input.y }
+        const write = await recordItems(outputDir, input.board, [{
+          path: written.path,
+          markdownPath: written.markdownPath,
+          width: decoded.width,
+          height: decoded.height,
+          bytes: written.bytes,
+          mediaType: decoded.mime,
+          prompt: '',
+          mode: 'generate',
+          backend: 'studio',
+          parents: [],
+          ...position,
+        }])
+        const item = write.items[0]
+        if (item === undefined) return jsonError(res, 500, '导入失败：条目未落盘')
+        json(res, 200, { item, board: write.board } satisfies StudioImportResponse)
       }),
     }),
 
@@ -481,7 +562,7 @@ export function parseGenerate(value: unknown): StudioGenerateRequest {
 }
 
 /** Actions the board route accepts. */
-const BOARD_ACTIONS = ['create', 'rename', 'layout', 'remove-item', 'delete', 'active'] as const
+const BOARD_ACTIONS = ['create', 'rename', 'layout', 'remove-item', 'delete', 'active', 'copy-item', 'move-item'] as const
 
 /**
  * Validate one board mutation.
@@ -510,6 +591,16 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
     ? body.items.slice(0, 2000).map(parsePosition).filter(isPosition)
     : undefined
   const camera = parseCamera(body.camera)
+  const toBoard = typeof body.toBoard === 'string' && body.toBoard.trim().length > 0
+    ? body.toBoard.trim().slice(0, 80)
+    : undefined
+  // Copy/move need a destination; a typo there would otherwise look like a
+  // successful save (the same reasoning that makes the action set closed).
+  if ((action === 'copy-item' || action === 'move-item') && toBoard === undefined) {
+    throw new Error('缺少目标画板（toBoard）')
+  }
+  const x = parseCoordinate(body.x)
+  const y = parseCoordinate(body.y)
   return {
     action: action as StudioBoardRequest['action'],
     ...(board === undefined ? {} : { board }),
@@ -518,6 +609,8 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
     ...(deleteFile ? { deleteFile } : {}),
     ...(items === undefined ? {} : { items }),
     ...(camera === undefined ? {} : { camera }),
+    ...(toBoard === undefined ? {} : { toBoard }),
+    ...(x === undefined || y === undefined ? {} : { x, y }),
   }
 }
 
@@ -542,6 +635,73 @@ function parseCamera(value: unknown): { x: number; y: number; zoom: number } | u
   if (typeof y !== 'number' || !Number.isFinite(y)) return undefined
   if (typeof zoom !== 'number' || !Number.isFinite(zoom) || zoom <= 0) return undefined
   return { x, y, zoom }
+}
+
+/** A finite coordinate, or `undefined` when the field is absent or malformed. */
+function parseCoordinate(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return value
+}
+
+/**
+ * Validate one imported image (DD10).
+ *
+ * Shape only: the bytes are decoded and sniffed by the route, because the
+ * container claim in `mediaType` is untrusted input like any other.
+ *
+ * @param value - parsed JSON of unknown shape.
+ * @returns the validated import request.
+ * @throws With a message meant for the panel.
+ */
+export function parseImport(value: unknown): StudioImportRequest {
+  const body = record(value)
+  if (body === undefined) throw new Error('请求格式无效')
+  const name = typeof body.name === 'string' && body.name.trim().length > 0
+    ? body.name.trim().slice(0, 120)
+    : undefined
+  if (name === undefined) throw new Error('缺少文件名')
+  if (typeof body.data !== 'string' || body.data.length === 0) throw new Error('缺少图片内容')
+  const mediaType = typeof body.mediaType === 'string' ? body.mediaType.slice(0, 80) : undefined
+  const board = typeof body.board === 'string' && body.board.trim().length > 0
+    ? body.board.trim().slice(0, 80)
+    : undefined
+  const x = parseCoordinate(body.x)
+  const y = parseCoordinate(body.y)
+  return {
+    name,
+    data: body.data,
+    ...(mediaType === undefined ? {} : { mediaType }),
+    ...(board === undefined ? {} : { board }),
+    ...(x === undefined || y === undefined ? {} : { x, y }),
+  }
+}
+
+/**
+ * Decode an import body's base64 into bytes, bounded before allocation.
+ *
+ * The length check runs on the string first: a body that could not decode to
+ * an allowed file is refused without allocating it. Only canonical base64 is
+ * accepted — `Buffer.from` tolerates a lot of junk, and "it decoded" is not
+ * the same as "it is what the panel sent".
+ *
+ * @param data - base64 payload from the request.
+ * @returns the decoded bytes.
+ * @throws When empty, malformed or over the per-file cap.
+ */
+export function decodeImportData(data: string): Uint8Array {
+  const payload = data.replace(/\s+/g, '')
+  if (payload.length === 0) throw new Error('缺少图片内容')
+  const maxBase64 = Math.ceil(STUDIO_IMPORT_MAX_ITEM_BYTES / 3) * 4
+  if (payload.length > maxBase64) {
+    throw new Error(`图片超过 ${String(Math.trunc(STUDIO_IMPORT_MAX_ITEM_BYTES / 1024 / 1024))} MB 上限`)
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(payload)) throw new Error('图片内容不是合法的 base64')
+  const bytes = new Uint8Array(Buffer.from(payload, 'base64'))
+  if (bytes.byteLength === 0) throw new Error('图片内容解出来是空文件')
+  if (bytes.byteLength > STUDIO_IMPORT_MAX_ITEM_BYTES) {
+    throw new Error(`图片超过 ${String(Math.trunc(STUDIO_IMPORT_MAX_ITEM_BYTES / 1024 / 1024))} MB 上限`)
+  }
+  return bytes
 }
 
 /**

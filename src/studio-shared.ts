@@ -53,6 +53,27 @@ export const STUDIO_FILE_ROUTE = '/plugins/dsh-image-forge/studio/file'
  * leaving a stale step counter on screen.
  */
 export const STUDIO_EVENTS_ROUTE = '/plugins/dsh-image-forge/studio/events'
+/**
+ * Same-origin route an external image file is imported through (DD10).
+ *
+ * The design's drop-an-OS-file story needed a route that did not exist: the
+ * asset route is a read-only query, the file route serves bytes and never
+ * accepts them, and the board route's body cap (256 KB) cannot carry a picture.
+ * So importing is its own contract: one image per request, bounded bytes, and
+ * the same identity semantics as a recorded generation.
+ */
+export const STUDIO_IMPORT_ROUTE = '/plugins/dsh-image-forge/studio/import'
+
+/** Largest single imported file accepted, in bytes (32 MB, DD10). */
+export const STUDIO_IMPORT_MAX_ITEM_BYTES = 32 * 1024 * 1024
+
+/**
+ * Body cap for the import route, in bytes.
+ *
+ * Independent of the board route's 256 KB and deliberately above the item cap:
+ * base64 inflates by 4/3, so a legal 32 MB file arrives as a ~42.7 MB body.
+ */
+export const STUDIO_IMPORT_MAX_BODY_BYTES = 48 * 1024 * 1024
 
 /**
  * Build the URL that serves one image through {@link STUDIO_FILE_ROUTE}.
@@ -442,9 +463,24 @@ export interface StudioBoardsResponse {
   active: string | null
 }
 
-/** One action on a board, discriminated by `action`. */
+/**
+ * One action on a board, discriminated by `action`.
+ *
+ * The closed set grew from six to eight in C12 (§7.2): `copy-item` /
+ * `move-item` are the only cross-board verbs. Importing an image is **not** a
+ * board action — it writes a file before it records an item, so it has its own
+ * route ({@link STUDIO_IMPORT_ROUTE}).
+ */
 export interface StudioBoardRequest {
-  action: 'create' | 'rename' | 'layout' | 'remove-item' | 'delete' | 'active'
+  action:
+    | 'create'
+    | 'rename'
+    | 'layout'
+    | 'remove-item'
+    | 'delete'
+    | 'active'
+    | 'copy-item'
+    | 'move-item'
   /** Target board; absent means the active board. */
   board?: string
   /** New name, for `create` and `rename`. */
@@ -453,10 +489,41 @@ export interface StudioBoardRequest {
   items?: Array<{ id: string; x: number; y: number }>
   /** Camera to persist, for `layout`. */
   camera?: { x: number; y: number; zoom: number }
-  /** Item to drop, for `remove-item`. */
+  /** Item to drop (`remove-item`) or to copy/move across boards. */
   item?: string
   /** Also delete the PNG, for `remove-item`; the default only unplaces it. */
   deleteFile?: boolean
+  /** Destination board for `copy-item` / `move-item`; id or name. */
+  toBoard?: string
+  /** Landing position on the destination board, when the caller knows it. */
+  x?: number
+  y?: number
+}
+
+/**
+ * One external image on its way onto a board (DD10).
+ *
+ * `data` is canonical base64 without a data-URL prefix; the container is
+ * sniffed from the bytes, never trusted from `mediaType`.
+ */
+export interface StudioImportRequest {
+  /** Board to record onto; absent means the active board. */
+  board?: string
+  /** Original file name, used for the on-disk prefix and the error text. */
+  name: string
+  /** Client's claim; informational only, the sniffed container wins. */
+  mediaType?: string
+  /** Base64 of the file's bytes. */
+  data: string
+  /** Landing position in world units, when the drop point is known. */
+  x?: number
+  y?: number
+}
+
+/** Answer of the import route: the recorded item and the board it landed on. */
+export interface StudioImportResponse {
+  item: BoardItem
+  board: BoardSummary
 }
 
 /** One asset in the cross-board list: an item plus the board it belongs to. */

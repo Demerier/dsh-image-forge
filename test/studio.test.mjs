@@ -23,12 +23,18 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  decodeImportData,
   parseBoardAction,
   parseGenerate,
+  parseImport,
   parseOptimize,
+  registerStudioRoutes,
 } from '../testlib/studio-routes.js'
 import {
   resolveStudioSteps,
@@ -64,6 +70,8 @@ import {
   STUDIO_CONFIG_ROUTE,
   STUDIO_EVENTS_ROUTE,
   STUDIO_GENERATE_ROUTE,
+  STUDIO_IMPORT_MAX_ITEM_BYTES,
+  STUDIO_IMPORT_ROUTE,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_RATIOS,
@@ -552,6 +560,7 @@ test('the Studio routes are registered on the host, and the constants ship with 
     '/plugins/dsh-image-forge/studio/boards',
     '/plugins/dsh-image-forge/studio/board',
     '/plugins/dsh-image-forge/studio/assets',
+    '/plugins/dsh-image-forge/studio/import',
   ]
   for (const route of routes) {
     assert.ok(host.includes(route), `${route} must be present in the host bundle`)
@@ -2240,6 +2249,160 @@ test('C11: count>1 keeps the first image in place and fans the rest out to the r
   } finally {
     network.restore()
   }
+})
+
+// ---------------------------------------------------------------------------
+// C12: asset flow — cross-board copy/move, OS-file import, locate camera.
+//
+// The drag gestures themselves have no DOM automation (§14.5); asserted here
+// is every contract they call: the closed board action set, the import route
+// end to end (real socket, real files), and the bundle both halves must carry.
+// The side effects live in boards.test.mjs; the camera maths in
+// studio-canvas.test.mjs.
+// ---------------------------------------------------------------------------
+
+test('C12: the board action set is closed at eight, and copy/move need a destination', () => {
+  const actions = ['create', 'rename', 'layout', 'remove-item', 'delete', 'active', 'copy-item', 'move-item']
+  // `toBoard` is ignored by the other actions and required by these two.
+  for (const action of actions) assert.equal(parseBoardAction({ action, toBoard: 'b2' }).action, action)
+  assert.throws(() => parseBoardAction({ action: 'copy' }), /未知的画板操作/, 'still a closed set')
+  assert.throws(() => parseBoardAction({ action: 'copy-item', item: 'i1' }), /toBoard/)
+  assert.throws(() => parseBoardAction({ action: 'move-item', item: 'i1' }), /toBoard/)
+
+  const parsed = parseBoardAction({ action: 'copy-item', board: 'b1', item: 'i1', toBoard: ' b2 ', x: 10, y: -20 })
+  assert.equal(parsed.board, 'b1')
+  assert.equal(parsed.toBoard, 'b2')
+  assert.deepEqual({ x: parsed.x, y: parsed.y }, { x: 10, y: -20 })
+  // A malformed coordinate is dropped, and the pair goes with it — the same
+  // per-entry leniency the layout coordinates already have.
+  const dropped = parseBoardAction({ action: 'move-item', board: 'b1', item: 'i1', toBoard: 'b2', x: 'nope', y: 20 })
+  assert.equal(dropped.x, undefined)
+  assert.equal(dropped.y, undefined)
+})
+
+test('C12: the import body is shape-checked and base64-bounded before allocation', () => {
+  assert.throws(() => parseImport({}), /缺少文件名/)
+  assert.throws(() => parseImport({ name: 'a.png' }), /缺少图片内容/)
+  assert.throws(() => parseImport('nope'), /请求格式无效/)
+  const parsed = parseImport({ name: ' a.png ', data: 'AAAA', board: ' b1 ', x: 1, y: 2, mediaType: 'image/png' })
+  assert.equal(parsed.name, 'a.png')
+  assert.equal(parsed.board, 'b1')
+  assert.deepEqual({ x: parsed.x, y: parsed.y }, { x: 1, y: 2 })
+
+  assert.throws(() => decodeImportData(''), /缺少图片内容/)
+  assert.throws(() => decodeImportData('not*b_a$se64!'), /base64/)
+  // The 32 MB cap is enforced on the string before decoding: a body that could
+  // never fit is refused without allocating the image.
+  const maxBase64 = Math.ceil(STUDIO_IMPORT_MAX_ITEM_BYTES / 3) * 4
+  assert.throws(() => decodeImportData('A'.repeat(maxBase64 + 4)), /上限/)
+  assert.equal(decodeImportData(Buffer.from([137, 80]).toString('base64')).byteLength, 2)
+})
+
+/** A minimal PNG header with real dimensions: enough for sniffing and sizing. */
+function pngHeader(width, height) {
+  const bytes = Buffer.alloc(33)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0)
+  bytes.writeUInt32BE(13, 8)
+  bytes.write('IHDR', 12, 'latin1')
+  bytes.writeUInt32BE(width, 16)
+  bytes.writeUInt32BE(height, 20)
+  return bytes
+}
+
+/** Mount the Studio routes on a throwaway server over one temp output dir. */
+async function withStudioServer(run) {
+  const registered = []
+  const fakeWebServer = { register: (route) => { registered.push(route); return () => {} } }
+  const fakeCtx = { webServer: fakeWebServer, logger: { warn() {} } }
+  const dir = mkdtempSync(join(tmpdir(), 'forge-c12-'))
+  try {
+    registerStudioRoutes(fakeCtx, { settings: () => ({ outputDir: dir }), ctx: fakeCtx })
+    const route = registered.find((entry) => entry.path === STUDIO_IMPORT_ROUTE)
+    assert.ok(route, 'the import route must be registered')
+    const server = createServer((req, res) => { void route.handler(req, res) })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${server.address().port}`
+    try {
+      return await run({ base, dir })
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** POST the import route the way the panel does, with a browser-like Origin. */
+function postImport(base, body, options = {}) {
+  return fetch(base + STUDIO_IMPORT_ROUTE, {
+    method: options.method ?? 'POST',
+    headers: {
+      'content-type': options.contentType ?? 'application/json',
+      ...(options.origin === null ? {} : { origin: options.origin ?? `http://${new URL(base).host}` }),
+    },
+    ...(options.method === 'GET' ? {} : { body: options.raw ?? JSON.stringify(body) }),
+  })
+}
+
+test('C12: importing a dropped file records a board item and writes the bytes', async () => {
+  await withStudioServer(async ({ base }) => {
+    const bytes = pngHeader(1024, 768)
+    const res = await postImport(base, {
+      name: '窗台橘猫.png',
+      mediaType: 'image/png',
+      data: bytes.toString('base64'),
+      x: 260,
+      y: 44,
+    })
+    assert.equal(res.status, 200)
+    const payload = await res.json()
+    assert.equal(payload.item.width, 1024)
+    assert.equal(payload.item.height, 768)
+    assert.equal(payload.item.mediaType, 'image/png')
+    assert.equal(payload.item.prompt, '', 'an imported file was not generated by a prompt')
+    assert.equal(payload.item.mode, 'generate')
+    assert.equal(payload.item.backend, 'studio')
+    assert.equal(payload.item.x, 260)
+    assert.equal(payload.item.y, 44)
+    assert.equal(payload.board.itemCount, 1)
+    assert.ok(existsSync(payload.item.path), 'the decoded bytes are on disk')
+    // A non-ASCII file name collapses to the documented fallback prefix; the
+    // size suffix comes from the sniffed dimensions, not from the claim.
+    assert.match(payload.item.path.split(/[\\/]/).pop(), /^import_1024x768_1\.png$/)
+  })
+})
+
+test('C12: the import route refuses cross-origin, wrong method/type and non-images', async () => {
+  await withStudioServer(async ({ base }) => {
+    const goodBody = { name: 'a.png', data: pngHeader(32, 32).toString('base64') }
+
+    const cross = await postImport(base, goodBody, { origin: 'http://evil.example' })
+    assert.equal(cross.status, 403, 'cross-origin is refused')
+
+    const wrongMethod = await postImport(base, goodBody, { method: 'GET' })
+    assert.equal(wrongMethod.status, 405, 'GET is not an import')
+
+    const wrongType = await postImport(base, goodBody, { contentType: 'text/plain' })
+    assert.equal(wrongType.status, 415, 'only JSON bodies are accepted')
+
+    const notImage = await postImport(base, { name: 'notes.png', data: Buffer.from('不是图片').toString('base64') })
+    assert.equal(notImage.status, 400)
+    assert.match((await notImage.json()).error, /PNG \/ JPEG \/ WebP/)
+
+    const malformed = await postImport(base, { name: 'a.png', data: '!!not base64!!' })
+    assert.equal(malformed.status, 400)
+    assert.match((await malformed.json()).error, /base64/)
+  })
+})
+
+test('C12: the import contract and the drag MIME ship to both halves', () => {
+  const host = readFileSync(fileURLToPath(new URL('../lib/index.js', import.meta.url)), 'utf8')
+  assert.ok(host.includes(STUDIO_IMPORT_ROUTE), 'the host must register the import route')
+  const client = readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8')
+  assert.ok(client.includes(STUDIO_IMPORT_ROUTE), 'the panel must post to the import route')
+  assert.ok(client.includes('application/x-dsh-forge-asset'), 'the private drag MIME must ship')
+  assert.ok(client.includes('copy-item'), 'the cross-board copy action must ship')
+  assert.ok(client.includes('move-item'), 'the cross-board move action must ship')
 })
 
 
