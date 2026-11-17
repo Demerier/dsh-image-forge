@@ -20,10 +20,23 @@
  * @module studio-canvas
  */
 
-/** Rendered width of one image node, in world units. */
+/**
+ * Fallback width of one node, in world units.
+ *
+ * Image nodes are as wide as their picture's aspect ratio wants (see
+ * {@link nodeDisplaySize}); this constant is the default for the cases that have
+ * no picture to measure — task nodes and board entries with unknown dimensions.
+ */
 export const CANVAS_NODE_WIDTH = 208
-/** Rendered height of one image node, in world units (image + caption + actions). */
+/** Rendered height of one node, in world units (image + caption + actions). */
 export const CANVAS_NODE_HEIGHT = 240
+
+/** Height of the picture area inside a node, in world units; never scales. */
+export const IMAGE_AREA_HEIGHT = 200
+/** Narrowest an image node may render; extreme portrait assets clamp here. */
+export const MIN_NODE_WIDTH = 96
+/** Widest an image node may render; extreme landscape assets clamp here. */
+export const MAX_NODE_WIDTH = 480
 
 /** Smallest zoom the canvas allows; below this a node is unreadable anyway. */
 export const CANVAS_MIN_ZOOM = 0.3
@@ -50,6 +63,29 @@ export interface Point {
 export interface Rect extends Point {
   width: number
   height: number
+}
+
+/**
+ * The on-canvas size of a node holding a `width`×`height` picture.
+ *
+ * The picture area is a fixed {@link IMAGE_AREA_HEIGHT} tall and as wide as the
+ * aspect ratio asks for, clamped to [{@link MIN_NODE_WIDTH}, {@link MAX_NODE_WIDTH}]
+ * so an imported panorama cannot squeeze its neighbours and a long strip cannot
+ * stretch the row into unusable width. Height never changes: caption and action
+ * rows sit below the picture and are sized by their own content.
+ *
+ * Unknown or invalid dimensions fall back to the plain node box rather than
+ * throwing — a board entry with a corrupt size should still render.
+ */
+export function nodeDisplaySize(width: number, height: number): { width: number; height: number } {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return { width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  }
+  const ideal = Math.round((IMAGE_AREA_HEIGHT * width) / height)
+  return {
+    width: Math.min(MAX_NODE_WIDTH, Math.max(MIN_NODE_WIDTH, ideal)),
+    height: CANVAS_NODE_HEIGHT,
+  }
 }
 
 /** Clamp a zoom factor into the supported range. */
