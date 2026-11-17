@@ -65,8 +65,8 @@ Edit：
 
 | 工具 | 职责 | 什么时候用 |
 |---|---|---|
-| `qwen_image_generate` | 出图主入口。收成品 `prompt`，`wh_ratio` 一等参数（官方 7 档），可选 `width`/`height` 覆盖、`steps`、`seed`、`count`、`preset`、`board` | 用户要**从零出图**时 |
-| `qwen_image_edit` | **参考图编辑（图生图）**。收成品改图 `prompt` + `images`（1–10 张绝对路径或 data URI），`ratio_follow` 让画布跟随某张参考图（与 `wh_ratio` **互斥**，都可省略=跟随第一张），其余参数同上 | 用户给了**一张或多张参考图**、要按它们改图/融图时 |
+| `qwen_image_generate` | 出图主入口。收成品 `prompt`，`wh_ratio` 一等参数（官方 7 档），可选 `width`/`height` 覆盖、`steps`、`seed`、`count`、`preset`、`board`，以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见上） | 用户要**从零出图**时 |
+| `qwen_image_edit` | **参考图编辑（图生图）**。收成品改图 `prompt` + `images`（1–10 张绝对路径或 data URI），`ratio_follow` 让画布跟随某张参考图（与 `wh_ratio` **互斥**，都可省略=跟随第一张），其余参数同上；多参考不传质量档 | 用户给了**一张或多张参考图**、要按它们改图/融图时 |
 | `qwen_image_status` | **只读**体检：本机 ComfyUI 是否在跑（探过哪几个端口、三个权重能不能被它的加载器枚举到、显卡型号与显存余量）、输出目录能不能写。不产图、不写盘、不改配置 | 出图失败、或不确定后端是否就绪时**先跑它** |
 
 ## 画板：连续出图请复用 board
@@ -102,6 +102,16 @@ Edit：
 - `base`：40 步（官方推荐 40–50；≈1.6× 25 步耗时）。**写实人像、画面里要出现中文文字、古典/绘画性构图**这三类切 base——turbo 在这些题材上掉细节。
 - `comfyModel: "turbo"` 是**请求不是保证**：`/object_info` 里没有 turbo unet 时会自动回落 base，
   并在结果 `comfyui.turbo_fallback` 里说明。别据此向用户承诺速度。
+
+### 质量档：`cfg` / `negative_prompt`（只对 base）
+
+默认 `cfg=1`，与官方模板一致——**此时 ComfyUI 跳过负向条件化，负向词不起作用**。要更贴提示词时：
+
+- `cfg` 用 **2.5–3**（暂定区间，X02 盲测后校准）；`cfg>1` 时每步多一次前向，**耗时约翻倍**，别对用户承诺速度。
+- 给了 `cfg>1` 但没给 `negative_prompt`：工具自动补默认负向词集（含 `overly warm color temperature`，
+  压 cfg>1 的黄偏移），返回里 `quality.negative_prompt_source: "auto"` 标明来源；自己写时也建议保留这条。
+- **多参考改图保持 `cfg=1`**（CFG>1 + 多参考出 artifacts）；单参考可试 `cfg=2`。
+- turbo 与 MOSS 不接受这两个参数（CFG 分别由蒸馏 sigma 表 / `mossSampling` 档位管理）；`cfg=1` 时给负向词会被拒绝。
 
 ### 显存与慢
 

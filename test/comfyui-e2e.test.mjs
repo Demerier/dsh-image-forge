@@ -591,6 +591,104 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
 })
 
 // ---------------------------------------------------------------------------
+// The quality tier: cfg / negative_prompt, Qwen base only.
+//
+// Official 2.1 contract: cfg stays 1 unless a negative prompt is really wanted —
+// at cfg 1 ComfyUI skips the negative conditioning pass. The tier therefore has
+// two obligations this pins down: an omitted pair must leave the graph untouched,
+// and an asked-for pair must move the values *and* the reported cost.
+// ---------------------------------------------------------------------------
+
+test('an omitted quality tier renders the byte-identical Qwen base graph', async () => {
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-quality-default-'))
+  try {
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir, timeoutMs: 30_000 })
+    const result = await run(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', seed: 5 })
+    // cfg 1 / empty negative prompt are the official path: nothing may move when
+    // the tier is not asked for.
+    assert.equal(comfy.state.graph['6'].inputs.cfg, 1)
+    assert.equal(comfy.state.graph['4'].inputs.negative_prompt, '')
+    assert.deepEqual(comfy.state.graph['6'].inputs.negative, ['4', 1])
+    assert.equal(result.quality, undefined, 'no quality block on the default path')
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+test('the quality tier raises cfg, wires the negative prompt, and reports the cost', async () => {
+  const { QUALITY_NEGATIVE_PROMPT } = await import('../testlib/tools.js')
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-quality-tier-'))
+  try {
+    const tools = register({ comfyEndpoint: comfy.endpoint, outputDir, timeoutMs: 30_000 })
+    const explicit = await run(tools, 'qwen_image_generate', {
+      prompt: 'A cat.',
+      wh_ratio: '1:1',
+      seed: 5,
+      cfg: 2.5,
+      negative_prompt: 'overly warm color temperature',
+    })
+    assert.equal(comfy.state.graph['6'].inputs.cfg, 2.5)
+    assert.equal(comfy.state.graph['4'].inputs.negative_prompt, 'overly warm color temperature')
+    // The negative conditioning is the encode node's second output, so cfg>1 really
+    // runs a negative pass instead of only relabelling cfg.
+    assert.deepEqual(comfy.state.graph['6'].inputs.negative, ['4', 1])
+    assert.equal(explicit.quality.cfg, 2.5)
+    assert.equal(explicit.quality.negative_prompt_source, 'caller')
+    assert.match(explicit.quality.note, /翻倍/)
+
+    const auto = await run(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', seed: 5, cfg: 3 })
+    assert.equal(comfy.state.graph['6'].inputs.cfg, 3)
+    assert.equal(comfy.state.graph['4'].inputs.negative_prompt, QUALITY_NEGATIVE_PROMPT)
+    assert.equal(auto.quality.negative_prompt_source, 'auto')
+    assert.match(auto.quality.note, /暂定/)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+test('the quality tier is refused where CFG is not a free KSampler input', async () => {
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-quality-refuse-'))
+  try {
+    const base = (overrides) => register({ comfyEndpoint: comfy.endpoint, outputDir, timeoutMs: 30_000, ...overrides })
+
+    // turbo: fixed ManualSigmas graph, no free cfg.
+    const turbo = await failure(base({ comfyModel: 'qwen21-turbo' }), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 2.5 })
+    assert.match(turbo.message, /只对 Qwen base 生效/)
+    assert.match(turbo.message, /turbo/)
+
+    // MOSS: CFG belongs to the sampling register.
+    const moss = await failure(base({ comfyModel: 'moss-sft' }), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 2.5 })
+    assert.match(moss.message, /只对 Qwen base 生效/)
+    assert.match(moss.message, /mossSampling/)
+
+    const outOfRange = await failure(base({}), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 7 })
+    assert.match(outOfRange.message, /between 1 and 5/)
+
+    // A negative prompt at cfg 1 would be silently ignored, so it is refused.
+    const inert = await failure(base({}), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', negative_prompt: 'blurry' })
+    assert.match(inert.message, /cfg > 1/)
+
+    // Multi-reference edit + elevated cfg is the documented artifact case.
+    const refs = [join(outputDir, 'a.png'), join(outputDir, 'b.png')]
+    for (const file of refs) writeFileSync(file, Buffer.from(PNG_1X1, 'base64'))
+    const multi = await failure(base({}), 'qwen_image_edit', { prompt: '换掉标题', images: refs, cfg: 2 })
+    assert.match(multi.message, /多参考/)
+    assert.match(multi.message, /cfg=1/)
+
+    // None of those refusals may reach a backend.
+    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 0)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Model profiles: a second family without a second adapter.
 // ---------------------------------------------------------------------------
 

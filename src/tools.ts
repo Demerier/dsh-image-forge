@@ -48,6 +48,31 @@ import {
 } from './ratio.ts'
 import type { Config } from './index.ts'
 
+/**
+ * The quality-tier parameters both image tools share.
+ *
+ * Optional and default-free on purpose: an omitted pair leaves the rendered graph
+ * byte-identical to the pre-tier request (`cfg` 1, empty negative prompt). The
+ * policy (which profiles accept them, the auto negative set, the range) lives in
+ * {@link resolveQualityTier}.
+ */
+const QUALITY_PARAMETERS: ParameterSchemaSpec = {
+  cfg: {
+    type: 'number',
+    description:
+      '质量档 CFG（**只对 Qwen base 生效**；默认 1 = 官方口径，省略时请求与改动前逐字节一致）。' +
+      'cfg>1 时负向条件化才真正生效、更贴提示词，代价是每步多一次前向（耗时约翻倍）；2.5–3 是暂定区间（X02 盲测后校准）。' +
+      'turbo（ManualSigmas 蒸馏档）与 moss-sft（CFG 由采样档位管理）会拒绝该参数。',
+  },
+  negative_prompt: {
+    type: 'string',
+    description:
+      '负向提示词（**只对 Qwen base 生效**，且只在 cfg>1 时有效——cfg=1 时 ComfyUI 跳过负向条件化）。' +
+      '省略而 cfg>1 时会自动补默认负向词集（含 "overly warm color temperature"，压黄偏移），结果里会标明来源；' +
+      'cfg=1 时给负向词会被拒绝（否则会被静默忽略）。默认空 = 官方口径。',
+  },
+}
+
 /** Everything `qwen_image_generate` accepts, as one schema reused by validation. */
 const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   prompt: {
@@ -76,10 +101,11 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   steps: {
     type: 'integer',
     description:
-      '采样步数；省略则按配置解析：`comfyuiSteps` → 档位自带步数（`mossSampling` 为 `official` 时 50，仅 MOSS）→ 默认 `defaultSteps`（默认 25）；' +
+      '采样步数；省略则按配置解析：`comfyuiSteps` → 采样档位自带步数（仅 MOSS：comfy 25 / official 50）→ 默认 `defaultSteps`（默认 40，仅无档位的 Qwen）；' +
       '`comfyModel` 是 turbo 变体（`qwen21-turbo` / 旧值 `turbo`）时是 `turboSteps` → 8。' +
       '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
+  ...QUALITY_PARAMETERS,
   seed: {
     type: 'integer',
     description: '随机种子；同一 seed + 同一 prompt + 同一尺寸可复现同一张图。省略即随机。',
@@ -149,10 +175,11 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
   steps: {
     type: 'integer',
     description:
-      '采样步数；省略则按配置解析：`comfyuiSteps` → 档位自带步数（`mossSampling` 为 `official` 时 50，仅 MOSS）→ 默认 `defaultSteps`（默认 25）；' +
+      '采样步数；省略则按配置解析：`comfyuiSteps` → 采样档位自带步数（仅 MOSS：comfy 25 / official 50）→ 默认 `defaultSteps`（默认 40，仅无档位的 Qwen）；' +
       '`comfyModel` 是 turbo 变体（`qwen21-turbo` / 旧值 `turbo`）时是 `turboSteps` → 8。' +
       '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
+  ...QUALITY_PARAMETERS,
   seed: {
     type: 'integer',
     description: '随机种子；同一 seed + 同一 prompt + 同一参考图 + 同一尺寸可复现同一张图。省略即随机。',
@@ -178,6 +205,23 @@ function asInteger(value: number | undefined, label: string): number | undefined
   if (value === undefined) return undefined
   if (!Number.isInteger(value)) throw new Error(`${label} must be an integer, got ${value}`)
   return value
+}
+
+/** Coerce a caller value the schema typed as `number` (cfg is fractional). */
+function asNumber(value: number | undefined, label: string): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number, got ${String(value)}`)
+  }
+  return value
+}
+
+/** Coerce a caller string, treating a blank one as absent. */
+function asText(value: string | undefined, label: string): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new Error(`${label} must be a string`)
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? undefined : trimmed
 }
 
 /** Validate `count`, failing loudly instead of silently clamping. */
@@ -446,8 +490,9 @@ export interface ForgeSettings {
    * Ignored by both Qwen profiles — they declare no registers — so their sampler
    * numbers cannot move. It takes the same two paths here that it takes in the
    * Studio: `comfyOptionsOf` → `ComfyOptions` decides sampler / CFG / scheduler,
-   * and {@link resolveSteps} → `presetSteps` decides a non-default register's
-   * step count. Absent means the family's own default (the verified one).
+   * and {@link resolveSteps} → `presetSteps` decides the selected register's step
+   * count (the default register included: MOSS's counts are model properties).
+   * Absent means the family's own default (the verified one).
    */
   readonly mossSampling?: MossSamplingPreset
   /** Turbo step override; `undefined` means the distilled default (8). */
@@ -509,12 +554,13 @@ export interface StepsResolution {
  * Resolve the sampler steps one call should use.
  *
  * Priority, level for level the same chain `resolveStudioSteps` runs: the
- * caller's explicit `steps` > the ComfyUI override (`comfyuiSteps`) > a
- * non-default sampling register's own working point ({@link presetSteps}) >
- * `defaultSteps`. The register level is `undefined` for both Qwen profiles and
- * for MOSS's default register, so it is inert everywhere the shipped behaviour
- * must stay byte-identical; it only fires for a register whose whole point is a
- * different working point (MOSS official: 50, not 25).
+ * caller's explicit `steps` > the ComfyUI override (`comfyuiSteps`) > the
+ * selected sampling register's own working point ({@link presetSteps}) >
+ * `defaultSteps`. The register level is `undefined` for both Qwen profiles (no
+ * register table), so the shared fallback still decides those exactly as it did
+ * before registers existed; a family that publishes registers (MOSS) always
+ * reports its own count — 25 for the default register, 50 for `official` —
+ * because those are model properties, not a Qwen-tuned global.
  *
  * The count has to be resolved **here** and not left to the adapter: every
  * dispatch site overwrites `request.steps` with the resolved `usedSteps.steps`,
@@ -559,6 +605,103 @@ export function resolveTurboSteps(explicit: number | undefined, settings: ForgeS
     return { steps: clampSteps(settings.turboSteps), source: 'backend' }
   }
   return { steps: TURBO_STEPS, source: 'default' }
+}
+
+/** Lowest `cfg` the quality tier accepts (1 = the shipped, official-path value). */
+export const CFG_MIN = 1
+
+/** Highest `cfg` the quality tier accepts; the official tutorial says 5 degrades badly. */
+export const CFG_MAX = 5
+
+/**
+ * The negative set the quality tier adds when `cfg > 1` but the caller gave none.
+ *
+ * The first entry is the community fix for Qwen-Image 2.1's yellow shift at
+ * elevated cfg (`docs/qwen21-optimization.md` §三-①); the rest are the mild quality
+ * guards that advice assumes. Kept short on purpose — a long negative list at
+ * cfg>1 fights the positive prompt.
+ */
+export const QUALITY_NEGATIVE_PROMPT =
+  'overly warm color temperature, yellow tint, oversharpened edges, blurry, low quality, jpeg artifacts'
+
+/** One call's resolved quality tier. */
+export interface QualityTierResolution {
+  /** The `cfg` that reaches `KSampler.cfg`. */
+  readonly cfg: number
+  /** The negative prompt that reaches the encode node. */
+  readonly negativePrompt: string
+  /** Where the negative prompt came from. */
+  readonly negativeSource: 'caller' | 'auto' | 'profile'
+  /** The human-facing note the result payload repeats (time cost, provisional values). */
+  readonly note: string
+}
+
+/**
+ * Resolve the optional quality tier (`cfg` / `negative_prompt`) for one call.
+ *
+ * Official 2.1 contract: `cfg` stays 1 unless a negative prompt is really wanted —
+ * at cfg 1 ComfyUI skips the negative conditioning pass, so a negative prompt
+ * without `cfg > 1` would be silently inert. That is why:
+ * - only the Qwen **base** profile exposes the tier (turbo's schedule is a fixed
+ *   ManualSigmas graph, and MOSS's CFG belongs to its sampling register);
+ * - `cfg > 1` with no negative prompt auto-fills {@link QUALITY_NEGATIVE_PROMPT},
+ *   and the result says which source was used;
+ * - a negative prompt at cfg <= 1 is refused instead of being swallowed;
+ * - the caller's own `steps`/`cfg` never change the defaults: an omitted pair
+ *   leaves the rendered graph byte-identical.
+ *
+ * 2.5–3 is the documented provisional range (`docs/qwen21-optimization.md` §四-3);
+ * X02 is the blind test that will calibrate it, so the note says so.
+ *
+ * @param profile - the profile the caller **asked for** (not a degraded one).
+ * @param cfg - explicit `cfg`, when the caller gave one.
+ * @param negativePrompt - explicit negative prompt, when the caller gave one.
+ * @returns the tier, or null when neither parameter was used (the default path).
+ * @throws When the profile does not own a KSampler CFG, the range is invalid, or a
+ *   negative prompt was given at cfg <= 1.
+ */
+export function resolveQualityTier(
+  profile: ModelProfile,
+  cfg: number | undefined,
+  negativePrompt: string | undefined,
+): QualityTierResolution | null {
+  if (cfg === undefined && negativePrompt === undefined) return null
+  if (profile.variant !== 'base' || profile.family !== 'qwen-image-2.1') {
+    const why = profile.variant === 'turbo'
+      ? 'turbo 走 SamplerCustomAdvanced + ManualSigmas 蒸馏档，CFG 与步数都由 sigma 表固定'
+      : 'MOSS 的 CFG 由采样档位 mossSampling 管理（comfy 2.5 / official 3）'
+    throw new Error(
+      `comfyui backend: 质量档（cfg / negative_prompt）只对 Qwen base 生效，当前请求的 profile 是 ${profile.label}——${why}。\n` +
+        '  质量档请在 comfyModel=qwen21-base 下使用；turbo 与 moss-sft 不接受这两个参数。',
+    )
+  }
+  const resolved = cfg ?? profile.sampler.cfg
+  if (!Number.isFinite(resolved) || resolved < CFG_MIN || resolved > CFG_MAX) {
+    throw new Error(`cfg must be between ${CFG_MIN} and ${CFG_MAX}, got ${String(cfg)}`)
+  }
+  if (resolved <= 1) {
+    if (negativePrompt !== undefined) {
+      throw new Error(
+        'negative_prompt 只在 cfg > 1 时有效：cfg=1 时 ComfyUI 跳过负向条件化（官方口径），负向词会被静默忽略。\n' +
+          '  想用负向词就同时给 cfg（暂定 2.5–3；换来更贴提示词，代价是耗时约翻倍），否则去掉 negative_prompt。',
+      )
+    }
+    return {
+      cfg: resolved,
+      negativePrompt: profile.negativePrompt,
+      negativeSource: 'profile',
+      note: 'cfg=1：负向条件化被 ComfyUI 跳过，本次请求与默认路径完全一致。',
+    }
+  }
+  const negativeSource = negativePrompt === undefined ? 'auto' : 'caller'
+  return {
+    cfg: resolved,
+    negativePrompt: negativePrompt ?? QUALITY_NEGATIVE_PROMPT,
+    negativeSource,
+    note:
+      `cfg=${resolved}：每步多跑一次负向条件化前向，耗时约翻倍（官方/社区口径）。` +
+      '2.5–3 是暂定区间（X02 盲测后校准）；4 以上容易过锐/过曝。',
+  }
 }
 
 /** The tool-output blocks shared by generate and edit: summary, markdown, JSON. */
@@ -624,6 +767,14 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       const size = chooseSize(args.wh_ratio, asInteger(args.width, 'width'), asInteger(args.height, 'height'))
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
+      // Resolve the quality tier before any backend is touched: an invalid cfg, or a
+      // negative prompt that cfg=1 would silently ignore, must fail here.
+      const requestedProfile = resolveProfile(settings.comfyModel)
+      const quality = resolveQualityTier(
+        requestedProfile,
+        asNumber(args.cfg, 'cfg'),
+        asText(args.negative_prompt, 'negative_prompt'),
+      )
       const request = {
         prompt,
         width: size.width,
@@ -632,6 +783,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         steps,
         seed: asInteger(args.seed, 'seed'),
       }
+      const qualityOverrides = quality === null ? {} : { cfg: quality.cfg, negativePrompt: quality.negativePrompt }
       const startedAt = Date.now()
 
       // Resolve the step count before touching ComfyUI so no dispatch site can
@@ -646,14 +798,13 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       // failing — the alternative is a config typo turning into "no images at
       // all". `effectiveProfile` applies the same rule to the weights the
       // adapter really found, so the graph can never disagree with them.
-      const requestedProfile = resolveProfile(settings.comfyModel)
       const profile = effectiveProfile(settings.comfyModel, models)
       const turbo = profile.variant === 'turbo'
       const turboSkipped = requestedProfile.variant === 'turbo' && !turbo
       const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings, profile)
       const images = turbo
-        ? await generateViaComfyUiTurbo(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
-        : await generateViaComfyUi(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+        ? await generateViaComfyUiTurbo(target, models, { ...request, ...qualityOverrides, steps: usedSteps.steps }, options, exec.signal)
+        : await generateViaComfyUi(target, models, { ...request, ...qualityOverrides, steps: usedSteps.steps }, options, exec.signal)
       const comfyRun: ComfyRunReport = {
         endpoint: target.endpoint,
         port: target.port,
@@ -697,6 +848,16 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         steps_used: usedSteps.steps,
         steps_source: usedSteps.source,
         seed: request.seed ?? null,
+        ...(quality === null
+          ? {}
+          : {
+              quality: {
+                cfg: quality.cfg,
+                negative_prompt: quality.negativePrompt,
+                negative_prompt_source: quality.negativeSource,
+                note: quality.note,
+              },
+            }),
         prompt_chars: prompt.length,
         output_dir: settings.outputDir,
         images: written.map((image) => ({
@@ -757,6 +918,20 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       )
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
+      // Same early validation as `qwen_image_generate`, plus the multi-reference
+      // guard: elevated cfg on a multi-reference edit is the documented artifact case.
+      const requestedProfile = resolveProfile(settings.comfyModel)
+      const quality = resolveQualityTier(
+        requestedProfile,
+        asNumber(args.cfg, 'cfg'),
+        asText(args.negative_prompt, 'negative_prompt'),
+      )
+      if (quality !== null && quality.cfg > 1 && references.length > 1) {
+        throw new Error(
+          `多参考图（${references.length} 张）+ cfg>1 会出 artifacts：真实 CFG 下多参考编辑不稳定（官方/社区孤证），已验证的只有单参考。\n` +
+            '  多参考保持 cfg=1（默认，与官方模板一致）；想试质量档请只保留 1 张参考图。',
+        )
+      }
       const request = {
         prompt,
         width: size.width,
@@ -766,20 +941,32 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         seed: asInteger(args.seed, 'seed'),
         images: references,
       }
+      const qualityOverrides = quality === null ? {} : { cfg: quality.cfg, negativePrompt: quality.negativePrompt }
       const startedAt = Date.now()
 
       const options = comfyOptions(settings)
       const target = await discoverComfyUi(options, exec.signal)
       const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
       const comfyStartedAt = Date.now()
-      const requestedProfile = resolveProfile(settings.comfyModel)
       const profile = effectiveProfile(settings.comfyModel, models)
       const turbo = profile.variant === 'turbo'
       const turboSkipped = requestedProfile.variant === 'turbo' && !turbo
       const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings, profile)
       const images = turbo
-        ? await generateViaComfyUiTurboEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
-        : await generateViaComfyUiEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
+        ? await generateViaComfyUiTurboEdit(
+            target,
+            models,
+            { ...request, ...qualityOverrides, steps: usedSteps.steps },
+            options,
+            exec.signal,
+          )
+        : await generateViaComfyUiEdit(
+            target,
+            models,
+            { ...request, ...qualityOverrides, steps: usedSteps.steps },
+            options,
+            exec.signal,
+          )
       const comfyRun: ComfyRunReport = {
         endpoint: target.endpoint,
         port: target.port,
@@ -842,6 +1029,16 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         steps_used: usedSteps.steps,
         steps_source: usedSteps.source,
         seed: request.seed ?? null,
+        ...(quality === null
+          ? {}
+          : {
+              quality: {
+                cfg: quality.cfg,
+                negative_prompt: quality.negativePrompt,
+                negative_prompt_source: quality.negativeSource,
+                note: quality.note,
+              },
+            }),
         prompt_chars: prompt.length,
         output_dir: settings.outputDir,
         images: written.map((image) => {

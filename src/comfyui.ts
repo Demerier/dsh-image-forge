@@ -150,6 +150,21 @@ export interface ComfyOptions {
   readonly pollIntervalMs?: number
 }
 
+/**
+ * Optional quality-tier overrides for the Qwen base `KSampler` graphs.
+ *
+ * `tools.ts` owns the policy — when `cfg > 1` is allowed, the automatic negative
+ * set, and which profiles refuse the tier. This module only knows how to put the
+ * values on the graph: an absent field keeps the profile's own value, so a
+ * default call renders a byte-identical graph.
+ */
+export interface QualityTierOverrides {
+  /** `KSampler.cfg` override; absent keeps the profile's own CFG. */
+  readonly cfg?: number
+  /** Negative prompt override; absent keeps the profile's own negative prompt. */
+  readonly negativePrompt?: string
+}
+
 /** The resolved-config fields both front doors carry into one call's options. */
 export interface ComfySettingsFields {
   /** `comfyEndpoint` as the settings resolver produced it. */
@@ -965,13 +980,14 @@ export function effectiveProfile(choice: ComfyModelChoice | string | undefined, 
  *
  * @param profile - the effective profile of this call.
  * @param models - the file names the server reported.
- * @param request - prompt, canvas, count, seed and any explicit step count.
+ * @param request - prompt, canvas, count, seed, any explicit step count, and the
+ *   optional quality-tier overrides (`cfg` / `negativePrompt`).
  * @param preset - the configured sampling register, if any.
  */
 function textToImageValues(
   profile: ModelProfile,
   models: ComfyModels,
-  request: GenerateRequest,
+  request: GenerateRequest & QualityTierOverrides,
   preset?: string,
 ): Record<string, unknown> {
   assertLatentAligned(profile, request.width, request.height)
@@ -983,13 +999,13 @@ function textToImageValues(
     clip_type: models.clipType,
     vae_name: models.vae,
     prompt: request.prompt,
-    negative_prompt: profile.negativePrompt,
+    negative_prompt: request.negativePrompt ?? profile.negativePrompt,
     width: request.width,
     height: request.height,
     batch_size: request.count,
     seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
     steps: request.steps ?? sampling.steps.default,
-    cfg: sampling.sampler.cfg,
+    cfg: request.cfg ?? sampling.sampler.cfg,
     sampler_name: sampling.sampler.name,
     scheduler: sampling.sampler.scheduler,
     sigmas: sampling.steps.sigmas,
@@ -1019,7 +1035,7 @@ function textToImageValues(
 export async function generateViaComfyUi(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest,
+  request: GenerateRequest & QualityTierOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
@@ -1180,7 +1196,7 @@ async function renderEditGraph(
   target: ComfyTarget,
   profile: ModelProfile,
   models: ComfyModels,
-  request: GenerateRequest,
+  request: GenerateRequest & QualityTierOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
@@ -1222,7 +1238,7 @@ async function renderEditGraph(
 export async function generateViaComfyUiEdit(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest,
+  request: GenerateRequest & QualityTierOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
@@ -1253,7 +1269,7 @@ export async function generateViaComfyUiEdit(
 export async function generateViaComfyUiTurbo(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest,
+  request: GenerateRequest & QualityTierOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
@@ -1287,7 +1303,7 @@ export async function generateViaComfyUiTurbo(
 export async function generateViaComfyUiTurboEdit(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest,
+  request: GenerateRequest & QualityTierOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {

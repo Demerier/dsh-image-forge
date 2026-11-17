@@ -149,6 +149,26 @@ test('the wh_ratio description cites a document that really prints the conversio
     )
   }
 })
+test('the image tools expose the optional quality tier, default-free', () => {
+  const { ctx, tools } = captureContext()
+  plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-quality-schema-')) }))
+  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+    const parameters = tools.get(tool).parameters
+    const property = (name) => parameters?.properties?.[name] ?? parameters?.[name]
+    for (const [name, type] of [
+      ['cfg', 'number'],
+      ['negative_prompt', 'string'],
+    ]) {
+      const parameter = property(name)
+      assert.ok(parameter !== undefined, `${tool} must expose ${name}`)
+      assert.equal(parameter.type, type, `${tool}.${name} must be a ${type}`)
+      // Default-free: an omitted pair leaves the graph byte-identical.
+      assert.equal(parameter.required, undefined, `${tool}.${name} must be optional`)
+      assert.equal(parameter.default, undefined, `${tool}.${name} must carry no default`)
+    }
+  }
+})
+
 test('the image tools carry no backend selector, and status needs no parameters', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-schema2-')) }))
