@@ -13,6 +13,13 @@
  * needs ComfyUI, and a fake one would assert that a mock returns what the mock
  * was given. The split points that make generation deterministic — the resolved
  * canvas and the resolved step count — are covered directly instead.
+ *
+ * The T18 section at the bottom is the one exception to "logic bundles only":
+ * the workbench now consumes the plugin's SSE progress stream, and that path
+ * (event → state → rendered text) is worth executing rather than grepping. It
+ * runs the real §lib/client.js§ through a fake module loader, a minimal React
+ * and a fake EventSource; see the section note for what that does and does not
+ * prove.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -51,7 +58,7 @@ import {
   splitOptimizerAnswer,
   stripWrappingQuotes,
 } from '../testlib/studio-prompt.js'
-import { STUDIO_MAX_COUNT, STUDIO_MAX_PROMPT_CHARS, STUDIO_RATIOS } from '../testlib/studio-shared.js'
+import { STUDIO_EVENTS_ROUTE, STUDIO_MAX_COUNT, STUDIO_MAX_PROMPT_CHARS, STUDIO_RATIOS } from '../testlib/studio-shared.js'
 import { resolveDefaultSize } from '../testlib/ratio.js'
 
 // The published surface is exactly `Config, apply, inject, name` (asserted in
@@ -817,3 +824,575 @@ test('the Studio step chain honours the register and still lets comfyuiSteps win
     25,
   )
 })
+
+// ---------------------------------------------------------------------------
+// T18: live progress in the workbench.
+//
+// `lib/client.js` cannot be imported here: its single bare dependency,
+// `react`, is resolved by the web client and is deliberately not a dependency
+// of this package (see the note in `settings.test.mjs`). So this section runs
+// the real built bundle the way the web loader does — evaluate it against a
+// fake `window.__ModuleLoader__`, hand the factory a minimal React (element
+// descriptors plus a hook runtime), and take the workbench component back out
+// of the slot registry through `apply`. The component is then mounted against
+// stubbed `fetch` / `EventSource`: no DOM, no browser, but the real
+// event → state → rendered-text path.
+//
+// What this cannot prove: the browser's own EventSource retry cadence, actual
+// paint, or a run against a live ComfyUI. Those stay unverified in the report.
+// ---------------------------------------------------------------------------
+
+/** The built browser half, read as text for the bundle assertions below. */
+const CLIENT_SOURCE = readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8')
+
+/** The capability snapshot the fake host serves to a mounting panel. */
+const HARNESS_CONFIG = {
+  ready: true,
+  endpoint: 'http://127.0.0.1:8188',
+  models: { unet: 'qwen.safetensors', clip: 'clip.safetensors', vae: 'vae.safetensors' },
+  defaultSteps: 40,
+  outputDir: 'C:/out',
+  sizes: [{ ratio: '1:1', width: 1024, height: 1024 }],
+  optimizeAvailable: false,
+  boards: [],
+  activeBoard: null,
+}
+
+/** A fetch-shaped response; the panel only ever asks for `json()`. */
+function fakeResponse(payload, status) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => payload,
+  }
+}
+
+/** Collect text out of a fake element tree (strings and numbers only). */
+function fakeText(node) {
+  if (typeof node === 'string') return node
+  if (typeof node === 'number') return String(node)
+  if (Array.isArray(node)) {
+    let text = ''
+    for (const child of node) text += fakeText(child)
+    return text
+  }
+  if (node === null || node === undefined || typeof node !== 'object') return ''
+  let text = ''
+  for (const child of node.children) text += fakeText(child)
+  return text
+}
+
+/** Depth-first visit of every fake element (an object with a string `type`). */
+function fakeVisit(node, visit) {
+  if (node === null || node === undefined || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const child of node) fakeVisit(child, visit)
+    return
+  }
+  if (typeof node.type !== 'string') return
+  visit(node)
+  for (const child of node.children) fakeVisit(child, visit)
+}
+
+/** The first element carrying exactly `className`, or `undefined`. */
+function fakeElementWithClass(tree, className) {
+  let found
+  fakeVisit(tree, (entry) => {
+    if (found === undefined && entry.props.className === className) found = entry
+  })
+  return found
+}
+
+/** Same deps, element-wise — React's own comparison, close enough here. */
+function sameDeps(left, right) {
+  if (left === undefined || right === undefined) return false
+  if (left.length !== right.length) return false
+  return left.every((value, index) => Object.is(value, right[index]))
+}
+
+/** Flatten `createElement` children the way React does, dropping holes. */
+function collectChildren(child, out) {
+  if (child === null || child === undefined || child === true || child === false) return
+  if (Array.isArray(child)) {
+    for (const entry of child) collectChildren(entry, out)
+    return
+  }
+  out.push(child)
+}
+
+/**
+ * A hook runtime just large enough for `StudioPanel`.
+ *
+ * Call order is identity, exactly like React; effects are queued after render
+ * and run by the caller, so they observe the committed tree. `settle` drives
+ * render → effects → microtasks until quiet, which is what lets the mount
+ * effect's two awaited fetches finish.
+ */
+function createHookRuntime(active) {
+  const hooks = []
+  let cursor = 0
+  let dirty = false
+  let pending = []
+  let rendered
+  let panel
+
+  const runtime = {
+    useState(initial) {
+      const index = cursor
+      cursor += 1
+      if (hooks[index] === undefined) {
+        hooks[index] = { value: typeof initial === 'function' ? initial() : initial }
+      }
+      const slot = hooks[index]
+      return [slot.value, (next) => {
+        const value = typeof next === 'function' ? next(slot.value) : next
+        if (Object.is(value, slot.value)) return
+        slot.value = value
+        dirty = true
+      }]
+    },
+    useRef(initial) {
+      const index = cursor
+      cursor += 1
+      if (hooks[index] === undefined) hooks[index] = { current: initial }
+      return hooks[index]
+    },
+    useMemo(factory, deps) {
+      const index = cursor
+      cursor += 1
+      if (hooks[index] === undefined) hooks[index] = { value: factory(), deps }
+      else if (!sameDeps(hooks[index].deps, deps)) {
+        hooks[index].value = factory()
+        hooks[index].deps = deps
+      }
+      return hooks[index].value
+    },
+    useCallback(callback, deps) {
+      const index = cursor
+      cursor += 1
+      if (hooks[index] === undefined) hooks[index] = { value: callback, deps }
+      else if (!sameDeps(hooks[index].deps, deps)) {
+        hooks[index].value = callback
+        hooks[index].deps = deps
+      }
+      return hooks[index].value
+    },
+    useEffect(effect, deps) {
+      const index = cursor
+      cursor += 1
+      if (hooks[index] === undefined) hooks[index] = { deps: undefined, cleanup: undefined }
+      const slot = hooks[index]
+      const changed = !sameDeps(slot.deps, deps)
+      slot.deps = deps
+      if (changed) pending.push({ index, effect })
+    },
+  }
+  active.runtime = runtime
+
+  function renderOnce() {
+    cursor = 0
+    pending = []
+    dirty = false
+    rendered = panel({})
+  }
+
+  return {
+    render() {
+      renderOnce()
+    },
+    get tree() {
+      return rendered
+    },
+    get dirty() {
+      return dirty
+    },
+    get pendingEffects() {
+      return pending.length
+    },
+    mount(nextPanel) {
+      panel = nextPanel
+      renderOnce()
+    },
+    takeEffects() {
+      const effects = pending
+      pending = []
+      return effects
+    },
+    runEffect(entry) {
+      const slot = hooks[entry.index]
+      if (typeof slot.cleanup === 'function') slot.cleanup()
+      const cleanup = entry.effect()
+      slot.cleanup = typeof cleanup === 'function' ? cleanup : undefined
+    },
+    unmount() {
+      for (const slot of hooks) {
+        if (slot !== undefined && typeof slot.cleanup === 'function') slot.cleanup()
+      }
+    },
+  }
+}
+
+/** Run render/effects/microtasks until the panel is quiet. */
+async function settle(panel) {
+  for (let round = 0; round < 250; round += 1) {
+    if (panel.dirty) {
+      panel.render()
+      continue
+    }
+    const effects = panel.takeEffects()
+    if (effects.length > 0) {
+      for (const entry of effects) panel.runEffect(entry)
+      continue
+    }
+    if (panel.dirty) continue
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    if (!panel.dirty && panel.pendingEffects === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      if (!panel.dirty && panel.pendingEffects === 0) return
+    }
+  }
+  throw new Error('the workbench panel did not settle after 250 rounds')
+}
+
+/** Load the built client bundle the way `window.__ModuleLoader__` does. */
+let loadedClient
+function clientEntry() {
+  if (loadedClient !== undefined) return loadedClient
+  const loaded = []
+  const fakeWindow = {
+    __ModuleLoader__: {
+      load(spec) {
+        loaded.push(spec)
+      },
+    },
+  }
+  // The bundle is plain CJS wrapped by the loader; it is evaluated, not
+  // imported, because `require("react")` is what the web client resolves.
+  new Function('window', CLIENT_SOURCE)(fakeWindow)
+  assert.equal(loaded.length, 1, 'the client bundle must register exactly one factory')
+  assert.equal(loaded[0].id, 'dsh-image-forge')
+  const active = { runtime: undefined }
+  const react = {
+    createElement(type, props, ...children) {
+      const flat = []
+      for (const child of children) collectChildren(child, flat)
+      return { type, props: props === null || props === undefined ? {} : props, children: flat }
+    },
+    useState(initial) {
+      return active.runtime.useState(initial)
+    },
+    useRef(initial) {
+      return active.runtime.useRef(initial)
+    },
+    useMemo(factory, deps) {
+      return active.runtime.useMemo(factory, deps)
+    },
+    useCallback(callback, deps) {
+      return active.runtime.useCallback(callback, deps)
+    },
+    useEffect(effect, deps) {
+      active.runtime.useEffect(effect, deps)
+    },
+  }
+  const exports = loaded[0].factory((name) => {
+    if (name === 'react') return react
+    throw new Error('lib/client.js requested an unexpected module: ' + name)
+  })
+  loadedClient = { exports, active }
+  return loadedClient
+}
+
+/** Run `apply` and return the component seated in the `main` keyed slot. */
+function studioPanelComponent(exports) {
+  const events = []
+  const slots = {
+    inject(name, register) {
+      events.push({ kind: 'inject', name, register })
+    },
+    register(options, component) {
+      events.push({ kind: 'register', options, component })
+      return () => {}
+    },
+  }
+  exports.apply({ slots, get: () => undefined })
+  // Declaring a slot is what runs its `inject` body, exactly like the shell.
+  for (const event of events) {
+    if (event.kind === 'inject') event.register()
+  }
+  const seat = events.find((event) => event.kind === 'register' && event.options.name === 'main')
+  assert.ok(seat, 'the workbench must be seated in the main keyed slot')
+  return seat.component
+}
+
+/**
+ * Stub the two globals the panel reaches for: `fetch` (capability snapshot
+ * only; the board list is empty in this harness) and `EventSource`.
+ */
+function installFakeNetwork(options) {
+  const previousFetch = globalThis.fetch
+  const previousEventSource = globalThis.EventSource
+  const calls = []
+  const sources = []
+  globalThis.fetch = async (input, init) => {
+    const url = String(input)
+    calls.push({ url, method: init === undefined || init.method === undefined ? 'GET' : init.method })
+    if (url.indexOf(STUDIO_CONFIG_ROUTE) === 0) return fakeResponse(HARNESS_CONFIG, 200)
+    if (url.indexOf(STUDIO_BOARD_ROUTE) === 0) return fakeResponse({ error: 'no board in this harness' }, 404)
+    return fakeResponse({ error: 'unstubbed fetch: ' + url }, 500)
+  }
+  class FakeEventSource {
+    constructor(url) {
+      this.url = url
+      this.readyState = 0
+      this.closed = false
+      this.listeners = new Map()
+      sources.push(this)
+    }
+    addEventListener(type, listener) {
+      const list = this.listeners.get(type) === undefined ? [] : this.listeners.get(type)
+      list.push(listener)
+      this.listeners.set(type, list)
+    }
+    close() {
+      this.closed = true
+      this.readyState = 2
+    }
+    emit(type, payload) {
+      if (this.closed) return
+      const list = this.listeners.get(type)
+      if (list === undefined) return
+      for (const listener of list) {
+        if (type === 'message') listener({ data: typeof payload === 'string' ? payload : JSON.stringify(payload) })
+        else listener({ type })
+      }
+    }
+  }
+  if (options !== undefined && options.eventSource === false) globalThis.EventSource = undefined
+  else globalThis.EventSource = FakeEventSource
+  return {
+    calls,
+    sources,
+    /** The one stream the mounted panel should have opened. */
+    open() {
+      assert.equal(sources.length, 1, 'the panel must open exactly one SSE stream')
+      return sources[0]
+    },
+    restore() {
+      globalThis.fetch = previousFetch
+      if (previousEventSource === undefined) delete globalThis.EventSource
+      else globalThis.EventSource = previousEventSource
+    },
+  }
+}
+
+/** The rendered live-progress line: phase, bridge state and its text. */
+function progressView(panel) {
+  const element = fakeElementWithClass(panel.tree, 'dsh-forge-progress')
+  assert.ok(element !== undefined, 'the panel must render a live-progress line')
+  return {
+    phase: element.props['data-phase'],
+    bridge: element.props['data-bridge'],
+    text: fakeText(element),
+  }
+}
+
+/** Width of the rendered progress bar, e.g. `34%`. */
+function progressFillWidth(panel) {
+  const fill = fakeElementWithClass(panel.tree, 'dsh-forge-progress-fill')
+  return fill === undefined ? undefined : fill.props.style.width
+}
+
+/** Mount a fresh workbench against a fresh network stub. */
+async function mountWorkbench(networkOptions) {
+  const harness = clientEntry()
+  const network = installFakeNetwork(networkOptions)
+  const panel = createHookRuntime(harness.active)
+  panel.mount(studioPanelComponent(harness.exports))
+  await settle(panel)
+  return { network, panel }
+}
+
+// ---------------------------------------------------------------------------
+// The bundle contract: subscribe same-origin, never open ComfyUI's socket.
+// ---------------------------------------------------------------------------
+
+test('the workbench streams from the plugin route and never opens ComfyUI itself', () => {
+  assert.ok(CLIENT_SOURCE.includes(STUDIO_EVENTS_ROUTE), 'the same-origin SSE route must be in the client bundle')
+  assert.ok(CLIENT_SOURCE.includes('new EventSource(STUDIO_EVENTS_ROUTE)'), 'the panel must subscribe with EventSource')
+  assert.ok(CLIENT_SOURCE.includes('实时进度已连接'), 'the live-progress copy must ship')
+  assert.ok(!CLIENT_SOURCE.includes('new WebSocket('), 'the browser must not open a WebSocket')
+  assert.ok(!CLIENT_SOURCE.includes('ws://'), 'the browser bundle must not carry a ws:// URL')
+  assert.ok(!CLIENT_SOURCE.includes('/ws?clientId='), 'the browser must not know ComfyUI socket ids')
+})
+
+// ---------------------------------------------------------------------------
+// The state sequence: queue → start → progress → done, asserted on the
+// rendered text and on the element attributes the CSS/tests can address.
+// ---------------------------------------------------------------------------
+
+test('queue, start, 17/50 progress and done drive the rendered progress line', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    const source = network.open()
+    assert.equal(source.url, STUDIO_EVENTS_ROUTE)
+
+    const phases = []
+    const record = () => {
+      const view = progressView(panel)
+      phases.push(view.phase)
+      return view
+    }
+
+    const idle = record()
+    assert.equal(idle.phase, 'idle')
+    assert.equal(idle.bridge, 'connecting')
+    assert.ok(idle.text.includes('等待生成'))
+    assert.ok(idle.text.includes('实时进度连接中'))
+
+    source.emit('message', { type: 'state', state: 'connected', endpoint: 'http://127.0.0.1:8188' })
+    await settle(panel)
+    assert.equal(record().bridge, 'connected')
+    assert.ok(progressView(panel).text.includes('实时进度已连接 · http://127.0.0.1:8188'))
+
+    source.emit('message', { type: 'queue', remaining: 3 })
+    await settle(panel)
+    assert.equal(record().phase, 'queued')
+    assert.ok(progressView(panel).text.includes('排队中 · 前面还有 3 个任务'))
+
+    source.emit('message', { type: 'start', promptId: 'prompt-1' })
+    await settle(panel)
+    assert.equal(record().phase, 'running')
+    assert.ok(progressView(panel).text.includes('生成中…（等待第一步）'))
+    assert.equal(progressFillWidth(panel), '0%')
+
+    source.emit('message', { type: 'progress', promptId: 'prompt-1', value: 17, max: 50, percent: 34, label: '17/50' })
+    await settle(panel)
+    assert.equal(record().phase, 'running')
+    assert.ok(progressView(panel).text.includes('第 17/50 步'))
+    assert.equal(progressFillWidth(panel), '34%')
+
+    source.emit('message', { type: 'progress', promptId: 'prompt-1', value: 25, max: 50, percent: 50, label: '25/50' })
+    await settle(panel)
+    assert.ok(record().text.includes('第 25/50 步'))
+    assert.equal(progressFillWidth(panel), '50%')
+
+    source.emit('message', { type: 'done', promptId: 'prompt-1' })
+    await settle(panel)
+    assert.equal(record().phase, 'done')
+    assert.ok(progressView(panel).text.includes('本次生成完成（25/50）'))
+    assert.equal(progressFillWidth(panel), '100%')
+
+    // ComfyUI broadcasts the queue on every change, including after this run
+    // ends. That must not turn a finished run back into "queued".
+    source.emit('message', { type: 'queue', remaining: 0 })
+    await settle(panel)
+    assert.equal(record().phase, 'done')
+    assert.equal(progressView(panel).phase, 'done')
+
+    assert.deepEqual(phases, ['idle', 'idle', 'queued', 'running', 'running', 'running', 'done', 'done'])
+  } finally {
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Failures and a stopped ComfyUI: visible, friendly, never a hang.
+// ---------------------------------------------------------------------------
+
+test('failures, interruption and a stopped ComfyUI stay visible and friendly', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    const source = network.open()
+    source.emit('message', { type: 'state', state: 'connected', endpoint: 'http://127.0.0.1:8188' })
+    await settle(panel)
+
+    source.emit('message', { type: 'error', promptId: 'prompt-2', node: '5', nodeType: 'KSampler', message: 'CUDA out of memory' })
+    await settle(panel)
+    const failed = progressView(panel)
+    assert.equal(failed.phase, 'error')
+    assert.ok(failed.text.includes('生成失败：CUDA out of memory'))
+
+    source.emit('message', { type: 'interrupted', promptId: 'prompt-2' })
+    await settle(panel)
+    assert.equal(progressView(panel).phase, 'interrupted')
+    assert.ok(progressView(panel).text.includes('生成已中断'))
+
+    // ComfyUI goes away: the bridge says why, and that HTTP generation still
+    // works. The run's own phase is untouched.
+    source.emit('message', { type: 'state', state: 'disconnected', reason: 'ComfyUI 的 /ws 连接已断开' })
+    await settle(panel)
+    const broken = progressView(panel)
+    assert.equal(broken.bridge, 'disconnected')
+    assert.ok(broken.text.includes('实时进度断开：ComfyUI 的 /ws 连接已断开'))
+    assert.ok(broken.text.includes('出图仍会走 HTTP'))
+    assert.equal(broken.phase, 'interrupted')
+
+    // The host's own stream drops: EventSource retries by itself, and the
+    // panel says "reconnecting" instead of freezing on the last step.
+    source.emit('error')
+    await settle(panel)
+    assert.equal(progressView(panel).bridge, 'reconnecting')
+    assert.ok(progressView(panel).text.includes('正在重连'))
+
+    // A later state frame clears it: the message is not sticky.
+    source.emit('message', { type: 'state', state: 'connected', endpoint: 'http://127.0.0.1:8188' })
+    await settle(panel)
+    assert.equal(progressView(panel).bridge, 'connected')
+  } finally {
+    network.restore()
+  }
+})
+
+test('a malformed or unknown frame is dropped, not allowed to break the panel', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    const source = network.open()
+    source.emit('message', 'not json at all')
+    source.emit('message', '{"type":42}')
+    source.emit('message', { type: 'cached', promptId: 'prompt-3', nodes: ['1'] })
+    source.emit('message', { type: 'cam.monitor', data: { cpu: 0 } })
+    await settle(panel)
+    assert.equal(progressView(panel).phase, 'idle')
+
+    source.emit('message', { type: 'progress', promptId: 'prompt-3', value: 2, max: 4, percent: 50, label: '2/4' })
+    await settle(panel)
+    assert.ok(progressView(panel).text.includes('第 2/4 步'))
+  } finally {
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Degraded hosts: no EventSource still renders; leaving the panel cleans up.
+// ---------------------------------------------------------------------------
+
+test('a host without EventSource shows the reason and keeps working', async () => {
+  const { network, panel } = await mountWorkbench({ eventSource: false })
+  try {
+    const view = progressView(panel)
+    assert.equal(view.bridge, 'disconnected')
+    assert.ok(view.text.includes('实时进度断开：当前环境不支持 EventSource'))
+    assert.ok(view.text.includes('出图仍会走 HTTP'))
+    assert.equal(network.sources.length, 0)
+  } finally {
+    network.restore()
+  }
+})
+
+test('unmounting the panel closes the stream and late frames do nothing', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    const source = network.open()
+    source.emit('message', { type: 'start', promptId: 'prompt-4' })
+    await settle(panel)
+    assert.equal(progressView(panel).phase, 'running')
+
+    panel.unmount()
+    assert.equal(source.closed, true, 'the panel must close its SSE stream on unmount')
+    assert.equal(network.sources.length, 1)
+    assert.doesNotThrow(() => source.emit('message', { type: 'progress', promptId: 'prompt-4', value: 1, max: 2, percent: 50, label: '1/2' }))
+  } finally {
+    network.restore()
+  }
+})
+

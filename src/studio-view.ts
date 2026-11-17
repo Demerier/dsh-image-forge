@@ -63,6 +63,7 @@ import {
   STUDIO_ASSETS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CONFIG_ROUTE,
+  STUDIO_EVENTS_ROUTE,
   STUDIO_GENERATE_ROUTE,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
@@ -80,6 +81,7 @@ import {
   type StudioImage,
   type StudioOptimizeResponse,
   type StudioPromptStyle,
+  type StudioProgressEvent,
   type StudioReferencePayload,
 } from './studio-shared.ts'
 
@@ -299,6 +301,133 @@ export function StudioPanelIcon(props?: StudioPanelIconProps): ReturnType<typeof
   )
 }
 
+/** Live progress as the panel renders it: one value per SSE message. */
+interface LiveProgress {
+  /** What the run is doing, which is the part the user watches. */
+  readonly phase: 'idle' | 'queued' | 'running' | 'done' | 'error' | 'interrupted'
+  /**
+   * The bridge's connection, deliberately separate from the run's phase: a run
+   * that is already done keeps saying so after ComfyUI stops.
+   */
+  readonly bridge: 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+  /** ComfyUI tasks still queued, as of the last `status` frame. */
+  readonly queue: number
+  /** Step copy from the stream, e.g. `17/50` — printed verbatim. */
+  readonly label?: string
+  /** 0–100, already computed by the bridge. */
+  readonly percent?: number
+  /** Endpoint the bridge is connected to, for the status line. */
+  readonly endpoint?: string
+  /** Why the bridge is down or reconnecting. */
+  readonly bridgeNote?: string
+  /** Failure headline for `error`; never a traceback. */
+  readonly message?: string
+}
+
+/** Before the first frame: waiting for the bridge, nothing running. */
+const INITIAL_LIVE_PROGRESS: LiveProgress = { phase: 'idle', bridge: 'connecting', queue: 0 }
+
+/**
+ * Parse one SSE `data:` payload.
+ *
+ * The stream comes from this plugin, but a message is still untrusted input:
+ * a malformed frame is dropped rather than allowed to throw inside a listener.
+ *
+ * @param raw - the `MessageEvent.data` value.
+ * @returns the event, when the payload is a JSON object with a string `type`.
+ */
+function parseProgressEvent(raw: unknown): StudioProgressEvent | undefined {
+  if (typeof raw !== 'string') return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const type = (value as { type?: unknown }).type
+  return typeof type === 'string' ? value as StudioProgressEvent : undefined
+}
+
+/**
+ * Fold one event from {@link STUDIO_EVENTS_ROUTE} into the panel's live state.
+ *
+ * Pure on purpose: the SSE listener only calls `setLive` with the result, so
+ * the state machine can be read — and reasoned about — without a renderer. A
+ * `queue` frame is the only one that can move the phase backwards, and only
+ * from `queued`/`idle`: a finished run must not turn back into "waiting"
+ * because a later broadcast says the queue is empty.
+ *
+ * @param current - the state before the event.
+ * @param event - one normalized progress event.
+ * @returns the next state.
+ */
+function reduceProgressEvent(current: LiveProgress, event: StudioProgressEvent): LiveProgress {
+  switch (event.type) {
+    case 'state':
+      return {
+        ...current,
+        bridge: event.state === 'connected' ? 'connected' : event.state === 'connecting' ? 'connecting' : 'disconnected',
+        ...(event.endpoint === undefined ? {} : { endpoint: event.endpoint }),
+        ...(event.reason === undefined ? {} : { bridgeNote: event.reason }),
+      }
+    case 'queue': {
+      // `queue_remaining` is broadcast for every queue change, including the
+      // one after this run ended; only a run that has not started can be
+      // "queued".
+      const waiting = current.phase === 'idle' || current.phase === 'queued'
+      return {
+        ...current,
+        queue: event.remaining,
+        ...(waiting ? { phase: event.remaining > 0 ? 'queued' as const : 'idle' as const } : {}),
+      }
+    }
+    case 'start':
+      return { ...current, phase: 'running', label: undefined, percent: 0, message: undefined }
+    case 'progress':
+      return { ...current, phase: 'running', label: event.label, percent: event.percent, message: undefined }
+    case 'done':
+      return { ...current, phase: 'done', percent: 100, message: undefined }
+    case 'error':
+      return { ...current, phase: 'error', message: event.message }
+    case 'interrupted':
+      return { ...current, phase: 'interrupted', message: '已中断' }
+    default:
+      // `cached` and any future event type carry nothing the panel renders.
+      return current
+  }
+}
+
+/** The run-status line: what phase and step the panel should print. */
+function progressStepText(live: LiveProgress): string {
+  if (live.phase === 'running') return live.label === undefined ? '生成中…（等待第一步）' : `第 ${live.label} 步`
+  if (live.phase === 'queued') {
+    return live.queue > 0 ? `排队中 · 前面还有 ${String(live.queue)} 个任务` : '排队中…'
+  }
+  if (live.phase === 'done') return live.label === undefined ? '本次生成完成' : `本次生成完成（${live.label}）`
+  if (live.phase === 'error') return `生成失败：${live.message ?? '未知错误'}`
+  if (live.phase === 'interrupted') return '生成已中断'
+  return '等待生成'
+}
+
+/**
+ * The bridge line: connection state with a reason, never an endless spinner.
+ *
+ * A stopped ComfyUI is the case this copy is for — the panel must say what is
+ * down and that generating over HTTP still works, instead of showing a frozen
+ * step counter forever.
+ */
+function progressBridgeText(live: LiveProgress): string {
+  if (live.bridge === 'connected') {
+    return live.endpoint === undefined ? '实时进度已连接' : `实时进度已连接 · ${live.endpoint}`
+  }
+  if (live.bridge === 'reconnecting') return '实时进度连接中断，正在重连…'
+  if (live.bridge === 'disconnected') {
+    return `实时进度断开：${live.bridgeNote ?? 'ComfyUI 未连接'}（出图仍会走 HTTP，不影响本次生成）`
+  }
+  return '实时进度连接中…'
+}
+
 /**
  * Render the workbench.
  *
@@ -319,6 +448,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const [note, setNote] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [optimizeNote, setOptimizeNote] = useState<string | undefined>(undefined)
+  // Live progress from the plugin's same-origin SSE stream. The panel never
+  // opens ComfyUI's own socket: Node subscribes to `/ws` and re-publishes
+  // normalized events here (decision 4 in `docs/DIRECTION-ALIGNMENT.md`).
+  const [live, setLive] = useState<LiveProgress>(INITIAL_LIVE_PROGRESS)
   // Rewriting convention: house prose (default) or the keyword formula. Kept
   // across optimise clicks, because trying both on the same idea is the point.
   const [promptStyle, setPromptStyle] = useState<StudioPromptStyle>('prose')
@@ -430,6 +563,28 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       for (const reference of referencesRef.current) URL.revokeObjectURL(reference.previewUrl)
     }
   }, [loadConfig])
+
+  // Subscribe to the live progress stream. This is an enhancement, never a
+  // dependency: a host that cannot serve the stream, or a browser without
+  // `EventSource`, still generates — it just cannot show the step counter.
+  // The browser reconnects the stream on its own after a transient drop, so
+  // the error listener only reports "not live right now"; the server-side
+  // `state` events carry the real ComfyUI diagnosis.
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') {
+      setLive((current) => ({ ...current, bridge: 'disconnected', bridgeNote: '当前环境不支持 EventSource' }))
+      return undefined
+    }
+    const source = new EventSource(STUDIO_EVENTS_ROUTE)
+    source.addEventListener('message', (event: { data?: unknown }) => {
+      const parsed = parseProgressEvent(event.data)
+      if (parsed !== undefined) setLive((current) => reduceProgressEvent(current, parsed))
+    })
+    source.addEventListener('error', () => {
+      setLive((current) => ({ ...current, bridge: 'reconnecting' }))
+    })
+    return () => { source.close() }
+  }, [])
 
   const selectedBatch = useMemo(
     () => batches.find((batch) => batch.id === selectedId) ?? batches[0],
@@ -1109,6 +1264,48 @@ export function StudioPanel(): ReturnType<typeof createElement> {
           '重新检测',
         ),
       ),
+    ),
+
+    // ---- live progress ---------------------------------------------------
+    //
+    // Always visible, so "waiting" and "ComfyUI is down" are distinguishable
+    // without clicking anything; `role=status` lets a screen reader announce
+    // step changes. The bar is styled inline because the client stylesheet is
+    // a different file from this one.
+    createElement(
+      'div',
+      {
+        className: 'dsh-forge-progress',
+        'data-phase': live.phase,
+        'data-bridge': live.bridge,
+        role: 'status',
+        'aria-live': 'polite',
+      },
+      [
+        createElement('span', { key: 'step', className: 'dsh-forge-progress-step' }, progressStepText(live)),
+        live.percent === undefined
+          ? null
+          : createElement(
+            'span',
+            {
+              key: 'bar',
+              className: 'dsh-forge-progress-bar',
+              style: { display: 'block', height: '4px', borderRadius: '2px', background: 'rgba(127,127,127,.22)', overflow: 'hidden' },
+            },
+            createElement('i', {
+              className: 'dsh-forge-progress-fill',
+              style: {
+                display: 'block',
+                height: '100%',
+                width: `${String(live.percent)}%`,
+                background: 'currentColor',
+                borderRadius: '2px',
+                transition: 'width .2s',
+              },
+            }),
+          ),
+        createElement('span', { key: 'bridge', className: 'dsh-forge-progress-bridge' }, progressBridgeText(live)),
+      ],
     ),
 
     // ---- the board this canvas is ----------------------------------------
