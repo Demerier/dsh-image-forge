@@ -62,12 +62,13 @@ test('the config schema resolves every documented field', () => {
   }
 })
 
-test('apply registers the three qwen_image_* tools and the skill', () => {
+test('apply registers the four qwen_image_* tools and the skill', () => {
   const { ctx, tools, skills } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-surface-')) }))
   assert.deepEqual([...tools.keys()].sort(), [
     'qwen_image_edit',
     'qwen_image_generate',
+    'qwen_image_setup',
     'qwen_image_status',
   ])
   assert.equal(skills.length, 1)

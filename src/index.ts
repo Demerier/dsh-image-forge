@@ -7,6 +7,7 @@ import {
   type ConfigField,
   type ConfigRecord,
 } from './config-resolve.ts'
+import { registerEnvironmentTools } from './environment.ts'
 import { registerImageForgeSkill } from './skill.ts'
 import { registerStudioRoutes } from './studio-routes.ts'
 import { studioSettingsOf } from './studio-service.ts'
@@ -203,6 +204,7 @@ function resolveConfig(config?: ConfigFields): Config {
  */
 export function apply(ctx: Context, config?: ConfigFields): void {
   registerImageForgeTools(ctx, () => resolveConfig(config))
+  registerEnvironmentTools(ctx, () => resolveConfig(config))
   registerImageForgeSkill(ctx)
   registerStudioRoutesIfMounted(ctx, config)
 }
