@@ -17,14 +17,26 @@
  * so the workbench is reachable from the sidebar without depending on an
  * optional profile package.
  *
- * ## Deliberately not ported
+ * ## What the canvas is now, and what it is still not
  *
  * The reference Studio ships a tldraw infinite canvas and a multi-provider
- * comparison grid. Neither is copied here. The canvas needs `tldraw` (a ~1 MB
- * client dependency) and answers a question this workbench does not ask — where
- * images sit on a board — while comparison needs several providers, and this
- * Studio intentionally has exactly one. What *is* kept is the working loop:
- * prompt → optimise → ratio/steps/references → generate → inspect → reuse.
+ * comparison grid. The canvas is not a wall of finished pictures any more: it is
+ * where the work happens, with images, generation tasks and layout drafts as
+ * first-class nodes and persisted lineage edges between them (the direction
+ * change is written down as D6 in `docs/CANVAS-DESIGN.md`; the earlier note here
+ * said a node was only ever a result, and that is no longer the contract).
+ *
+ * What is still not ported: tldraw itself. It is a ~1 MB client dependency, and
+ * its shape system, drawing tools and collaboration model answer questions this
+ * workbench does not ask — the camera arithmetic this file drives is pure,
+ * unit-tested and already enough for pan/zoom/fit (§12 of the design). The
+ * comparison grid is out too: this Studio intentionally has exactly one backend.
+ *
+ * Nor is this a Comfy-style parameter graph. Edges mean "this came from that" —
+ * derivation, references, layouts — never "output A feeds input B of node C";
+ * the generation request stays a form, not a wiring diagram, and the backend
+ * (HTTP/MCP) is untouched by this canvas. The loop is still prompt → optimise →
+ * ratio/steps/references → generate → inspect → reuse.
  *
  * ## State discipline
  *
@@ -46,12 +58,11 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import {
-  CANVAS_NODE_HEIGHT,
-  CANVAS_NODE_WIDTH,
   clampZoom,
   edgePath,
   fitCamera,
   nextNodeSpot,
+  nodeDisplaySize,
   panBy,
   zoomAt,
   zoomLabel,
@@ -98,10 +109,16 @@ interface HeldReference {
 /**
  * One image on the canvas.
  *
- * A node is a *result*, not a workflow step: it holds a finished file, where the
- * user put it, and which canvas nodes fed it. `parents` is what turns a pile of
- * images into something graph-shaped — an edit made from another result draws an
- * edge back to it, so the lineage of a session stays readable.
+ * Nodes are not just results any more. The canvas is where a session is worked
+ * on, so the node kinds are picture, generation task and layout draft — one
+ * union in `docs/CANVAS-DESIGN.md` §3.3, of which this build still produces
+ * picture nodes; the task and layout kinds arrive with their own commits.
+ *
+ * `parents` is what makes the board graph-shaped: an edit made from another
+ * result draws an edge back to it, so the lineage of a session stays readable.
+ * Those edges record derivation, not parameters — this is deliberately not a
+ * Comfy-style wiring graph, where an edge would mean "this output feeds that
+ * input".
  */
 interface CanvasNode {
   readonly id: string
@@ -117,9 +134,17 @@ type Gesture =
   | { kind: 'pan'; startX: number; startY: number; camera: Camera }
   | { kind: 'node'; id: string; startX: number; startY: number; origin: Point }
 
-/** World-space rectangle a node occupies. */
-function nodeRect(node: { x: number; y: number }): Rect {
-  return { x: node.x, y: node.y, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+/**
+ * World-space rectangle a node occupies.
+ *
+ * The width follows the picture's aspect ratio ({@link nodeDisplaySize}), so an
+ * edge anchors on the right edge of *this* node rather than a shared constant,
+ * and `nextNodeSpot` clears the widest neighbour instead of the default box. The
+ * height stays constant: caption and actions live below the picture area.
+ */
+function nodeRect(node: CanvasNode): Rect {
+  const size = nodeDisplaySize(node.image.width, node.image.height)
+  return { x: node.x, y: node.y, width: size.width, height: size.height }
 }
 
 /** A generated batch, kept so a previous result can be compared or reused. */
@@ -891,6 +916,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         setSelectedNodeId(first.id)
         // Only move the view when the new node would land off-screen: a user
         // who zoomed out to survey the session should not be yanked back in.
+        // The margins are the node's own, not a shared constant: a 16:9 result
+        // is 356 wide and a 9:16 one 113, so a fixed box under- or over-counts
+        // how much of it is already visible.
+        const firstRect = nodeRect(first)
         const element = canvasRef.current
         if (element !== null) {
           const box = element.getBoundingClientRect()
@@ -901,9 +930,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               right: current.x + box.width / current.zoom,
               bottom: current.y + box.height / current.zoom,
             }
-            const inside = first.x < visible.right - CANVAS_NODE_WIDTH * 0.4
-              && first.y < visible.bottom - CANVAS_NODE_HEIGHT * 0.4
-              && first.y > visible.top - CANVAS_NODE_HEIGHT * 0.6
+            const inside = first.x < visible.right - firstRect.width * 0.4
+              && first.y < visible.bottom - firstRect.height * 0.4
+              && first.y > visible.top - firstRect.height * 0.6
             return inside ? current : { zoom: current.zoom, x: first.x - 28, y: first.y - 28 }
           })
         }
@@ -1688,12 +1717,22 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               ),
               ...nodes.map((node) => {
                 const selected = node.id === selectedNodeId
+                // The width is inline because it belongs to this picture: the
+                // stylesheet cannot know the aspect ratio, and a fixed node
+                // width is exactly what turned a 16:9 result into a letterboxed
+                // thumbnail (D8). Height stays with the stylesheet — picture area
+                // plus caption/actions, which grow naturally when they wrap.
+                const rect = nodeRect(node)
                 return createElement(
                   'div',
                   {
                     key: node.id,
                     className: selected ? 'dsh-forge-node is-selected' : 'dsh-forge-node',
-                    style: { left: `${String(node.x)}px`, top: `${String(node.y)}px` },
+                    style: {
+                      left: `${String(node.x)}px`,
+                      top: `${String(node.y)}px`,
+                      width: `${String(rect.width)}px`,
+                    },
                     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onNodePointerDown(event, node) },
                   },
                   createElement('img', {

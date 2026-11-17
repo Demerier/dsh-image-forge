@@ -38,10 +38,22 @@ export const MIN_NODE_WIDTH = 96
 /** Widest an image node may render; extreme landscape assets clamp here. */
 export const MAX_NODE_WIDTH = 480
 
-/** Smallest zoom the canvas allows; below this a node is unreadable anyway. */
-export const CANVAS_MIN_ZOOM = 0.3
-/** Largest zoom the canvas allows; above this the bitmap gains nothing. */
-export const CANVAS_MAX_ZOOM = 2.5
+/**
+ * Smallest zoom the canvas allows.
+ *
+ * Stepping back to see the whole session *is* the point of a generation canvas:
+ * a 500-node board is roughly 15000×8000 world units, which the old 0.3 floor
+ * could not frame — `fitCamera` clamped and left the far columns off-screen.
+ * At 0.1 a node is still a legible colour block.
+ */
+export const CANVAS_MIN_ZOOM = 0.1
+/**
+ * Largest zoom the canvas allows.
+ *
+ * Imported assets are worth inspecting pixel by pixel, so a node's 200-world-unit
+ * picture area may be blown up to 800 screen pixels.
+ */
+export const CANVAS_MAX_ZOOM = 4
 
 /** Camera as stored in component state. */
 export interface Camera {

@@ -30,7 +30,10 @@ import {
 } from '../testlib/studio-canvas.js'
 
 test('screen and world conversions are inverse at every zoom', () => {
-  for (const zoom of [0.3, 0.75, 1, 1.8, 2.5]) {
+  // The extremes are the clamped bounds themselves (DD8: 0.1–4), so a silent
+  // change to either constant shows up here as a conversion that no longer maps
+  // back rather than as a zoom that merely feels wrong in the browser.
+  for (const zoom of [0.1, 0.75, 1, 1.8, 4]) {
     const camera = { x: -120, y: 48, zoom }
     for (const point of [{ x: 0, y: 0 }, { x: 37, y: -19 }, { x: 512.5, y: 300 }]) {
       const round = worldToScreen(camera, screenToWorld(camera, point))
@@ -52,12 +55,20 @@ test('zooming keeps the world point under the cursor pinned', () => {
 })
 
 test('zoom is clamped, and a clamped zoom is a no-op rather than a jump', () => {
+  // DD8: the supported range is 0.1–4, spelled out as literals so this test fails
+  // on the constant itself, not only on the code that uses it.
+  assert.equal(CANVAS_MIN_ZOOM, 0.1, 'zoom floor')
+  assert.equal(CANVAS_MAX_ZOOM, 4, 'zoom ceiling')
+  assert.equal(clampZoom(0.05), 0.1, 'below the floor clamps to the floor')
   assert.equal(clampZoom(99), CANVAS_MAX_ZOOM)
   assert.equal(clampZoom(0), CANVAS_MIN_ZOOM)
   assert.equal(clampZoom(Number.NaN), 1)
 
   const atMax = { x: 10, y: 10, zoom: CANVAS_MAX_ZOOM }
   assert.deepEqual(zoomAt(atMax, 2, { x: 100, y: 100 }), atMax, 'zooming past the ceiling must not pan')
+
+  const atMin = { x: 10, y: 10, zoom: CANVAS_MIN_ZOOM }
+  assert.deepEqual(zoomAt(atMin, 0.5, { x: 100, y: 100 }), atMin, 'zooming past the floor must not pan either')
 })
 
 test('panning converts a screen delta through the zoom', () => {
@@ -91,6 +102,23 @@ test('fit on an empty canvas does not move the view', () => {
   assert.deepEqual(fitCamera([], { width: 800, height: 400 }), { x: 0, y: 0, zoom: 1 })
 })
 
+test('a large board fits below the old 0.3 floor instead of being cut off', () => {
+  // The reason the floor moved (DD8). This board spans 3480×2240 world units; in
+  // an 800×400 viewport it needs ≈0.17, which the old clamp truncated to 0.3 —
+  // the far column and the bottom row then sat outside the viewport with no way
+  // to frame them.
+  const far = { x: 3000, y: 2000, width: MAX_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  const viewport = { width: 800, height: 400 }
+  const camera = fitCamera([{ x: 0, y: 0, width: MAX_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }, far], viewport)
+
+  assert.ok(camera.zoom < 0.3, 'the new floor lets the whole board fit')
+  assert.ok(camera.zoom >= CANVAS_MIN_ZOOM, 'and never dips below the floor')
+  const right = worldToScreen(camera, { x: far.x + far.width, y: 0 })
+  const bottom = worldToScreen(camera, { x: 0, y: far.y + far.height })
+  assert.ok(right.x <= viewport.width + 1, 'the far edge is on screen, not clipped away')
+  assert.ok(bottom.y <= viewport.height + 1, 'the bottom row is on screen')
+})
+
 test('a new node lands to the right of the last one, never on top', () => {
   assert.deepEqual(nextNodeSpot([]), { x: 0, y: 0 })
   const first = { x: 0, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
@@ -100,17 +128,35 @@ test('a new node lands to the right of the last one, never on top', () => {
 })
 
 test('an edge runs from the right edge of one node to the left edge of the next', () => {
-  const from = { x: 0, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
-  const to = { x: 400, y: 0, width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT }
+  // D8: the right edge is wherever that picture's ratio puts it. A 1:1 result is
+  // 200 world units wide and no longer lands on the old fixed 208 anchor; a 16:9
+  // one starts its outgoing edge 356 out, and a 9:16 target keeps its own left
+  // edge. `edgePath` itself only ever sees the rectangle.
+  const square = nodeDisplaySize(1024, 1024)
+  const portrait = nodeDisplaySize(1080, 1920)
+  const from = { x: 0, y: 0, width: square.width, height: square.height }
+  const to = { x: 400, y: 0, width: portrait.width, height: portrait.height }
+  assert.equal(square.width, 200, 'a 1:1 node is 200 wide, not the default 208')
+
   const path = edgePath(from, to)
-  assert.match(path, /^M 208 120 C /, 'starts at the right edge, vertically centred')
-  assert.match(path, /400 120$/, 'ends at the left edge, vertically centred')
+  assert.match(path, /^M 200 120 C /, 'starts at the right edge of the square node, vertically centred')
+  assert.match(path, /400 120$/, 'ends at the left edge of the target, vertically centred')
+
+  const wide = nodeDisplaySize(2560, 1440)
+  assert.match(
+    edgePath({ x: 0, y: 0, width: wide.width, height: wide.height }, to),
+    /^M 356 120 C /,
+    'a 16:9 node anchors its edge at its real width',
+  )
 })
 
 test('the zoom label rounds to whole percent', () => {
   assert.equal(zoomLabel(1), '100%')
   assert.equal(zoomLabel(0.333), '33%')
   assert.equal(zoomLabel(2.5), '250%')
+  // The ends of the new range (DD8), so the toolbar never shows "10.000000000000002%".
+  assert.equal(zoomLabel(CANVAS_MIN_ZOOM), '10%')
+  assert.equal(zoomLabel(CANVAS_MAX_ZOOM), '400%')
 })
 
 // --- Node geometry (D8): an image node is as wide as its picture wants. ------
