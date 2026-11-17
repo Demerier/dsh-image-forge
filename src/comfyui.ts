@@ -158,6 +158,58 @@ export interface ComfyOptions {
 }
 
 /**
+ * The `KSampler.sampler_name` values this plugin offers as an alternative.
+ *
+ * **ComfyUI-native only**: every name here ships with ComfyUI's own
+ * `comfy.samplers`. Third-party sampler packs (RES4LYF's `abnorsett_3m`,
+ * `beta_57` schedules, …) are deliberately absent — the plugin does not require
+ * or install third-party node packs, and an unknown name would fail only at
+ * `/prompt` time. `euler` remains the default; the alternatives are all
+ * single-source/community reports without a controlled comparison.
+ */
+export const NATIVE_SAMPLERS = [
+  'euler',
+  'euler_ancestral',
+  'heun',
+  'dpm_2',
+  'dpm_2_ancestral',
+  'lms',
+  'dpmpp_2s_ancestral',
+  'dpmpp_2m',
+  'dpmpp_2m_sde',
+  'dpmpp_sde',
+  'dpmpp_3m_sde',
+  'res_multistep',
+  'er_sde',
+  'ddim',
+] as const
+
+/** One sampler name the tools accept. */
+export type NativeSampler = (typeof NATIVE_SAMPLERS)[number]
+
+/**
+ * The `KSampler.scheduler` values this plugin offers.
+ *
+ * Also ComfyUI-native; `simple` stays the default, and `beta` is the scheduler
+ * the community `er_sde + beta` experiments pair with it.
+ */
+export const NATIVE_SCHEDULERS = ['simple', 'normal', 'karras', 'exponential', 'sgm_uniform', 'beta'] as const
+
+/** One scheduler name the tools accept. */
+export type NativeScheduler = (typeof NATIVE_SCHEDULERS)[number]
+
+/** Optional sampler/scheduler overrides for the Qwen base `KSampler` graph. */
+export interface SamplerOverrides {
+  /** `KSampler.sampler_name` override; absent keeps the profile's own sampler. */
+  readonly samplerName?: string
+  /** `KSampler.scheduler` override; absent keeps the profile's own scheduler. */
+  readonly scheduler?: string
+}
+
+/** Everything the optional per-call overrides can put on a graph. */
+export type WorkflowOverrides = QualityTierOverrides & SamplerOverrides
+
+/**
  * Optional quality-tier overrides for the Qwen base `KSampler` graphs.
  *
  * `tools.ts` owns the policy — when `cfg > 1` is allowed, the automatic negative
@@ -1007,7 +1059,7 @@ export function effectiveProfile(choice: ComfyModelChoice | string | undefined, 
 function textToImageValues(
   profile: ModelProfile,
   models: ComfyModels,
-  request: GenerateRequest & QualityTierOverrides,
+  request: GenerateRequest & WorkflowOverrides,
   preset?: string,
 ): Record<string, unknown> {
   assertLatentAligned(profile, request.width, request.height)
@@ -1026,8 +1078,10 @@ function textToImageValues(
     seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
     steps: request.steps ?? sampling.steps.default,
     cfg: request.cfg ?? sampling.sampler.cfg,
-    sampler_name: sampling.sampler.name,
-    scheduler: sampling.sampler.scheduler,
+    // The optional sampler/scheduler overrides are validated by `tools.ts`; an
+    // absent pair keeps the profile's own numbers, so a default call is unchanged.
+    sampler_name: request.samplerName ?? sampling.sampler.name,
+    scheduler: request.scheduler ?? sampling.sampler.scheduler,
     sigmas: sampling.steps.sigmas,
     filename_prefix: profile.filenamePrefix,
   }
@@ -1051,7 +1105,7 @@ function textToImageValues(
 function renderTextToImage(
   profile: ModelProfile,
   models: ComfyModels,
-  request: GenerateRequest & QualityTierOverrides,
+  request: GenerateRequest & WorkflowOverrides,
   preset?: string,
 ): Record<string, unknown> {
   const template =
@@ -1081,7 +1135,7 @@ function renderTextToImage(
 export async function generateViaComfyUi(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest & QualityTierOverrides,
+  request: GenerateRequest & WorkflowOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
@@ -1242,7 +1296,7 @@ async function renderEditGraph(
   target: ComfyTarget,
   profile: ModelProfile,
   models: ComfyModels,
-  request: GenerateRequest & QualityTierOverrides,
+  request: GenerateRequest & WorkflowOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
@@ -1288,7 +1342,7 @@ async function renderEditGraph(
 export async function generateViaComfyUiEdit(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest & QualityTierOverrides,
+  request: GenerateRequest & WorkflowOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
@@ -1319,7 +1373,7 @@ export async function generateViaComfyUiEdit(
 export async function generateViaComfyUiTurbo(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest & QualityTierOverrides,
+  request: GenerateRequest & WorkflowOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
@@ -1353,7 +1407,7 @@ export async function generateViaComfyUiTurbo(
 export async function generateViaComfyUiTurboEdit(
   target: ComfyTarget,
   models: ComfyModels,
-  request: GenerateRequest & QualityTierOverrides,
+  request: GenerateRequest & WorkflowOverrides,
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {

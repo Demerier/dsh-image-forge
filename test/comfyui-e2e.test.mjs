@@ -649,6 +649,56 @@ test('qwen_image_status compares the ComfyUI version against the cache requireme
   }
 })
 
+// ---------------------------------------------------------------------------
+// The advanced sampler tier: optional, ComfyUI-native, Qwen base only.
+// ---------------------------------------------------------------------------
+
+test('the sampler tier is opt-in and native-only; turbo/MOSS refuse it', async () => {
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-sampler-tier-'))
+  try {
+    const base = (overrides) => register({ comfyEndpoint: comfy.endpoint, outputDir, timeoutMs: 30_000, ...overrides })
+    const args = { prompt: 'A cat.', wh_ratio: '1:1', seed: 4 }
+    const sampler = () => comfy.state.graph['6'].inputs
+
+    // 1. Default path stays euler/simple.
+    const plain = await run(base({}), 'qwen_image_generate', args)
+    assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['euler', 'simple'])
+    assert.equal(plain.sampling, undefined)
+
+    // 2. An explicit pair reaches KSampler and is reported with its evidence level.
+    const custom = await run(base({}), 'qwen_image_generate', { ...args, sampler: 'res_multistep', scheduler: 'beta' })
+    assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['res_multistep', 'beta'])
+    assert.equal(custom.sampling.sampler, 'res_multistep')
+    assert.equal(custom.sampling.scheduler, 'beta')
+    assert.match(custom.sampling.note, /孤证/)
+
+    // 3. One half alone keeps the profile's other half.
+    await run(base({}), 'qwen_image_generate', { ...args, sampler: 'er_sde' })
+    assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['er_sde', 'simple'])
+    await run(base({}), 'qwen_image_generate', { ...args, scheduler: 'karras' })
+    assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['euler', 'karras'])
+
+    // 4. Third-party samplers are refused before any backend call.
+    const before = comfy.seen.filter((entry) => entry.path === '/prompt').length
+    const thirdParty = await failure(base({}), 'qwen_image_generate', { ...args, sampler: 'abnorsett_3m' })
+    // The tool schema rejects anything outside the native enum before execute runs.
+    assert.match(thirdParty.message, /invalid arguments/)
+    assert.match(thirdParty.message, /sampler.*must be one of/)
+    assert.ok(!thirdParty.message.includes('abnorsett_3m"'))
+
+    // 5. turbo and MOSS refuse the tier (their sampling is not a free KSampler).
+    const turbo = await failure(base({ comfyModel: 'qwen21-turbo' }), 'qwen_image_generate', { ...args, sampler: 'res_multistep' })
+    assert.match(turbo.message, /只对 Qwen base 生效/)
+    const moss = await failure(base({ comfyModel: 'moss-sft' }), 'qwen_image_generate', { ...args, scheduler: 'beta' })
+    assert.match(moss.message, /只对 Qwen base 生效/)
+    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, before, 'refusals must not submit')
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
 test('the Qwen text encoder prefers w4a8 over int8 over bf16', async () => {
   /** The fake server with a chosen CLIPLoader option list. */
   const qwenWithClips = (clipNames) => {

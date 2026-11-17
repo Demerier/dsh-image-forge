@@ -204,6 +204,35 @@ test('the image tools expose the optional quality tier, default-free', () => {
   }
 })
 
+test('the image tools expose the advanced sampler tier, native-only and default-free', () => {
+  const { ctx, tools } = captureContext()
+  plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-sampler-schema-')) }))
+  const EXPECTED_SAMPLERS = ['euler', 'res_multistep', 'er_sde', 'dpmpp_2m', 'heun']
+  const EXPECTED_SCHEDULERS = ['simple', 'normal', 'karras', 'exponential', 'sgm_uniform', 'beta']
+  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+    const parameters = tools.get(tool).parameters
+    const property = (name) => parameters?.properties?.[name] ?? parameters?.[name]
+    for (const name of ['sampler', 'scheduler']) {
+      const parameter = property(name)
+      assert.ok(parameter !== undefined, `${tool} must expose ${name}`)
+      assert.equal(parameter.type, 'string')
+      assert.equal(parameter.required, undefined, `${tool}.${name} must be optional`)
+      assert.equal(parameter.default, undefined, `${tool}.${name} must carry no default`)
+      assert.match(String(parameter.description), /native|原生/)
+      assert.match(String(parameter.description), /不内置/)
+    }
+    const samplerEnum = property('sampler').enum
+    const schedulerEnum = property('scheduler').enum
+    for (const wanted of EXPECTED_SAMPLERS) assert.ok(samplerEnum.includes(wanted), `sampler enum lost ${wanted}`)
+    for (const wanted of EXPECTED_SCHEDULERS) assert.ok(schedulerEnum.includes(wanted), `scheduler enum lost ${wanted}`)
+    // Third-party sampler packs are a documented non-goal: the enum must never
+    // offer one, so a caller cannot reach a node pack this plugin does not require.
+    for (const name of [...samplerEnum, ...schedulerEnum]) {
+      assert.ok(!/RES4LYF|abnorsett|beta_57/i.test(name), `third-party sampler offered: ${name}`)
+    }
+  }
+})
+
 test('the image tools carry no backend selector, and status needs no parameters', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-schema2-')) }))

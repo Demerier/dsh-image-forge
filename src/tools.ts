@@ -24,12 +24,16 @@ import {
   generateViaComfyUiTurbo,
   generateViaComfyUiTurboEdit,
   loadComfyModels,
+  NATIVE_SAMPLERS,
+  NATIVE_SCHEDULERS,
   parseComfyPorts,
   probeComfyUi,
   resolveProfile,
   TURBO_STEPS,
   type ComfyModelChoice,
   type ComfyModels,
+  type NativeScheduler,
+  type NativeSampler,
 } from './comfyui.ts'
 import { presetSteps, type ModelProfile, type MossSamplingPreset } from './model-profiles.ts'
 import type { GeneratedImage } from './images.ts'
@@ -73,6 +77,35 @@ const QUALITY_PARAMETERS: ParameterSchemaSpec = {
       '负向提示词（**只对 Qwen base 生效**，且只在 cfg>1 时有效——cfg=1 时 ComfyUI 跳过负向条件化）。' +
       '省略而 cfg>1 时会自动补默认负向词集（含 "overly warm color temperature"，压黄偏移），结果里会标明来源；' +
       'cfg=1 时给负向词会被拒绝（否则会被静默忽略）。默认空 = 官方口径。',
+  },
+}
+
+/**
+ * The optional advanced-sampler knobs both image tools carry.
+ *
+ * Default-free: an omitted pair keeps the profile's own sampler/scheduler
+ * (`euler` / `simple` for Qwen base), so a default call is byte-identical. The
+ * values are ComfyUI-native only — see `NATIVE_SAMPLERS` — and the policy (which
+ * profiles accept them) lives in {@link resolveSamplerOverrides}.
+ */
+const SAMPLER_PARAMETERS: ParameterSchemaSpec = {
+  sampler: {
+    type: 'string',
+    enum: NATIVE_SAMPLERS,
+    description:
+      '采样器（**只对 Qwen base 生效**；默认 euler = 官方模板与社区共识的安全组合，省略时请求与改动前逐字节一致）。' +
+      '可选值全部是 ComfyUI **原生**采样器（含 res_multistep、er_sde）；RES4LYF 等第三方节点包的组合**不内置**。' +
+      '替代组合的收益都是社区〔孤证/轶闻〕、无严格对照，换之前先用同 seed 对比。' +
+      'turbo（ManualSigmas 蒸馏档）与 moss-sft（采样器由 mossSampling 档位管理）会拒绝该参数。',
+  },
+  scheduler: {
+    type: 'string',
+    enum: NATIVE_SCHEDULERS,
+    description:
+      '调度器（**只对 Qwen base 生效**；默认 simple = 官方模板口径）。只收 ComfyUI **原生**调度器 ' +
+      '（simple / normal / karras / exponential / sgm_uniform / beta）；er_sde + beta 之类是社区的替代组合〔孤证〕，' +
+      '没有严格对照；官方仍推荐 euler/simple。第三方节点包的调度器（RES4LYF 等）**不内置**。' +
+      'turbo 与 moss-sft 会拒绝该参数。',
   },
 }
 
@@ -122,6 +155,7 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
       '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
   ...QUALITY_PARAMETERS,
+  ...SAMPLER_PARAMETERS,
   seed: {
     type: 'integer',
     description: '随机种子；同一 seed + 同一 prompt + 同一尺寸可复现同一张图。省略即随机。',
@@ -198,6 +232,7 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
       '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
   ...QUALITY_PARAMETERS,
+  ...SAMPLER_PARAMETERS,
   seed: {
     type: 'integer',
     description: '随机种子；同一 seed + 同一 prompt + 同一参考图 + 同一尺寸可复现同一张图。省略即随机。',
@@ -782,6 +817,64 @@ export function comfyVersionAtLeast(version: string | null, minimum: string): bo
   return true
 }
 
+/** The sampler/scheduler one call will run, when the caller overrode them. */
+export interface SamplerResolution {
+  readonly samplerName: NativeSampler
+  readonly scheduler: NativeScheduler
+}
+
+/**
+ * Resolve the optional advanced-sampler knobs for one call.
+ *
+ * ComfyUI-native names only: a third-party sampler (RES4LYF's `abnorsett_3m`, …)
+ * is not shipped by this plugin, and an unknown name would only be rejected by
+ * ComfyUI after a GPU load. The tier is Qwen **base** only — turbo's sampler and
+ * schedule are fixed by the distilled `ManualSigmas` graph, and MOSS's sampler
+ * numbers belong to its `mossSampling` register. Both halves of the pair are
+ * optional; an omitted half keeps the profile's own value, so the default path
+ * renders a byte-identical graph.
+ *
+ * Community reports for these alternatives are single-source/no controlled
+ * comparison, so the result note says so rather than claiming a quality win.
+ *
+ * @param profile - the profile the caller **asked for** (not a degraded one).
+ * @param sampler - explicit `sampler`, when the caller gave one.
+ * @param scheduler - explicit `scheduler`, when the caller gave one.
+ * @returns the override pair, or null when neither parameter was used.
+ * @throws When the profile does not run a free `KSampler`, or a name is not
+ *   ComfyUI-native.
+ */
+export function resolveSamplerOverrides(
+  profile: ModelProfile,
+  sampler: string | undefined,
+  scheduler: string | undefined,
+): SamplerResolution | null {
+  if (sampler === undefined && scheduler === undefined) return null
+  if (profile.variant !== 'base' || profile.family !== 'qwen-image-2.1') {
+    const why = profile.variant === 'turbo'
+      ? 'turbo 走 SamplerCustomAdvanced + ManualSigmas 蒸馏档，采样器与步数都由 sigma 表固定'
+      : 'MOSS 的采样器与调度器由采样档位 mossSampling 管理（comfy: er_sde/simple，official: euler/simple）'
+    throw new Error(
+      `comfyui backend: 高级采样器（sampler / scheduler）只对 Qwen base 生效，当前请求的 profile 是 ${profile.label}——${why}。\n` +
+        '  高级采样器请在 comfyModel=qwen21-base 下使用；turbo 与 moss-sft 不接受这两个参数。',
+    )
+  }
+  const resolvedSampler = (sampler ?? profile.sampler.name) as NativeSampler
+  const resolvedScheduler = (scheduler ?? profile.sampler.scheduler) as NativeScheduler
+  if (!(NATIVE_SAMPLERS as readonly string[]).includes(resolvedSampler)) {
+    throw new Error(
+      `sampler must be one of ComfyUI's native samplers (${NATIVE_SAMPLERS.join(' / ')}), got "${String(sampler)}".\n` +
+        '  RES4LYF 等第三方节点包的采样器不内置：本插件不引入第三方节点包；确实要用请在 ComfyUI 里自己装，本插件不保证可用。',
+    )
+  }
+  if (!(NATIVE_SCHEDULERS as readonly string[]).includes(resolvedScheduler)) {
+    throw new Error(
+      `scheduler must be one of ComfyUI's native schedulers (${NATIVE_SCHEDULERS.join(' / ')}), got "${String(scheduler)}"`,
+    )
+  }
+  return { samplerName: resolvedSampler, scheduler: resolvedScheduler }
+}
+
 /** The tool-output blocks shared by generate and edit: summary, markdown, JSON. */
 function renderResultBlocks(value: { markdown?: string; summary?: string }): { type: 'text'; text: string }[] {
   const payload = value as { markdown?: string; summary?: string }
@@ -866,7 +959,11 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         steps,
         seed: asInteger(args.seed, 'seed'),
       }
-      const qualityOverrides = quality === null ? {} : { cfg: quality.cfg, negativePrompt: quality.negativePrompt }
+      const samplerOverrides = resolveSamplerOverrides(requestedProfile, args.sampler, args.scheduler)
+      const overrides = {
+        ...(quality === null ? {} : { cfg: quality.cfg, negativePrompt: quality.negativePrompt }),
+        ...(samplerOverrides === null ? {} : samplerOverrides),
+      }
       const startedAt = Date.now()
 
       // Resolve the step count before touching ComfyUI so no dispatch site can
@@ -886,8 +983,8 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       const turboSkipped = requestedProfile.variant === 'turbo' && !turbo
       const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings, profile)
       const images = turbo
-        ? await generateViaComfyUiTurbo(target, models, { ...request, ...qualityOverrides, steps: usedSteps.steps }, options, exec.signal)
-        : await generateViaComfyUi(target, models, { ...request, ...qualityOverrides, steps: usedSteps.steps }, options, exec.signal)
+        ? await generateViaComfyUiTurbo(target, models, { ...request, ...overrides, steps: usedSteps.steps }, options, exec.signal)
+        : await generateViaComfyUi(target, models, { ...request, ...overrides, steps: usedSteps.steps }, options, exec.signal)
       const comfyRun: ComfyRunReport = {
         endpoint: target.endpoint,
         port: target.port,
@@ -948,6 +1045,16 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
                 negative_prompt: quality.negativePrompt,
                 negative_prompt_source: quality.negativeSource,
                 note: quality.note,
+              },
+            }),
+        ...(samplerOverrides === null
+          ? {}
+          : {
+              sampling: {
+                sampler: samplerOverrides.samplerName,
+                scheduler: samplerOverrides.scheduler,
+                default_pair: 'euler/simple',
+                note: '替代采样器/调度器组合是社区〔孤证/轶闻〕级证据、无严格对照；euler/simple 仍是官方+双源的安全默认。换组合请用同 seed 对比。',
               },
             }),
         prompt_chars: prompt.length,
@@ -1035,7 +1142,11 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         seed: asInteger(args.seed, 'seed'),
         images: references,
       }
-      const qualityOverrides = quality === null ? {} : { cfg: quality.cfg, negativePrompt: quality.negativePrompt }
+      const samplerOverrides = resolveSamplerOverrides(requestedProfile, args.sampler, args.scheduler)
+      const overrides = {
+        ...(quality === null ? {} : { cfg: quality.cfg, negativePrompt: quality.negativePrompt }),
+        ...(samplerOverrides === null ? {} : samplerOverrides),
+      }
       const startedAt = Date.now()
 
       const options = comfyOptions(settings)
@@ -1050,14 +1161,14 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         ? await generateViaComfyUiTurboEdit(
             target,
             models,
-            { ...request, ...qualityOverrides, steps: usedSteps.steps },
+            { ...request, ...overrides, steps: usedSteps.steps },
             options,
             exec.signal,
           )
         : await generateViaComfyUiEdit(
             target,
             models,
-            { ...request, ...qualityOverrides, steps: usedSteps.steps },
+            { ...request, ...overrides, steps: usedSteps.steps },
             options,
             exec.signal,
           )
@@ -1140,6 +1251,16 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
                 negative_prompt: quality.negativePrompt,
                 negative_prompt_source: quality.negativeSource,
                 note: quality.note,
+              },
+            }),
+        ...(samplerOverrides === null
+          ? {}
+          : {
+              sampling: {
+                sampler: samplerOverrides.samplerName,
+                scheduler: samplerOverrides.scheduler,
+                default_pair: 'euler/simple',
+                note: '替代采样器/调度器组合是社区〔孤证/轶闻〕级证据、无严格对照；euler/simple 仍是官方+双源的安全默认。换组合请用同 seed 对比。',
               },
             }),
         prompt_chars: prompt.length,

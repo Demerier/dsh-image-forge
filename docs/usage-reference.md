@@ -32,6 +32,14 @@ qwen_image_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
 （`test/ratio.test.mjs` 逐个钉住）。比例**先约分再查表**，所以 `2048:1152` 这种参照图会落到同一张
 `16:9` 画布上；**表外**的比例（`21:9`）仍走搜索：最小化「比例偏差 + 0.5 × 像素预算偏差」，同分取更大的画布。
 
+**高级采样器档（可选，仅 Qwen base）**：`sampler` / `scheduler` 默认 `euler` / `simple`（官方模板口径；
+都不传时请求与改动前逐字节一致）。枚举里只有 ComfyUI **原生**采样器（`res_multistep`、`er_sde`、`heun`…）
+与原生调度器（`simple` / `normal` / `karras` / `exponential` / `sgm_uniform` / `beta`）。替代组合的收益
+都是社区〔孤证/轶闻〕、无严格对照，**换之前先用同 seed 对比**；`er_sde + beta` 是其中被提到最多的一组。
+turbo 与 MOSS 不接受这两个参数（采样器/调度器分别由蒸馏 sigma 表与 `mossSampling` 档位管理）。
+**RES4LYF 等第三方节点包不内置**：想试 `abnorsett_3m` + `beta_57` + shift 16 那套配方，只能在 ComfyUI 里
+自己装第三方节点包，本插件不引入、不保证可用（产品边界）。
+
 **2K 档（可选，默认不开）**：`size_tier: "2k"` 把上表换成官方模型卡的 **4.2MP 七档表**
 （默认仍是 1.5MP，8GB 卡友好）：
 
