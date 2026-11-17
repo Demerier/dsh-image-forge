@@ -9,6 +9,11 @@
  * restated structurally rather than imported — the same choice the reference
  * implementation makes for the binder input shape it cannot import either.
  *
+ * This module also carries the Studio's **panel seats**: the layout shell's
+ * root-scoped `main` keyed slot and the sidebar's `sidebar.panellist` list
+ * entry. They stay pure descriptors here — the client entry hands in the two
+ * components — so this module still imports neither React nor the Host.
+ *
  * ## Why a settings section at all
  *
  * Under the DSH 0.2.0 settings model the Host derives one settings page per
@@ -248,6 +253,108 @@ export function registerSettingsSection(
       return () => {}
     }
   })
+  return () => {}
+}
+
+// ---------------------------------------------------------------------------
+// The Studio's panel seats.
+// ---------------------------------------------------------------------------
+
+/**
+ * The root-scoped **keyed** slot the layout shell renders global panels in.
+ *
+ * Host contract (verified against `@deepseek-ai/dsh-client-ui-layout`'s README
+ * and the shipped plugin-manager client): global panels occupy this slot,
+ * `conversation` is the reserved key, and `ctx.layout.selectPanel(id)` selects
+ * a registered key. A seat here is what makes a sidebar row switch the main
+ * column to the workbench.
+ */
+export const MAIN_SLOT_NAME = 'main'
+
+/**
+ * The sidebar's **list** slot: one entry per global panel, addressed by `id`.
+ *
+ * The sidebar builds its panel list from this slot's entries (`options.id`,
+ * `options.order`, `options.label`) and renders each entry's component as the
+ * panel glyph, so the same id has to be used here and in {@link MAIN_SLOT_NAME}.
+ */
+export const SIDEBAR_PANELLIST_SLOT_NAME = 'sidebar.panellist'
+
+/**
+ * The Studio's identity in both slots — and the id `ctx.layout.selectPanel`
+ * takes. Kept equal to the package name so the panel, the package and the
+ * profile row all spell it the same way.
+ */
+export const STUDIO_PANEL_ID = 'dsh-image-forge'
+
+/** Where the Studio sits among the shipped sidebar panels (after `plugins`). */
+export const STUDIO_PANEL_ORDER = 120
+
+/** The sidebar label. A function, because the slot resolves labels lazily. */
+export const STUDIO_PANEL_LABEL = '图像工作台'
+
+/** The two components a panel seat needs: the surface and its sidebar glyph. */
+export interface StudioPanelComponents {
+  /** The workbench itself (`StudioPanel`). */
+  readonly panel: unknown
+  /** The sidebar glyph (`StudioPanelIcon`). */
+  readonly icon: unknown
+}
+
+/**
+ * The descriptor for the Studio's `main` seat.
+ *
+ * @returns the options passed to `slots.register` for the keyed slot.
+ */
+export function studioPanelOptions(): Record<string, unknown> {
+  return { name: MAIN_SLOT_NAME, key: STUDIO_PANEL_ID }
+}
+
+/**
+ * The descriptor for the Studio's sidebar entry.
+ *
+ * @returns the options passed to `slots.register` for the list slot.
+ */
+export function studioPanellistOptions(): Record<string, unknown> {
+  return {
+    name: SIDEBAR_PANELLIST_SLOT_NAME,
+    id: STUDIO_PANEL_ID,
+    order: STUDIO_PANEL_ORDER,
+    label: () => STUDIO_PANEL_LABEL,
+  }
+}
+
+/**
+ * Seat the Studio as a global panel: the `main` surface plus its sidebar row.
+ *
+ * Both registrations go through `slots.inject`, exactly like the settings
+ * section's own seat: the layout shell declares `main` and the sidebar declares
+ * `sidebar.panellist`, and on a host whose shell has neither the registrations
+ * simply never fire — the Agent tools and the settings page are unaffected.
+ * A throw from one seat is contained so it cannot cost the other one (or the
+ * tool cards registered in the same client entry).
+ *
+ * @param ctx - the client context.
+ * @param components - the workbench component and its sidebar glyph.
+ * @returns a disposer; today a no-op because the slot fibers own the seats,
+ *   matching {@link registerSettingsSection}.
+ */
+export function registerStudioPanel(ctx: SettingsSectionContext, components: StudioPanelComponents): () => void {
+  if (typeof ctx.slots?.inject !== 'function' || typeof ctx.slots?.register !== 'function') {
+    return () => {}
+  }
+  const seat = (name: string, options: () => Record<string, unknown>, component: unknown): void => {
+    ctx.slots.inject(name, () => {
+      try {
+        return ctx.slots.register(options(), component)
+      } catch {
+        // A slot that refuses the seat must not take the rest of apply() down.
+        return () => {}
+      }
+    })
+  }
+  seat(MAIN_SLOT_NAME, studioPanelOptions, components.panel)
+  seat(SIDEBAR_PANELLIST_SLOT_NAME, studioPanellistOptions, components.icon)
   return () => {}
 }
 

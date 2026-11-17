@@ -1,6 +1,6 @@
 /**
- * Client half: keyed tool views for every `qwen_image_*` tool **and** the
- * `dsh-image-forge` first-level settings section.
+ * Client half: keyed tool views for every `qwen_image_*` tool, the Studio's
+ * global-panel seats, and the `dsh-image-forge` first-level settings section.
  *
  * ## Tool views
  *
@@ -27,18 +27,19 @@
  * Nothing here reaches for a service at activation time: `configForms` is looked
  * up optionally, and a page that serves none gets a notice in the section rather
  * than losing the plugin's client half (and with it the tool cards).
+ *
+ * ## The Studio panel
+ *
+ * The workbench is a **global panel**, not a settings tab: the layout shell's
+ * root-scoped `main` keyed slot renders it, and a `sidebar.panellist` entry
+ * puts it in the left sidebar. Both seats come from `registerStudioPanel` in
+ * `./settings-section.ts`; the surface and its glyph live in
+ * `./studio-view.ts`. The settings section below is pure configuration.
  */
 import { createElement, useEffect, useState, type ReactNode } from 'react'
 import { injectClientStyles } from './client-styles.ts'
 import { studioFileUrl } from './studio-shared.ts'
-import { StudioPanel } from './studio-view.ts'
-
-/**
- * Pseudo tab id for the workbench. It is not a member of `SETTINGS_TABS`
- * because it renders a live surface rather than a form over config fields, so
- * giving it a `groupIds` list would be a lie the tab renderer would act on.
- */
-const STUDIO_TAB_ID = 'studio'
+import { StudioPanel, StudioPanelIcon } from './studio-view.ts'
 import {
   SETTINGS_TABS,
   advisoryAfterGroup,
@@ -50,6 +51,7 @@ import {
 } from './settings-fields.ts'
 import {
   registerSettingsSection,
+  registerStudioPanel,
   saveField,
   type ConfigFormLike,
   type SettingsSectionProps,
@@ -664,9 +666,9 @@ function AdvisoryBlock(props: { advisory: SettingsAdvisory }): ReactNode {
 function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNode {
   const form = props.form as ConfigFormLike<unknown> | undefined
   const [tick, setTick] = useState(0)
-  // The Studio is listed first: it is the surface people open this page for,
-  // while the configuration rows below it are a setup task they finish once.
-  const [tabId, setTabId] = useState<string>(STUDIO_TAB_ID)
+  // The page is pure configuration: the workbench lives in its own global panel
+  // (`main` + `sidebar.panellist`), so this section opens on its first config tab.
+  const [tabId, setTabId] = useState<string>(SETTINGS_TABS[0]?.id ?? '')
 
   useEffect(() => {
     if (form === undefined) return undefined
@@ -687,34 +689,14 @@ function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNo
     }
   }, [form])
 
-  const studioTab = createElement(
-    'button',
-    {
-      key: STUDIO_TAB_ID,
-      type: 'button',
-      role: 'tab',
-      className: tabId === STUDIO_TAB_ID ? 'dsh-image-forge-tab dsh-image-forge-tab-active' : 'dsh-image-forge-tab',
-      'aria-selected': tabId === STUDIO_TAB_ID,
-      onClick: () => setTabId(STUDIO_TAB_ID),
-    },
-    '图像工作台',
-  )
-
-  // A host that serves no config form still gets a usable workbench: the Studio
-  // route reads the config live on the host side, so nothing here needs the
-  // browser's form binding. Only the configuration rows disappear.
+  // A host that serves no config form gets the explanatory notice only: this
+  // section is configuration, and the workbench is its own global panel.
   if (form === undefined) {
     return createElement('div', { className: 'dsh-image-forge-settings' }, [
-      createElement('div', { key: 'tabs', className: 'dsh-image-forge-tabs', role: 'tablist' }, [studioTab]),
       createElement(
         'div',
-        { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' },
-        createElement(StudioPanel),
-        createElement(
-          'div',
-          { key: 'notice', className: 'dsh-image-forge-settings-notice' },
-          props.unavailableReason ?? '配置表单不可用：本页只能出图，参数请在 profile 里改。',
-        ),
+        { key: 'notice', className: 'dsh-image-forge-settings-notice' },
+        props.unavailableReason ?? '配置表单不可用：参数请在 profile 里改。',
       ),
     ])
   }
@@ -741,16 +723,14 @@ function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNo
       (error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }),
     )
 
-  const activeTab = tabId === STUDIO_TAB_ID ? undefined : SETTINGS_TABS.find((tab) => tab.id === tabId) ?? SETTINGS_TABS[0]
+  const activeTab = SETTINGS_TABS.find((tab) => tab.id === tabId) ?? SETTINGS_TABS[0]
   const panels = activeTab === undefined ? [] : tabFields(activeTab)
-  const studioActive = activeTab === undefined
 
   return createElement('div', { className: 'dsh-image-forge-settings', 'data-dsh-tick': tick }, [
     createElement(
       'div',
       { key: 'tabs', className: 'dsh-image-forge-tabs', role: 'tablist' },
       [
-        studioTab,
         ...SETTINGS_TABS.map((tab) =>
           createElement(
             'button',
@@ -770,49 +750,39 @@ function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNo
         ),
       ],
     ),
-    // Exactly one sibling picks `panel`: the Studio workbench is the only tab
-    // that is not a config form, so it renders without the lead line that
-    // describes a config write. Both branches must sit in the *same* ternary —
-    // two independent ternaries would emit two `key: 'panel'` siblings and make
-    // React reconcile the wrong one on every tab switch.
-    studioActive
-      ? createElement(
-        'div',
-        { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' },
-        createElement(StudioPanel),
-      )
-      : createElement('div', { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' }, [
-        createElement(
-          'p',
-          { key: 'lead', className: 'dsh-image-forge-settings-lead' },
-          [
-            activeTab?.hint ?? '',
-            disabled ? ' 当前配置条目为只读。' : ' 改动会立即写入。',
-          ]
-            .filter((part) => part.length > 0)
-            .join(' '),
-        ),
-        ...panels.map(({ group, fields }) => {
-          const block = createElement(GroupBlock, {
-            key: group.id,
-            group,
-            fields,
-            value,
-            disabled,
-            write,
-            dense: true,
-          })
-          const advisory = advisoryAfterGroup(group.id)
-          return advisory === undefined
-            ? [block]
-            : [block, createElement(AdvisoryBlock, { key: advisory.id, advisory })]
-        }),
-      ]),
+    createElement('div', { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' }, [
+      createElement(
+        'p',
+        { key: 'lead', className: 'dsh-image-forge-settings-lead' },
+        [
+          activeTab?.hint ?? '',
+          disabled ? ' 当前配置条目为只读。' : ' 改动会立即写入。',
+        ]
+          .filter((part) => part.length > 0)
+          .join(' '),
+      ),
+      ...panels.map(({ group, fields }) => {
+        const block = createElement(GroupBlock, {
+          key: group.id,
+          group,
+          fields,
+          value,
+          disabled,
+          write,
+          dense: true,
+        })
+        const advisory = advisoryAfterGroup(group.id)
+        return advisory === undefined
+          ? [block]
+          : [block, createElement(AdvisoryBlock, { key: advisory.id, advisory })]
+      }),
+    ]),
   ])
 }
 
 /**
- * Register the keyed tool views and the first-level settings section.
+ * Register the keyed tool views, the Studio's global panel, and the
+ * first-level settings section.
  *
  * @param ctx - cordis client context providing `slots`, and optionally `get`.
  */
@@ -841,4 +811,9 @@ export function apply(ctx: {
     }
   })
   registerSettingsSection(ctx, QwenImageSettingsSection)
+  // The workbench is a global panel, not a settings tab: the layout shell's
+  // `main` keyed slot holds the surface, and the sidebar list entry puts it in
+  // the left rail. Both registrations wait for their slot to be declared, so a
+  // host whose shell has neither still gets the tools and the settings page.
+  registerStudioPanel(ctx, { panel: StudioPanel, icon: StudioPanelIcon })
 }

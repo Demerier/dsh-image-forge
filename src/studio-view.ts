@@ -1,15 +1,21 @@
 /**
- * The Studio panel: a ComfyUI-backed Qwen-Image workbench rendered inside the
- * plugin's settings section.
+ * The Studio panel: a ComfyUI-backed Qwen-Image workbench rendered as a
+ * first-class **global panel** of the web client.
  *
- * ## Why the settings section is the surface
+ * ## Where it is seated
  *
- * The ideal home is the right sidebar's pane-tab seat, but that slot belongs to
+ * The layout shell's root-scoped `main` keyed slot holds the workbench, and a
+ * `sidebar.panellist` entry (same id, {@link StudioPanelIcon} glyph, `图像工作台`
+ * label) puts it in the left sidebar — both descriptors live in
+ * `./settings-section.ts` and are wired up by the client entry. The plugin's
+ * settings section is pure configuration now; it no longer carries this panel.
+ *
+ * The previous seat was the settings section (`settings.section`, a **list**
+ * slot), chosen because the right sidebar's pane-tab seat belongs to
  * `@deepseek-ai/dsh-client-ui-sidebar-right`, which a profile does not
- * necessarily install. The settings section (`settings.section`) is a **list**
- * slot every 0.1.x/0.2.x host provides, so it is the one seat that is always
- * there. The panel therefore renders as a full-height workbench page inside the
- * plugin's own settings entry rather than pretending to be a chat-side panel.
+ * necessarily install. The global-panel slots are declared by the shell itself,
+ * so the workbench is reachable from the sidebar without depending on an
+ * optional profile package.
  *
  * ## Deliberately not ported
  *
@@ -248,6 +254,49 @@ async function postBoard(body: Record<string, unknown>): Promise<string | undefi
   } catch (cause) {
     return cause instanceof Error ? cause.message : String(cause)
   }
+}
+
+/** The props the sidebar slots hand a `sidebar.panellist` entry. */
+interface StudioPanelIconProps {
+  /** Rendered edge length in px (16 in the wide rail, 18 in the collapsed rail). */
+  readonly size?: number
+  /** Whether the panel is the selected one; the glyph stays monochrome either way. */
+  readonly active?: boolean
+}
+
+/**
+ * The left-sidebar glyph for the Studio panel.
+ *
+ * `sidebar.panellist` seats render one icon per global panel; the sidebar calls
+ * the entry with `{ size, active }`. The glyph is stroke-based and paints with
+ * `currentColor`, so it follows the rail's own hover/active colours instead of
+ * carrying a palette of its own.
+ *
+ * @param props - the sidebar's `{ size, active }` render props.
+ * @returns the glyph; a missing or non-finite `size` falls back to 18px.
+ */
+export function StudioPanelIcon(props?: StudioPanelIconProps): ReturnType<typeof createElement> {
+  const size = typeof props?.size === 'number' && Number.isFinite(props.size) ? props.size : 18
+  return createElement(
+    'svg',
+    {
+      width: size,
+      height: size,
+      viewBox: '0 0 16 16',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.2,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      'aria-hidden': true,
+      focusable: 'false',
+    },
+    [
+      createElement('rect', { key: 'frame', x: 1.8, y: 2.4, width: 12.4, height: 11.2, rx: 1.6 }),
+      createElement('circle', { key: 'sun', cx: 5.4, cy: 6, r: 1.1 }),
+      createElement('path', { key: 'ridge', d: 'M2.6 12.2l3.4-3.6 2.3 2.4 1.9-2.1 3.2 3.3' }),
+    ],
+  )
 }
 
 /**

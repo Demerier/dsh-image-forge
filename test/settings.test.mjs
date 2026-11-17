@@ -26,13 +26,21 @@ import {
   mutateFields,
   reachConfigForms,
   registerSettingsSection,
+  registerStudioPanel,
   saveField,
+  MAIN_SLOT_NAME,
+  SIDEBAR_PANELLIST_SLOT_NAME,
   SETTINGS_ENTRY_IDS,
   SETTINGS_SECTION_ID,
   SETTINGS_SECTION_LABEL,
   SETTINGS_SECTION_NAME,
   SETTINGS_SECTION_ORDER,
   settingsSectionOptions,
+  STUDIO_PANEL_ID,
+  STUDIO_PANEL_LABEL,
+  STUDIO_PANEL_ORDER,
+  studioPanelOptions,
+  studioPanellistOptions,
 } from '../testlib/settings-section.js'
 import {
   isConfigRef,
@@ -246,6 +254,60 @@ test('the section registers into the settings.section LIST slot under this plugi
   assert.equal(typeof dispose, 'function')
   dispose()
   assert.equal(events.at(-1).kind, 'dispose')
+})
+
+test('the Studio seats as a main keyed panel plus a sidebar.panellist entry', () => {
+  const { slots, events } = fakeSlots()
+  const panel = function FakePanel() {
+    return null
+  }
+  const icon = function FakeIcon() {
+    return null
+  }
+  registerStudioPanel({ slots }, { panel, icon })
+
+  // Two seats, each waiting for the shell to declare its slot.
+  assert.deepEqual(
+    events.map((event) => `${event.kind}:${event.name}`),
+    ['inject:main', 'inject:sidebar.panellist'],
+  )
+
+  // `main` is a KEYED slot: the component is dispatched by `key`. Handing it a
+  // list `id` instead would seat a panel `ctx.layout.selectPanel` cannot reach.
+  events[0].register()
+  const mainEvent = events[2]
+  assert.equal(mainEvent.kind, 'register')
+  assert.equal(mainEvent.options.name, MAIN_SLOT_NAME)
+  assert.equal(mainEvent.options.key, STUDIO_PANEL_ID)
+  assert.equal(mainEvent.options.id, undefined)
+  assert.equal(mainEvent.component, panel)
+
+  // `sidebar.panellist` is a LIST slot: the sidebar reads id/order/label for the
+  // row and renders the seat's component as the glyph.
+  events[1].register()
+  const rowEvent = events[3]
+  assert.equal(rowEvent.kind, 'register')
+  assert.equal(rowEvent.options.name, SIDEBAR_PANELLIST_SLOT_NAME)
+  assert.equal(rowEvent.options.id, STUDIO_PANEL_ID)
+  assert.equal(rowEvent.options.order, STUDIO_PANEL_ORDER)
+  assert.equal(typeof rowEvent.options.label, 'function')
+  assert.equal(rowEvent.options.label(), STUDIO_PANEL_LABEL)
+  assert.equal(rowEvent.options.key, undefined)
+  assert.equal(rowEvent.component, icon)
+
+  // The descriptor helpers stay pure so the client entry supplies the components.
+  assert.deepEqual(studioPanelOptions(), { name: MAIN_SLOT_NAME, key: STUDIO_PANEL_ID })
+  assert.deepEqual(
+    { ...studioPanellistOptions(), label: studioPanellistOptions().label() },
+    { name: SIDEBAR_PANELLIST_SLOT_NAME, id: STUDIO_PANEL_ID, order: STUDIO_PANEL_ORDER, label: STUDIO_PANEL_LABEL },
+  )
+  console.log('Studio seats:', JSON.stringify({ main: studioPanelOptions(), row: { ...studioPanellistOptions(), label: studioPanellistOptions().label() } }))
+})
+
+test('a client context without a slot registry stands down instead of throwing', () => {
+  // Same containment as the settings seat: losing the panel must not cost the
+  // tool cards that share the client entry.
+  assert.doesNotThrow(() => registerStudioPanel({ slots: {} }, { panel: null, icon: null }))
 })
 
 test('with no configForms service the section props explain why, and never throw', () => {
@@ -1022,6 +1084,18 @@ test('the moved evidence is in the shipped prose and no longer on the page', () 
   }
 })
 
+test('the shipped prose documents the managed install/download direction (T14)', () => {
+  // The reverse assertions above still ban the OLD claims (no deploy card, no
+  // qwen_image_env). This one pins the NEW direction: the managed setup tool and
+  // its download criterion must be written down in the shipped prose, not only
+  // implemented in code — otherwise the page and the model get no story.
+  assert.match(README_SOURCE, /qwen_image_setup/)
+  assert.match(README_SOURCE, /object_info/)
+  assert.match(README_SOURCE, /ComfyUI-Shared/)
+  assert.match(README_SOURCE, /computer use/)
+  console.log('managed install/download prose present in README/docs')
+})
+
 test('the advisory ships no markdown markers, because the section renders plain text', () => {
   // The section renders these strings as text nodes, so `**bold**` and
   // `` `code` `` would reach the user as literal asterisks and backticks. Assert
@@ -1150,6 +1224,26 @@ test('the client ships the presentation CSS and the settings ergonomics', () => 
   // The status card reports the card ComfyUI loaded its weights onto, so the
   // device list has to survive into the card.
   assert.match(CLIENT_SOURCE, /devices/, 'the status card must read the device list')
+})
+
+test('the workbench ships as a main panel, not as a settings tab', () => {
+  // The client entry cannot be imported here (it requests `react`), so the seats
+  // are pinned against the built bundle; the behavioural half is asserted
+  // through `testlib/settings-section.js` above.
+  assert.match(CLIENT_SOURCE, /const MAIN_SLOT_NAME = "main";/, 'the main keyed slot must be in the bundle')
+  assert.match(CLIENT_SOURCE, /const SIDEBAR_PANELLIST_SLOT_NAME = "sidebar.panellist";/, 'the sidebar list slot must be in the bundle')
+  assert.match(CLIENT_SOURCE, /const STUDIO_PANEL_ID = "dsh-image-forge";/, 'the panel id/key must be in the bundle')
+  // The seat descriptors: `main` is keyed (no list `id`), the sidebar row is a
+  // list entry carrying the same id.
+  assert.match(CLIENT_SOURCE, /name: MAIN_SLOT_NAME,\s*key: STUDIO_PANEL_ID/, 'the main seat must carry its key')
+  assert.match(CLIENT_SOURCE, /name: SIDEBAR_PANELLIST_SLOT_NAME,\s*id: STUDIO_PANEL_ID/, 'the sidebar row must carry its id')
+  assert.match(CLIENT_SOURCE, /registerStudioPanel\(ctx, \{/, 'the seats must be wired into apply()')
+  assert.match(CLIENT_SOURCE, /icon: StudioPanelIcon/, 'the sidebar glyph must be handed to the seat')
+  // The old pseudo tab is gone: no Studio tab id, no Studio branch or state.
+  assert.doesNotMatch(CLIENT_SOURCE, /STUDIO_TAB_ID/, 'the Studio tab id must be gone')
+  assert.doesNotMatch(CLIENT_SOURCE, /studioTab|studioActive/, 'the Studio tab branch must be gone')
+  // The settings page is still a (multi-)tab config form: the config tabs stay.
+  assert.match(CLIENT_SOURCE, /SETTINGS_TABS|tabFields/, 'the config tab model must still drive the page')
 })
 
 test('the browser half registers a lazy factory in the loader format', () => {

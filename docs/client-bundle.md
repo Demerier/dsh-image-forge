@@ -58,3 +58,29 @@
   > **恰好只发布 `apply` / `inject`**，且**不含任何顶层 `import`/`export` 语句、不含相对 require、
   > 不含打包进来的 React**。
 
+### 工作台是全局面板（`main` keyed slot + `sidebar.panellist`）
+
+工作台不再是设置页里的一个页签，而是 web 客户端的**全局面板**。两处注册都在
+`src/settings-section.ts` 的 `registerStudioPanel` 里（由客户端 `apply` 调用，组件由
+`src/studio-view.ts` 提供）：
+
+| 槽 | 种类 | 席位参数 | 作用 |
+|---|---|---|---|
+| `main` | **keyed** | `{ name: 'main', key: 'dsh-image-forge' }` | 布局壳主列渲染的面板本体；`ctx.layout.selectPanel(id)` 按这个 key 切换 |
+| `sidebar.panellist` | **list** | `{ name: 'sidebar.panellist', id: 'dsh-image-forge', order, label }` | 左侧栏的面板行：侧栏用 `id/order/label` 建列表，并把该席位的组件当图标渲染 |
+
+宿主契约（**实测**，不是转引）：`@deepseek-ai/dsh-client-ui-layout/README.md` 写明
+「Global panels occupy the root-scoped `main` keyed slot; `conversation` is the reserved
+key… `ctx.layout.selectPanel(id)` selects a registered panel」；随包的
+`@deepseek-ai/dsh-client-ui-plugin-manager/lib/client.js` 正是
+`ctx.slots.inject('main', …register({ name: 'main', key: PANEL_ID }, …))` +
+`ctx.slots.inject('sidebar.panellist', () => register({ name: 'sidebar.panellist', id: PANEL_ID, order, label }, Icon))`
+两处注册；`@deepseek-ai/dsh-client-ui-sidebar/lib/client.js` 从
+`ctx.slots.entriesOfSlot('sidebar.panellist')` 读 `options.id/order/label` 建面板列表，
+并用 `renderSlot('sidebar.panellist', { size, active }, { only: id })` 渲染图标。
+
+设置页（`settings.section`）因此只剩纯配置：`test/settings.test.mjs` 同时断言
+「`main` 带 key 注册」「`sidebar.panellist` 带 id/order/label 注册」与
+「`lib/client.js` 里不再有 `STUDIO_TAB_ID` / `studioTab` / `studioActive`」；
+`test/studio.test.mjs` 保留工作台组件仍在 bundle 里的回归。
+

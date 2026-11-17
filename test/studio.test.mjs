@@ -521,6 +521,17 @@ test('the Studio routes are registered on the host, and the constants ship with 
   }
 })
 
+test('the workbench still ships in the client bundle, now as a main panel', () => {
+  const client = readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8')
+  // The panel is no longer mounted from the settings section; its surface and
+  // the seat that mounts it must still be in the bundle, or the sidebar row
+  // would switch the main column to nothing.
+  assert.match(client, /function StudioPanel\(\)/, 'the workbench component must stay in the bundle')
+  assert.ok(client.includes('"图像工作台"'), 'the panel title must stay')
+  assert.match(client, /icon: StudioPanelIcon/, 'the sidebar glyph must be handed to the seat')
+  assert.match(client, /registerStudioPanel\(ctx, \{/, 'the panel seats must be wired into apply()')
+})
+
 test('the constants the panel and the host must agree on are shared, not restated', () => {
   // These are exported so the panel's limits come from one place; a mismatch
   // here is a form that submits a body the host refuses.
