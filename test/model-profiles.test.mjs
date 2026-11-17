@@ -222,7 +222,7 @@ test('every profile declares its own latent node, clip type, sampler and filenam
       steps: { default: 25 },
       negativePrompt: MOSS_NEGATIVE_PROMPT,
       filenamePrefix: 'dsh-image-forge-moss',
-      edit: false,
+      edit: true,
     },
   }
 
@@ -260,13 +260,20 @@ test('every profile declares its own latent node, clip type, sampler and filenam
   assert.throws(() => assertLatentAligned(MODEL_PROFILES['qwen21-base'], 1040, 1040), /32/)
   assert.throws(() => assertLatentAligned(MODEL_PROFILES['moss-sft'], 1030, 1024), /16/)
 
-  // MOSS's TODO is not decoration: step 4's refusal quotes it, so its actionable
-  // parts (LoRA, replacement encode node, sample path) are pinned here.
-  const todo = MODEL_PROFILES['moss-sft'].todo
-  assert.match(todo, /moss_image_edit_lora_rank_64_bf16\.safetensors/)
-  assert.match(todo, /LoraLoaderModelOnly/)
-  assert.match(todo, /TextEncodeMOSSImageEdit/)
-  assert.match(todo, /verify\/moss_image_edit_api\.json/)
+  // MOSS offers an edit graph too, built from the same `{ template, build }`
+  // contract as the Qwen profiles; T19 filled it in and the old refusal is gone.
+  const mossEdit = MODEL_PROFILES['moss-sft'].imageToImage
+  assert.notEqual(mossEdit, undefined)
+  assert.equal(typeof mossEdit.build, 'function')
+  const mossEditGraph = mossEdit.build(['ref-a.png'])
+  const mossEditClasses = Object.values(mossEditGraph).map((node) => node.class_type)
+  for (const present of ['LoraLoaderModelOnly', 'TextEncodeMOSSImageEdit', 'LoadImage', 'ImageScale']) {
+    assert.ok(mossEditClasses.includes(present), `MOSS edit graph must carry ${present}`)
+  }
+  assert.equal(mossEditGraph['2'].inputs.lora_name, 'moss_image_edit_lora_rank_64_bf16.safetensors')
+  assert.deepEqual(mossEditGraph['2'].inputs.model, ['1', 0])
+  assert.equal(mossEditGraph['7'].inputs.edit_format, 'Moss-Image-Edit')
+  assert.deepEqual(mossEditGraph['7'].inputs['images.image_0'], ['121', 0])
 })
 
 test('each profile owns a graph, and every placeholder in it is filled', () => {
@@ -325,9 +332,17 @@ test('each profile owns a graph, and every placeholder in it is filled', () => {
   assert.equal(edit['12'].class_type, 'LoadImage')
   assert.deepEqual(edit['4'].inputs['images.image_1'], ['11', 0])
   assert.deepEqual(edit['4'].inputs['images.image_2'], ['12', 0])
-  assert.equal(MODEL_PROFILES['moss-sft'].imageToImage, undefined, 'MOSS edit is refused, not faked')
+  // The MOSS edit graph renders against the same canvas: its latent node takes the
+  // placeholder size, and each reference scaler targets that size too.
+  const mossEditRendered = renderWorkflow(MODEL_PROFILES['moss-sft'].imageToImage.build(['ref-a.png']), values)
+  const mossEditRenderedClasses = Object.values(mossEditRendered).map((node) => node.class_type)
+  assert.ok(mossEditRenderedClasses.includes('LoraLoaderModelOnly'))
+  assert.ok(mossEditRenderedClasses.includes('TextEncodeMOSSImageEdit'))
+  assert.equal(mossEditRendered['5'].inputs.width, 1024)
+  assert.equal(mossEditRendered['121'].inputs.width, 1024)
+  assert.deepEqual(mossEditRendered['121'].inputs.image, ['101', 0])
 
-  for (const graph of [moss, renderWorkflow(edit, values)]) {
+  for (const graph of [moss, renderWorkflow(edit, values), mossEditRendered]) {
     for (const node of Object.values(graph)) {
       assert.ok(!JSON.stringify(node.inputs).includes('{{'), 'no placeholder may survive rendering')
     }
@@ -396,10 +411,15 @@ test('MOSS publishes two sampling registers; the Qwen profiles ignore the settin
 })
 
 // ---------------------------------------------------------------------------
-// T01 step 4: a MOSS edit is refused before anything is sent.
+// T01 step 4: a MOSS edit used to be refused before anything was sent.
+//
+// T19 wired the edit graph, so the refusal is gone by construction: this now
+// pins the *absence* of the old pre-flight rejection — the call gets as far as
+// uploading the reference (where this deliberately upload-less fake stops)
+// instead of throwing before any request.
 // ---------------------------------------------------------------------------
 
-test('a MOSS edit is refused loudly, before a single request is sent', async () => {
+test('a MOSS edit now reaches the reference upload instead of being refused', async () => {
   const comfy = await startFakeComfy(BOTH_FAMILIES_OBJECT_INFO)
   try {
     const mossModels = {
@@ -420,19 +440,18 @@ test('a MOSS edit is refused loudly, before a single request is sent', async () 
       () => undefined,
       (caught) => caught,
     )
-    console.log('MOSS edit refusal:\n' + String(error && error.message))
-    assert.ok(error instanceof Error, 'the edit call must reject instead of running the text-to-image graph')
-    assert.match(error.message, /改图/)
-    assert.match(error.message, /未接入/)
-    // The refusal quotes the profile's own TODO, so the follow-up has its entry point
-    // in the error text rather than only in a comment.
-    assert.ok(error.message.includes(MODEL_PROFILES['moss-sft'].todo), 'the refusal must quote profile.todo verbatim')
-    assert.match(error.message, /换成 qwen21-base 或 qwen21-turbo/)
-    assert.match(error.message, /moss_image_edit_lora_rank_64_bf16\.safetensors/)
-
-    // Nothing reached ComfyUI at all: no graph, and no reference upload either.
-    console.log('requests the fake ComfyUI saw during the refusal:', JSON.stringify(comfy.seen))
-    assert.deepEqual(comfy.seen, [])
+    console.log('MOSS edit on a server without /upload/image:\n' + String(error && error.message))
+    assert.equal(MODEL_PROFILES['moss-sft'].todo, undefined, 'the moss-edit TODO is gone')
+    assert.notEqual(MODEL_PROFILES['moss-sft'].imageToImage, undefined)
+    // It fails on the upload this fake does not serve, not on an upfront refusal.
+    assert.ok(error instanceof Error)
+    assert.match(error.message, /upload\/image/)
+    assert.doesNotMatch(error.message, /未接入|换成 qwen21-base/)
+    assert.deepEqual(
+      comfy.seen.map((entry) => `${entry.method} ${entry.path}`),
+      ['POST /upload/image'],
+      'the only request is the reference upload, and no graph was submitted',
+    )
     assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 0)
   } finally {
     await comfy.close()

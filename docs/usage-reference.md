@@ -130,6 +130,35 @@ qwen_image_edit(prompt = <成品改图指令>, images = ["D:\\pictures\\room.png
 - 参考图由 ComfyUI 按画布缩放（工作流的 `resolution` 预算），插件侧**没有**参考图预算旋钮。
 - 落盘命名与文生图一致，`preset` 默认是 `edit`（`<outputDir>/<prefix>_<W>x<H>_<n>.png`）。
 
+### MOSS-Image 的改图（`comfyModel: "moss-sft"`）
+
+MOSS 的改图走**社区 edit LoRA + 原生节点**，不是 Qwen 的编码器通路：图里在 `UNETLoader`
+之后串 `LoraLoaderModelOnly`（`loras/moss_image_edit_lora_rank_64_bf16.safetensors`，
+`strength_model` 1.0），正向/负向各一个 `TextEncodeMOSSImageEdit`（`edit_format`
+`Moss-Image-Edit`，两张图都拿同一组参考），画布仍由 `ratio_follow`/`wh_ratio` 决定，
+参考图缩放到与采样画布同尺寸后再编码。用法与 Qwen 完全相同：
+
+```text
+qwen_image_edit(prompt = <成品修改指令>, images = ["D:\\pictures\\cup.png"], comfyModel 由插件配置为 "moss-sft")
+```
+
+- **前置**：LoRA 必须在 ComfyUI 的 `models/loras/` 里（本机装载脚本见
+  [部署文档](comfyui-deployment.md)）；缺它时 ComfyUI 会拒绝 `LoraLoaderModelOnly`，
+  错误原文会点名该文件名。
+- 采样步数/Cfg/采样器走 `mossSampling` 档位（comfy 25 步 / CFG 2.5 / `er_sde`；
+  official 50 步 / CFG 3 / `euler`），与文生图同一个工作点；返回的 `steps_used`
+  和注入图一致。
+- **能力边界（实测）**：社区 edit LoRA 的指令遵循不完美——本机验证里「把杯身文字改成
+  『春晓』」被写成「春晕」，且原英文行没删掉、只新增一行（`verify/results.json` 的
+  edit LoRA 条目）。**改字/换局部元素可以，重度重构（换机位、换构图）不要指望它**。
+- 另一条**未接入插件**的通路：不接 VAE、`edit_format` 用 `ai-toolkit` 时，
+  `TextEncodeMOSSImageEdit` 会把参考图当 vision tokens 喂给 Qwen3.5（无需 LoRA），
+  本机实测能更好地继承参考图设计；但它同时**锁死构图先验**，换视角必须靠结构性框架
+  （`.workbuddy/memory/2026-11-10.md` 的实测记录）。插件目前只接上面那条 LoRA 通路。
+- 写改图 prompt 时沿用两条已沉淀准则：**vision 参考会锁构图**（想换视角/机位要靠结构性
+  描述，不靠「主体小一点」这类形容词）；**布局 caption 的视觉语汇会扩散到全图**（改图
+  prompt 里也别堆远景高频细节词，否则参考图之外会被补出同类纹理）。
+
 ## 工具一览
 
 | 工具 | 说明 |

@@ -422,6 +422,169 @@ export const MOSS_IMAGE_WORKFLOW: ApiGraph = {
 export const MOSS_LATENT_MULTIPLE = 16
 
 // ---------------------------------------------------------------------------
+// MOSS-Image: reference-image editing (community edit LoRA, native nodes)
+// ---------------------------------------------------------------------------
+
+/**
+ * The community edit LoRA that turns MOSS-Image into an instructable editor.
+ *
+ * Not part of the base checkpoint: it is a separate file under `models/loras/`
+ * (`verify/fetch_moss_weights.py` lists it next to the three weights). The graph
+ * wires it through `LoraLoaderModelOnly` immediately after `UNETLoader`, which is
+ * how the official `image_moss_image_edit.json` template does it.
+ */
+export const MOSS_EDIT_LORA = 'moss_image_edit_lora_rank_64_bf16.safetensors'
+
+/**
+ * The `edit_format` value the LoRA above was trained with.
+ *
+ * `TextEncodeMOSSImageEdit` also accepts the two ai-toolkit formats, but those are
+ * a different training regime (`verify/results.json` gotchas): pairing them with
+ * this LoRA hands the encoder a condition it was never trained against.
+ */
+export const MOSS_EDIT_FORMAT = 'Moss-Image-Edit'
+
+/** First node id for the MOSS edit graph's per-reference `LoadImage` nodes. */
+export const MOSS_EDIT_IMAGE_NODE_BASE = 101
+
+/** First node id for the `ImageScale` nodes that bring each reference to the canvas. */
+export const MOSS_EDIT_SCALE_NODE_BASE = 121
+
+/**
+ * The MOSS-Image edit graph, in ComfyUI's API format.
+ *
+ * Node for node this is `verify/moss_image_edit_api.json` — the sample that
+ * produced this machine's verified edit render — with two deliberate differences:
+ *
+ * 1. the sampler numbers are placeholders instead of the sample's literals
+ *    (30 steps / CFG 4 / `euler` / `normal`). A profile owns its sampler, so an
+ *    edit runs the same `mossSampling` register as its text-to-image graph
+ *    instead of a second, silently different working point;
+ * 2. the sample derives the canvas from `ImageScaleToTotalPixels` +
+ *    `GetImageSize`; here the canvas is the one `ratio.ts` already picked and each
+ *    reference is scaled **to that canvas** (see {@link mossEditWorkflow}). The
+ *    edit LoRA conditions on reference latents, so reference and target have to
+ *    agree on size — and taking the canvas from the plugin keeps the reported
+ *    size, the filename size and the pixels on disk the same numbers.
+ *
+ * Everything else is the sample's shape, kept verbatim: the LoRA after the
+ * `UNETLoader`, one `TextEncodeMOSSImageEdit` per polarity (the negative node
+ * takes the profile's negative prompt and the same references), `Moss-Image-Edit`
+ * as the format, `SkipLayerGuidanceDiTSimple` across the whole schedule
+ * (`end_percent` 1, unlike the t2i graph's 0.5) and `denoise` 1.
+ *
+ * The reference slots are added per call by {@link mossEditWorkflow}; there are
+ * none in this template.
+ */
+export const MOSS_IMAGE_EDIT_WORKFLOW: ApiGraph = {
+  '1': { class_type: 'UNETLoader', inputs: { unet_name: '{{unet_name}}', weight_dtype: '{{weight_dtype}}' } },
+  '2': {
+    class_type: 'LoraLoaderModelOnly',
+    inputs: { model: ['1', 0], lora_name: MOSS_EDIT_LORA, strength_model: 1 },
+  },
+  '3': { class_type: 'CLIPLoader', inputs: { clip_name: '{{clip_name}}', type: '{{clip_type}}', device: 'default' } },
+  '4': { class_type: 'VAELoader', inputs: { vae_name: '{{vae_name}}' } },
+  '5': {
+    class_type: 'EmptyFlux2LatentImage',
+    inputs: { width: '{{width}}', height: '{{height}}', batch_size: '{{batch_size}}' },
+  },
+  '6': {
+    class_type: 'SkipLayerGuidanceDiTSimple',
+    inputs: {
+      model: ['2', 0],
+      double_layers: '',
+      single_layers: '22',
+      start_percent: 0,
+      end_percent: 1,
+    },
+  },
+  '7': {
+    class_type: 'TextEncodeMOSSImageEdit',
+    inputs: {
+      clip: ['3', 0],
+      prompt: '{{prompt}}',
+      edit_format: MOSS_EDIT_FORMAT,
+      image_strength: 1,
+      vae: ['4', 0],
+    },
+  },
+  '8': {
+    class_type: 'TextEncodeMOSSImageEdit',
+    inputs: {
+      clip: ['3', 0],
+      prompt: '{{negative_prompt}}',
+      edit_format: MOSS_EDIT_FORMAT,
+      image_strength: 1,
+      vae: ['4', 0],
+    },
+  },
+  '9': {
+    class_type: 'KSampler',
+    inputs: {
+      model: ['6', 0],
+      seed: '{{seed}}',
+      steps: '{{steps}}',
+      cfg: '{{cfg}}',
+      sampler_name: '{{sampler_name}}',
+      scheduler: '{{scheduler}}',
+      denoise: 1,
+      positive: ['7', 0],
+      negative: ['8', 0],
+      latent_image: ['5', 0],
+    },
+  },
+  '10': { class_type: 'VAEDecode', inputs: { samples: ['9', 0], vae: ['4', 0] } },
+  '11': { class_type: 'SaveImage', inputs: { images: ['10', 0], filename_prefix: '{{filename_prefix}}' } },
+}
+
+/**
+ * Wire one reference into the MOSS edit graph.
+ *
+ * Each reference becomes `LoadImage` → `ImageScale` (to the canvas passed in
+ * `{{width}}`/`{{height}}`, aspect preserved by a centre crop) → one autogrow
+ * slot on **both** `TextEncodeMOSSImageEdit` nodes. That is the same per-call
+ * shape as the Qwen edit path (`wireReferenceSlots`), with the MOSS reference
+ * slots named `images.image_0` … `images.image_9` — the autogrow input is declared
+ * with `prefix: image_` and a 0-based index, unlike Qwen's 1-based
+ * `images.image_1` (verified against ComfyUI 0.45.3's `/object_info`).
+ *
+ * @param imageNames - file names inside ComfyUI's `input` folder, in prompt order.
+ * @returns a fresh API-format graph with one loader and one scaler per reference.
+ * @throws When the list is empty or longer than {@link EDIT_MAX_REFERENCES}.
+ */
+export function mossEditWorkflow(imageNames: readonly string[]): ApiGraph {
+  if (imageNames.length === 0) {
+    throw new Error('comfyui backend: the MOSS edit graph needs at least one reference image')
+  }
+  if (imageNames.length > EDIT_MAX_REFERENCES) {
+    throw new Error(`comfyui backend: the MOSS edit graph wires ${EDIT_MAX_REFERENCES} reference slots, got ${imageNames.length}`)
+  }
+  const graph: ApiGraph = { ...MOSS_IMAGE_EDIT_WORKFLOW }
+  const positive = { class_type: 'TextEncodeMOSSImageEdit', inputs: { ...MOSS_IMAGE_EDIT_WORKFLOW['7']!.inputs } }
+  const negative = { class_type: 'TextEncodeMOSSImageEdit', inputs: { ...MOSS_IMAGE_EDIT_WORKFLOW['8']!.inputs } }
+  graph['7'] = positive
+  graph['8'] = negative
+  for (const [position, name] of imageNames.entries()) {
+    const loadId = String(MOSS_EDIT_IMAGE_NODE_BASE + position)
+    const scaleId = String(MOSS_EDIT_SCALE_NODE_BASE + position)
+    graph[loadId] = { class_type: 'LoadImage', inputs: { image: name } }
+    graph[scaleId] = {
+      class_type: 'ImageScale',
+      inputs: {
+        image: [loadId, 0],
+        upscale_method: 'lanczos',
+        width: '{{width}}',
+        height: '{{height}}',
+        crop: 'center',
+      },
+    }
+    positive.inputs[`images.image_${position}`] = [scaleId, 0]
+    negative.inputs[`images.image_${position}`] = [scaleId, 0]
+  }
+  return graph
+}
+
+// ---------------------------------------------------------------------------
 // The profile shape
 // ---------------------------------------------------------------------------
 
@@ -752,23 +915,10 @@ export const MODEL_PROFILES: Readonly<Record<ComfyModelId, ModelProfile>> = {
     negativePrompt: MOSS_NEGATIVE_PROMPT,
     filenamePrefix: 'dsh-image-forge-moss',
     textToImage: MOSS_IMAGE_WORKFLOW,
-    imageToImage: undefined,
-    // TODO(moss-edit): wire the edit graph — the official edit workflow is
-    // `verify/moss_image_edit_api.json`; it needs the edit LoRA
-    // (`moss_image_edit_lora_rank_64_bf16.safetensors` through
-    // `LoraLoaderModelOnly` after the UNETLoader) and `TextEncodeMOSSImageEdit`
-    // instead of the positive `CLIPTextEncode`, with references entering as
-    // `LoadImage` nodes exactly like the Qwen edit path. Give this profile an
-    // `imageToImage` and the adapter picks it up with no other change.
+    imageToImage: { template: MOSS_IMAGE_EDIT_WORKFLOW, build: mossEditWorkflow },
     // TODO(moss-layout): `MOSSImageLayoutPrompt` + `MOSSImageControl` (JSON
     // layout contract sample: `verify/layout_prompt.json`) are a separate,
-    // unrequested feature.
-    todo:
-      'MOSS 改图未接入（本次只做文生图）。后续接入点：官方编辑图需要 edit LoRA ' +
-      '`moss_image_edit_lora_rank_64_bf16.safetensors`（LoraLoaderModelOnly 接在 UNETLoader 之后）' +
-      '并用 `TextEncodeMOSSImageEdit` 取代本图里的正向 CLIPTextEncode，参考图经 LoadImage 上传；' +
-      'verify/moss_image_edit_api.json 是现成的 API 格式样本。布局（MOSSImageLayoutPrompt / ' +
-      'MOSSImageControl）同样留待后续，样本见 verify/layout_prompt.json。',
+    // unrequested feature; the reference-image edit above does not need them.
   },
 }
 

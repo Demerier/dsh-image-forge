@@ -85,10 +85,37 @@ const OBJECT_INFO = {
 
 const PROMPT_ID = 'fake-prompt-id'
 
+/** Split a multipart body into its parts, so an upload's bytes and fields are readable. */
+function parseMultipart(body, contentType) {
+  const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType ?? '')
+  if (boundary === null) return []
+  const delimiter = Buffer.from(`--${boundary[1] ?? boundary[2]}`)
+  const parts = []
+  let cursor = body.indexOf(delimiter)
+  while (cursor !== -1) {
+    const next = body.indexOf(delimiter, cursor + delimiter.length)
+    if (next === -1) break
+    let section = body.subarray(cursor + delimiter.length, next)
+    if (section.subarray(0, 2).toString() === '\r\n') section = section.subarray(2)
+    if (section.subarray(-2).toString() === '\r\n') section = section.subarray(0, -2)
+    const headerEnd = section.indexOf('\r\n\r\n')
+    if (headerEnd !== -1) {
+      const headers = section.subarray(0, headerEnd).toString('utf8')
+      parts.push({
+        name: /name="([^"]*)"/.exec(headers)?.[1] ?? null,
+        filename: /filename="([^"]*)"/.exec(headers)?.[1] ?? null,
+        body: section.subarray(headerEnd + 4),
+      })
+    }
+    cursor = next
+  }
+  return parts
+}
+
 /** Start a fake ComfyUI; every option has a working default. */
 async function startFakeComfy(options = {}) {
   const seen = []
-  const state = { historyCalls: 0, graph: undefined }
+  const state = { historyCalls: 0, graph: undefined, uploads: [] }
   const images = options.images ?? [
     { filename: 'dsh-image-forge_00001_.png', base64: PNG_1X1 },
     { filename: 'dsh-image-forge_00002_.png', base64: PNG_BINARY.toString('base64') },
@@ -104,17 +131,29 @@ async function startFakeComfy(options = {}) {
     },
   ]
   const server = createServer((request, response) => {
-    let body = ''
-    request.on('data', (chunk) => {
-      body += chunk
-    })
+    const chunks = []
+    request.on('data', (chunk) => chunks.push(chunk))
     request.on('end', () => {
+      const raw = Buffer.concat(chunks)
+      const body = raw.toString('utf8')
       const url = new URL(request.url, 'http://127.0.0.1')
-      seen.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams), body })
       const send = (status, payload, type = 'application/json') => {
         response.writeHead(status, { 'Content-Type': type })
         response.end(payload)
       }
+      // Reference uploads: the edit paths post the bytes here before /prompt.
+      if (url.pathname === '/upload/image') {
+        const parts = parseMultipart(raw, request.headers['content-type'])
+        const file = parts.find((part) => part.name === 'image')
+        state.uploads.push({
+          filename: file?.filename ?? null,
+          fields: Object.fromEntries(parts.filter((part) => part.name !== 'image').map((part) => [part.name, part.body.toString('utf8')])),
+          bytes: file?.body ?? Buffer.alloc(0),
+        })
+        seen.push({ method: request.method, path: url.pathname, uploads: state.uploads.length })
+        return send(200, JSON.stringify({ name: file?.filename ?? null, subfolder: '', type: 'input' }))
+      }
+      seen.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams), body })
       if (url.pathname === '/system_stats') {
         return send(200, JSON.stringify({ system: { comfyui_version: options.version ?? 'fake-0.0' }, devices: [{ name: 'fake-gpu', vram_free: 1 }] }))
       }
@@ -1193,23 +1232,45 @@ test('a MOSS register selected while a Qwen profile runs changes nothing on the 
   }
 });
 
-test('MOSS edit is refused loudly instead of submitting a graph that ignores the reference', async () => {
+test('a MOSS edit reaches /prompt with the LoRA, the native encode nodes and the reference', async () => {
   const comfy = await startFakeComfy({ objectInfo: BOTH_FAMILIES_OBJECT_INFO })
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-edit-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000 })
     const reference = join(outputDir, 'ref.png')
     writeFileSync(reference, Buffer.from(PNG_1X1, 'base64'))
-    const error = await failure(tools, 'qwen_image_edit', { prompt: '只把标题换成「夏日特惠」。', images: [reference] })
-    console.log('MOSS edit refusal:\n' + error.message)
-    assert.match(error.message, /改图/)
-    assert.match(error.message, /未接入/)
-    // The TODO has to be actionable, i.e. name the nodes the follow-up needs.
-    assert.match(error.message, /moss_image_edit_lora_rank_64_bf16\.safetensors/)
-    assert.match(error.message, /TextEncodeMOSSImageEdit/)
-    assert.match(error.message, /qwen21-base/)
-    // Nothing was submitted: no half-built graph reached ComfyUI.
-    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 0)
+    const result = await run(tools, 'qwen_image_edit', { prompt: '只把标题换成「夏日特惠」。', images: [reference], seed: 42 })
+    const graph = comfy.state.graph
+    console.log('MOSS edit node classes:', JSON.stringify(Object.entries(graph).map(([id, node]) => [id, node.class_type])))
+
+    // 1. What used to be an explicit refusal (T19's predecessor) now runs end to
+    //    end through the Agent tool, on the MOSS profile.
+    assert.equal(result.backend, 'comfyui')
+    assert.equal(result.comfyui.profile, 'moss-sft')
+    assert.equal(result.comfyui.comfyModel, 'moss')
+    assert.equal(result.steps_used, 25, 'the mossSampling register owns the edit step count')
+    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 1)
+
+    // 2. The reference went down the same upload path as the Qwen edit graphs.
+    assert.equal(comfy.state.uploads.length, 1)
+    assert.equal(comfy.state.uploads[0].fields.type, 'input')
+    assert.equal(comfy.state.uploads[0].filename, comfy.state.uploads[0].filename.trim())
+
+    // 3. The graph is the sample's edit graph: the LoRA sits right behind the
+    //    UNETLoader and both polarity encoders are the native MOSS node.
+    const classes = Object.values(graph).map((node) => node.class_type)
+    assert.ok(classes.includes('LoraLoaderModelOnly'))
+    assert.equal(classes.filter((type) => type === 'TextEncodeMOSSImageEdit').length, 2)
+    assert.equal(graph['2'].inputs.lora_name, 'moss_image_edit_lora_rank_64_bf16.safetensors')
+    assert.deepEqual(graph['2'].inputs.model, ['1', 0])
+    assert.equal(graph['7'].inputs.edit_format, 'Moss-Image-Edit')
+    assert.deepEqual(graph['7'].inputs['images.image_0'], ['121', 0])
+    assert.equal(graph['101'].inputs.image, comfy.state.uploads[0].filename)
+
+    // 4. It is the MOSS edit graph, not the Qwen edit graph wearing a new name.
+    assert.ok(!classes.includes('TextEncodeQwenImage21'))
+    assert.ok(!classes.includes('CLIPTextEncode'))
+    assert.equal(graph['11'].inputs.filename_prefix, 'dsh-image-forge-moss-edit')
   } finally {
     await comfy.close()
     rmSync(outputDir, { recursive: true, force: true })
