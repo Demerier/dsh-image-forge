@@ -79,6 +79,14 @@ export type ApiGraph = Record<string, ApiNode>
  */
 export const QWEN_IMAGE_WORKFLOW: ApiGraph = {
   '1': { class_type: 'UNETLoader', inputs: { unet_name: '{{unet_name}}', weight_dtype: '{{weight_dtype}}' } },
+  // The official t2i template chains this shim after the UNETLoader: it caches the
+  // text/reference KV prefix across sampling steps, which is where most of the edit
+  // speedup comes from. `auto` keeps it out of VRAM when it does not fit and
+  // `default` is the lossless dtype — the `gpu` device has known corruption bugs
+  // (#16879/#16900). Node id 9 is free in this graph (the edit graph's LoadImage
+  // nodes start at 11). Old ComfyUI builds lack the node; `comfyui.ts` strips it
+  // via {@link withoutQwenCache} after reading /object_info.
+  '9': { class_type: 'QwenImage21Cache', inputs: { model: ['1', 0], device: 'auto', dtype: 'default' } },
   '2': { class_type: 'CLIPLoader', inputs: { clip_name: '{{clip_name}}', type: '{{clip_type}}' } },
   '3': { class_type: 'VAELoader', inputs: { vae_name: '{{vae_name}}' } },
   '4': {
@@ -89,7 +97,7 @@ export const QWEN_IMAGE_WORKFLOW: ApiGraph = {
   '6': {
     class_type: 'KSampler',
     inputs: {
-      model: ['1', 0],
+      model: ['9', 0],
       positive: ['4', 0],
       negative: ['4', 1],
       latent_image: ['5', 0],
@@ -218,6 +226,10 @@ export const TURBO_STEPS = 8
  */
 export const QWEN_IMAGE_TURBO_WORKFLOW: ApiGraph = {
   '1': { class_type: 'UNETLoader', inputs: { unet_name: '{{unet_name}}', weight_dtype: '{{weight_dtype}}' } },
+  // The same prefix-cache shim the base graph carries (see QWEN_IMAGE_WORKFLOW).
+  // Node id 23 is outside both this graph's 1–12 and the turbo edit graph's
+  // LoadImage ids, so the template can be spread into the edit graph unchanged.
+  '23': { class_type: 'QwenImage21Cache', inputs: { model: ['1', 0], device: 'auto', dtype: 'default' } },
   '2': { class_type: 'CLIPLoader', inputs: { clip_name: '{{clip_name}}', type: '{{clip_type}}' } },
   '3': { class_type: 'VAELoader', inputs: { vae_name: '{{vae_name}}' } },
   '4': {
@@ -230,7 +242,7 @@ export const QWEN_IMAGE_TURBO_WORKFLOW: ApiGraph = {
   '7': {
     class_type: 'CFGGuider',
     inputs: {
-      model: ['1', 0],
+      model: ['23', 0],
       positive: ['4', 0],
       negative: ['4', 1],
       cfg: '{{cfg}}',
@@ -272,6 +284,48 @@ export const QWEN_IMAGE_TURBO_EDIT_WORKFLOW: ApiGraph = {
       resolution: '{{resolution}}',
     },
   },
+}
+
+/** Node id of the `QwenImage21Cache` shim in the base Qwen graphs. */
+export const QWEN_CACHE_NODE_ID = '9'
+
+/** Node id of the shim in the turbo Qwen graphs (1–12 are the graph itself). */
+export const TURBO_CACHE_NODE_ID = '23'
+
+/**
+ * Drop the `QwenImage21Cache` shim from a graph, rewiring its consumer to the
+ * UNETLoader directly.
+ *
+ * The shim is a runtime speedup, not a correctness requirement: an older ComfyUI
+ * (< 0.37.0) rejects the whole graph when a node class is unknown, so when
+ * `/object_info` does not list it the adapter removes it and keeps the image
+ * instead of failing the run. A graph without a shim is returned as a fresh copy
+ * unchanged, so the caller can render either result.
+ *
+ * @param graph - an API-format graph, possibly carrying one cache shim.
+ * @returns a graph with every cache node removed and every consumer rewired.
+ */
+export function withoutQwenCache(graph: ApiGraph): ApiGraph {
+  const cacheIds = new Set(
+    Object.entries(graph)
+      .filter(([, node]) => node.class_type === 'QwenImage21Cache')
+      .map(([id]) => id),
+  )
+  if (cacheIds.size === 0) return { ...graph }
+  const out: ApiGraph = {}
+  for (const [id, node] of Object.entries(graph)) {
+    if (!cacheIds.has(id)) out[id] = { class_type: node.class_type, inputs: { ...node.inputs } }
+  }
+  for (const cacheId of cacheIds) {
+    const upstream = graph[cacheId]?.inputs.model
+    if (!Array.isArray(upstream)) continue
+    for (const node of Object.values(out)) {
+      for (const [name, value] of Object.entries(node.inputs)) {
+        if (Array.isArray(value) && value[0] === cacheId) node.inputs[name] = [...upstream]
+      }
+    }
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------

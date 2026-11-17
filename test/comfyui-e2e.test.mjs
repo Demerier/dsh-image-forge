@@ -27,6 +27,9 @@ import {
   MOSS_LATENT_MULTIPLE,
   MOSS_NEGATIVE_PROMPT,
   MOSS_SAMPLING_PRESETS,
+  QWEN_IMAGE_EDIT_WORKFLOW,
+  QWEN_IMAGE_TURBO_EDIT_WORKFLOW,
+  QWEN_IMAGE_TURBO_WORKFLOW,
   QWEN_IMAGE_WORKFLOW,
   assertLatentAligned,
   effectiveProfile,
@@ -113,7 +116,7 @@ async function startFakeComfy(options = {}) {
         response.end(payload)
       }
       if (url.pathname === '/system_stats') {
-        return send(200, JSON.stringify({ system: { comfyui_version: 'fake-0.0' }, devices: [{ name: 'fake-gpu', vram_free: 1 }] }))
+        return send(200, JSON.stringify({ system: { comfyui_version: options.version ?? 'fake-0.0' }, devices: [{ name: 'fake-gpu', vram_free: 1 }] }))
       }
       if (url.pathname.startsWith('/object_info/')) {
         const node = url.pathname.slice('/object_info/'.length)
@@ -512,11 +515,17 @@ test('qwen_image_status reports ComfyUI reachability and the weights it can see'
       vae: 'qwen_image_2.1_vae_bf16.safetensors',
       clipType: 'qwen_image',
       ok: true,
+      // The default fake server has no QwenImage21Cache node, so the status report
+      // says the shim will be skipped.
+      cache: false,
     })
 
     // Hardware facts come from ComfyUI's own `/system_stats`, not from a process
     // this plugin spawns: the card that matters is the one it loaded weights onto.
     assert.equal(status.comfyui.version, 'fake-0.0')
+    assert.equal(status.comfyui.qwen_cache.min_version, '0.37.0')
+    assert.equal(status.comfyui.qwen_cache.version_satisfied, null, 'fake-0.0 cannot be ordered')
+    assert.match(status.comfyui.qwen_cache.note, /0\.37\.0/)
     assert.deepEqual(status.comfyui.devices, [{ name: 'fake-gpu', type: null, vram_total_MiB: null, vram_free_MiB: 0 }])
     assert.equal(status.comfyui.stats_note, null)
 
@@ -541,6 +550,101 @@ test('qwen_image_status on a machine with nothing running still answers', async 
     assert.deepEqual(status.comfyui.candidatePorts, [dead])
     assert.match(status.comfyui.note, /没找到在跑的 ComfyUI/)
   } finally {
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// QwenImage21Cache: the official prefix-cache shim, and the graceful degrade.
+// ---------------------------------------------------------------------------
+
+/** The `/object_info` entry a ComfyUI >= 0.37.0 answers for the cache node. */
+const QWEN_CACHE_OBJECT_INFO = {
+  input: {
+    required: {
+      model: ['MODEL', {}],
+      device: [['auto', 'gpu', 'cpu', 'off'], {}],
+      dtype: [['default', 'int8', 'int4'], {}],
+    },
+  },
+  output: ['MODEL'],
+}
+
+test('all four Qwen workflow graphs chain QwenImage21Cache after the UNETLoader', () => {
+  for (const graph of [QWEN_IMAGE_WORKFLOW, QWEN_IMAGE_EDIT_WORKFLOW, QWEN_IMAGE_TURBO_WORKFLOW, QWEN_IMAGE_TURBO_EDIT_WORKFLOW]) {
+    const cache = Object.entries(graph).filter(([, node]) => node.class_type === 'QwenImage21Cache')
+    assert.equal(cache.length, 1, 'each Qwen graph carries exactly one cache shim')
+    const [cacheId, cacheNode] = cache[0]
+    assert.deepEqual(cacheNode.inputs.model, ['1', 0])
+    assert.equal(cacheNode.inputs.device, 'auto', 'the gpu device has known corruption bugs')
+    assert.equal(cacheNode.inputs.dtype, 'default', 'the lossless dtype')
+    const sampler = Object.values(graph).find((node) => node.class_type === 'KSampler' || node.class_type === 'CFGGuider')
+    assert.ok(sampler !== undefined)
+    assert.deepEqual(sampler.inputs.model, [cacheId, 0], 'the sampler must consume the cache output')
+  }
+  // The shim is a Qwen built-in: the MOSS graph must never carry it.
+  assert.equal(Object.values(MOSS_IMAGE_WORKFLOW).some((node) => node.class_type === 'QwenImage21Cache'), false)
+})
+
+test('QwenImage21Cache is on for a new server and stripped for an old one', async () => {
+  const withCache = structuredClone(OBJECT_INFO)
+  withCache.QwenImage21Cache = QWEN_CACHE_OBJECT_INFO
+  withCache.UNETLoader.input.required.unet_name[0].push('qwen_image_2.1_turbo_int8_convrot.safetensors')
+  const modern = await startFakeComfy({ objectInfo: withCache })
+  const legacy = await startFakeComfy() // no QwenImage21Cache node
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-qwen-cache-'))
+  try {
+    const args = { prompt: 'A cat.', wh_ratio: '1:1', seed: 5 }
+    const cacheNodeOf = (graph) => Object.entries(graph).find(([, node]) => node.class_type === 'QwenImage21Cache')
+
+    // 1. New server: base t2i keeps the shim, and the KSampler consumes it.
+    const baseTools = register({ comfyEndpoint: modern.endpoint, outputDir, timeoutMs: 30_000 })
+    const base = await run(baseTools, 'qwen_image_generate', args)
+    const baseCache = cacheNodeOf(modern.state.graph)
+    assert.ok(baseCache !== undefined, 'the modern server must receive QwenImage21Cache')
+    assert.deepEqual(modern.state.graph['6'].inputs.model, [baseCache[0], 0])
+    assert.equal(base.comfyui.cache, 'on')
+
+    // 2. New server: turbo t2i keeps it too, and the CFGGuider consumes it.
+    const turboTools = register({ comfyEndpoint: modern.endpoint, comfyModel: 'qwen21-turbo', outputDir, timeoutMs: 30_000 })
+    const turbo = await run(turboTools, 'qwen_image_generate', args)
+    const turboCache = cacheNodeOf(modern.state.graph)
+    assert.ok(turboCache !== undefined)
+    assert.deepEqual(modern.state.graph['7'].inputs.model, [turboCache[0], 0])
+    assert.equal(turbo.comfyui.cache, 'on')
+    assert.equal(turbo.model, 'qwen_image_2.1_turbo_int8_convrot.safetensors')
+
+    // 3. Old server: the shim is stripped instead of submitting an unknown node.
+    const legacyTools = register({ comfyEndpoint: legacy.endpoint, outputDir, timeoutMs: 30_000 })
+    const degraded = await run(legacyTools, 'qwen_image_generate', args)
+    assert.equal(cacheNodeOf(legacy.state.graph), undefined, 'the old server must not receive the node')
+    assert.deepEqual(legacy.state.graph['6'].inputs.model, ['1', 0])
+    assert.equal(degraded.comfyui.cache, 'skipped')
+    assert.match(String(degraded.comfyui.cache_note), /QwenImage21Cache/)
+    assert.match(String(degraded.comfyui.cache_note), /0\.37\.0/)
+  } finally {
+    await modern.close()
+    await legacy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+test('qwen_image_status compares the ComfyUI version against the cache requirement', async () => {
+  const modern = await startFakeComfy({ version: '0.45.3' })
+  const old = await startFakeComfy({ version: '0.30.2' })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-cache-version-'))
+  try {
+    const modernStatus = await run(register({ comfyEndpoint: modern.endpoint, outputDir }), 'qwen_image_status', { timeoutMs: 5000 })
+    assert.equal(modernStatus.comfyui.version, '0.45.3')
+    assert.equal(modernStatus.comfyui.qwen_cache.version_satisfied, true)
+    assert.match(modernStatus.comfyui.qwen_cache.note, /0\.37\.0/)
+
+    const oldStatus = await run(register({ comfyEndpoint: old.endpoint, outputDir }), 'qwen_image_status', { timeoutMs: 5000 })
+    assert.equal(oldStatus.comfyui.qwen_cache.version_satisfied, false)
+    assert.match(oldStatus.comfyui.qwen_cache.note, /低于 0\.37\.0|自动跳过/)
+  } finally {
+    await modern.close()
+    await old.close()
     rmSync(outputDir, { recursive: true, force: true })
   }
 })

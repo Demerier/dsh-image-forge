@@ -41,10 +41,13 @@
  * optional prompt-enhancer branch: `UNETLoader` → `KSampler.model`,
  * `CLIPLoader(type=qwen_image)` → `TextEncodeQwenImage21` → `KSampler`,
  * `VAELoader` → `VAEDecode`, `EmptyLatentImage` → `KSampler.latent_image`,
- * `VAEDecode` → `SaveImage`. The template's `QwenImage21Cache`,
- * `ResolutionSelector` and prompt-enhancer nodes are dropped: the first two only
- * trade speed for VRAM (we size the canvas ourselves in `ratio.ts`), and the
- * enhancer needs weights this plugin does not require. The MOSS graph is the
+ * `VAEDecode` → `SaveImage`. The template's `QwenImage21Cache` is **kept** when
+ * the server lists the node (it caches the text/reference KV prefix, which is
+ * where most of the edit speedup comes from) and stripped automatically when an
+ * older ComfyUI (< 0.37.0) does not — see {@link withoutQwenCache}. The
+ * `ResolutionSelector` and prompt-enhancer nodes stay dropped: we size the canvas
+ * ourselves in `ratio.ts`, and the enhancer needs weights this plugin does not
+ * require. The MOSS graph is the
  * same kind of reduction of ComfyUI's `image_moss_image_t2i.json`, documented in
  * `model-profiles.ts`.
  *
@@ -67,6 +70,7 @@ import {
   assertLatentAligned,
   resolveProfile,
   resolveSampling,
+  withoutQwenCache,
   type ApiGraph,
   type ComfyModelChoice,
   type ModelProfile,
@@ -87,11 +91,14 @@ export {
   QWEN_IMAGE_TURBO_EDIT_WORKFLOW,
   QWEN_IMAGE_TURBO_WORKFLOW,
   QWEN_IMAGE_WORKFLOW,
+  QWEN_CACHE_NODE_ID,
+  TURBO_CACHE_NODE_ID,
   TURBO_EDIT_IMAGE_NODE_BASE,
   TURBO_SIGMAS,
   TURBO_STEPS,
   editTurboWorkflow,
   editWorkflow,
+  withoutQwenCache,
 } from './model-profiles.ts'
 export {
   COMFY_MODEL_IDS,
@@ -253,6 +260,14 @@ export interface ComfyModels {
   readonly vae: string
   /** `CLIPLoader.type`, resolved from that input's own option list. */
   readonly clipType: string
+  /**
+   * Whether `/object_info` lists `QwenImage21Cache` (ComfyUI ≥ 0.37.0).
+   *
+   * The Qwen graphs carry the shim; when this is false the adapter renders them
+   * without it so an old server runs the image instead of rejecting an unknown
+   * node class. MOSS graphs never carry it.
+   */
+  readonly cache: boolean
 }
 
 /**
@@ -617,10 +632,14 @@ export async function loadComfyModels(target: ComfyTarget, options: ComfyOptions
   const kinds = weightKindsOf(profile)
   const loaded = new Map<ModelKind, ComfyResponse>()
   const clipInfo = requestJson(`${target.endpoint}/object_info/CLIPLoader`, { method: 'GET' }, timeout, signal)
+  // Optional node (ComfyUI >= 0.37.0): probed once, so the Qwen graphs can keep
+  // the prefix-cache shim on a new server and drop it on an old one.
+  const cacheInfo = requestJson(`${target.endpoint}/object_info/QwenImage21Cache`, { method: 'GET' }, timeout, signal)
   for (const { kind, rule } of kinds.filter(({ kind }) => kind !== 'clip')) {
     loaded.set(kind, await requestJson(`${target.endpoint}/object_info/${rule.loader}`, { method: 'GET' }, timeout, signal))
   }
   loaded.set('clip', await clipInfo)
+  const cacheResponse = await cacheInfo
 
   const chosen = new Map<ModelKind, string>()
   /** One line per weight that could not be resolved, all reported together. */
@@ -681,6 +700,7 @@ export async function loadComfyModels(target: ComfyTarget, options: ComfyOptions
     clip: chosen.get('clip') as string,
     vae: chosen.get('vae') as string,
     clipType,
+    cache: prop(cacheResponse.payload, 'QwenImage21Cache') !== undefined,
   }
 }
 
@@ -1014,6 +1034,32 @@ function textToImageValues(
 }
 
 /**
+ * Render one profile's text-to-image graph for this server.
+ *
+ * The only server-dependent choice is the `QwenImage21Cache` shim: it is part of
+ * the profile's graph, but a ComfyUI older than 0.37.0 does not know the node
+ * class and would reject the whole prompt, so the shim is stripped when
+ * `/object_info` did not list it ({@link ComfyModels.cache}). MOSS graphs carry no
+ * shim, so the branch is inert for them.
+ *
+ * @param profile - the effective profile of this call.
+ * @param models - the file names and capability flags the server reported.
+ * @param request - prompt, canvas, count, seed and any overrides.
+ * @param preset - the configured sampling register, if any.
+ * @returns a rendered graph, ready for `/prompt`.
+ */
+function renderTextToImage(
+  profile: ModelProfile,
+  models: ComfyModels,
+  request: GenerateRequest & QualityTierOverrides,
+  preset?: string,
+): Record<string, unknown> {
+  const template =
+    profile.family === 'qwen-image-2.1' && !models.cache ? withoutQwenCache(profile.textToImage) : profile.textToImage
+  return renderWorkflow(template, textToImageValues(profile, models, request, preset)) as Record<string, unknown>
+}
+
+/**
  * Run one text-to-image job on ComfyUI and download the resulting images.
  *
  * The graph, sampler and step default come from the **effective** profile, so
@@ -1040,7 +1086,7 @@ export async function generateViaComfyUi(
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
   const profile = effectiveProfile(options.comfyModel, models)
-  const graph = renderWorkflow(profile.textToImage, textToImageValues(profile, models, request, options.mossSampling)) as Record<string, unknown>
+  const graph = renderTextToImage(profile, models, request, options.mossSampling)
   return await runGraph(target, graph, profile.family === 'moss-image' ? '出图（MOSS）' : '出图', options, signal)
 }
 
@@ -1210,7 +1256,11 @@ async function renderEditGraph(
   for (const reference of references) {
     names.push(await uploadReferenceImage(target, reference, Math.max(1, deadline - Date.now()), signal))
   }
-  return renderWorkflow(edit.build(names), {
+  const built = edit.build(names)
+  // Old ComfyUI: drop the prefix-cache shim rather than submit a graph whose node
+  // class the server does not know.
+  const template = profile.family === 'qwen-image-2.1' && !models.cache ? withoutQwenCache(built) : built
+  return renderWorkflow(template, {
     ...textToImageValues(profile, models, request, options.mossSampling),
     resolution: referenceBudget(request.width, request.height),
     filename_prefix: `${profile.filenamePrefix}-edit`,

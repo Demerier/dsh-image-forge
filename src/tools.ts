@@ -753,6 +753,35 @@ export function resolveQualityTier(
   }
 }
 
+/** Minimum ComfyUI version that ships the `QwenImage21Cache` built-in node. */
+export const QWEN_CACHE_MIN_VERSION = '0.37.0'
+
+/**
+ * Compare a ComfyUI version string against a minimum, semver-style.
+ *
+ * `/system_stats` reports `comfyui_version` like `0.45.3`. A non-numeric string
+ * (a dev build, the test fake's `fake-0.0`) cannot be ordered, so the answer is
+ * `null` — the status tool says "unknown" rather than guessing. Only the first
+ * three numeric components are compared.
+ *
+ * @param version - the reported version, or null when it could not be read.
+ * @param minimum - the required version, e.g. `0.37.0`.
+ * @returns true/false when comparable, null otherwise.
+ */
+export function comfyVersionAtLeast(version: string | null, minimum: string): boolean | null {
+  const parse = (raw: string): number[] | undefined => {
+    const match = /^(\d+)\.(\d+)\.(\d+)/.exec(raw.trim())
+    return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
+  }
+  const actual = version === null ? undefined : parse(version)
+  const wanted = parse(minimum)
+  if (actual === undefined || wanted === undefined) return null
+  for (let index = 0; index < 3; index += 1) {
+    if (actual[index] !== wanted[index]) return (actual[index] as number) > (wanted[index] as number)
+  }
+  return true
+}
+
 /** The tool-output blocks shared by generate and edit: summary, markdown, JSON. */
 function renderResultBlocks(value: { markdown?: string; summary?: string }): { type: 'text'; text: string }[] {
   const payload = value as { markdown?: string; summary?: string }
@@ -779,6 +808,10 @@ interface ComfyRunReport {
   /** The exact profile id that ran, e.g. `qwen21-turbo`. */
   profile: string
   turbo_fallback?: string
+  /** QwenImage21Cache shim state: `on`, `skipped` (old ComfyUI) or `n/a` (non-Qwen). */
+  cache: 'on' | 'skipped' | 'n/a'
+  /** Why the shim was skipped, when this server lacked the node. */
+  cache_note?: string
   references_uploaded?: string[]
   elapsed_ms: number
 }
@@ -862,6 +895,13 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         models,
         comfyModel: profile.legacyLabel,
         profile: profile.id,
+        cache: profile.family === 'qwen-image-2.1' ? (models.cache ? 'on' : 'skipped') : 'n/a',
+        ...(profile.family === 'qwen-image-2.1' && !models.cache
+          ? {
+              cache_note:
+                '本机 ComfyUI 的 /object_info 里没有 QwenImage21Cache 节点（需要 ≥ 0.37.0），本次跳过前缀缓存、图照常提交；升级 ComfyUI 后自动启用。',
+            }
+          : {}),
         ...(turboSkipped ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' } : {}),
         elapsed_ms: Date.now() - comfyStartedAt,
       }
@@ -1028,6 +1068,13 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         models,
         comfyModel: profile.legacyLabel,
         profile: profile.id,
+        cache: profile.family === 'qwen-image-2.1' ? (models.cache ? 'on' : 'skipped') : 'n/a',
+        ...(profile.family === 'qwen-image-2.1' && !models.cache
+          ? {
+              cache_note:
+                '本机 ComfyUI 的 /object_info 里没有 QwenImage21Cache 节点（需要 ≥ 0.37.0），本次跳过前缀缓存、图照常提交；升级 ComfyUI 后自动启用。',
+            }
+          : {}),
         ...(turboSkipped ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' } : {}),
         references_uploaded: references.map((reference) => reference.label),
         elapsed_ms: Date.now() - comfyStartedAt,
@@ -1157,12 +1204,27 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         ? null
         : await comfySystemStats(endpoint, Math.min(budget, 5000), exec.signal)
       const reachable = comfyui.reachable === true
+      // The prefix-cache node is a version-gated built-in: report the comparison,
+      // never the node's presence (that is answered by /object_info at run time).
+      const version = stats?.version ?? null
+      const cacheSupported = comfyVersionAtLeast(version, QWEN_CACHE_MIN_VERSION)
+      const cacheNote =
+        cacheSupported === null
+          ? `读不到可比较的 ComfyUI 版本（${version ?? 'null'}），无法判断 QwenImage21Cache（需要 ≥ ${QWEN_CACHE_MIN_VERSION}）是否支持；出图时按 /object_info 自动降级，不会失败。`
+          : cacheSupported
+            ? `版本满足 QwenImage21Cache（需要 ≥ ${QWEN_CACHE_MIN_VERSION}）；节点是否真的存在仍以出图时的 /object_info 为准，缺失会自动跳过。`
+            : `本机 ComfyUI 低于 ${QWEN_CACHE_MIN_VERSION}，没有 QwenImage21Cache 节点：出图会自动跳过前缀缓存（不会失败），升级 ComfyUI 后启用。`
       return jsonSafe({
         checked_at: new Date().toISOString(),
         comfyui: {
           modelsDir: settings.comfyModelsDir.length > 0 ? settings.comfyModelsDir : null,
           ...comfyui,
-          version: stats?.version ?? null,
+          version,
+          qwen_cache: {
+            min_version: QWEN_CACHE_MIN_VERSION,
+            version_satisfied: cacheSupported,
+            note: cacheNote,
+          },
           devices: stats?.devices ?? null,
           stats_note: stats?.note ?? null,
         },

@@ -136,6 +136,14 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
   才让 ComfyUI 自己交回：`POST /free` + `{"unload_models":false,"free_memory":true}`——`free_memory=true` 清 VRAM，
   `unload_models=true` 会连 RAM 里的模型一起清、下一轮被迫重载，所以**别在轮次之间调**。插件**不会再替你发**
   这个请求（它不碰别人的进程），只在 `qwen_image_status` 里把显存数字报出来，由你决定。
+- **QwenImage21Cache（前缀 KV cache）**：官方 Qwen-Image 2.1 工作流在 UNETLoader 后串了
+  `QwenImage21Cache`（`device=auto`、`dtype=default`），把文本/参考图 token 的前缀只算一次、全步复用；
+  官方说明**改图的大部分加速来自这里**。插件已把它接进 base / turbo 的 t2i 与 edit 四张图。它需要
+  **ComfyUI ≥ 0.37.0**：老版本缺这个节点时插件会**自动跳过并提示**（图照常出，只是没有前缀缓存），
+  不会提交一张必失败的工作流；`qwen_image_status` 会把 `/system_stats` 的版本与要求对比，给出
+  `qwen_cache.version_satisfied`（版本读不到时为 `null`，不猜）。`gpu` 档有已知损坏 bug
+  （ComfyUI #16879 / #16900），所以固定用 `auto` 与无损的 `default` dtype。
+  **加速数字不写死**：开/关 × t2i/edit × turbo 的 A/B 由 X04 实验补齐，本表不编造。
 - 这一块是**静态说明**，不做动态探测。文案纪律由 `test/settings.test.mjs` 守住：
   结论性措辞（`已定位` / `WDDM` / `对照实验`）**必须**出现在已定位的 finding 里且**必须**带实测数字；
   同时**全块禁止**任何修复承诺（`正在优化` / `即将修复` / `预计` / `会修好` / `保证` 一律测试失败），
