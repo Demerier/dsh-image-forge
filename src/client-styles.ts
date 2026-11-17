@@ -135,12 +135,18 @@ export const STUDIO_CSS = `
    selection hint, because it is a legend and not status. */
 .dsh-forge-canvas-foot-hint{float:right;opacity:.75;font-variant-numeric:tabular-nums}
 .dsh-forge-marquee{position:absolute;z-index:3;pointer-events:none;border:1px solid rgba(59,130,246,.85);background:rgba(59,130,246,.12);border-radius:2px}
-.dsh-forge-context{position:absolute;z-index:6;display:flex;flex-direction:column;gap:1px;min-width:172px;max-width:280px;padding:4px;border-radius:8px;border:1px solid rgba(127,127,127,.34);box-shadow:0 8px 24px rgba(0,0,0,.22);background:#fff;background:Canvas;color:#111;color:CanvasText}
+.dsh-forge-context,.dsh-forge-transfer{position:absolute;z-index:6;display:flex;flex-direction:column;gap:1px;min-width:172px;max-width:280px;padding:4px;border-radius:8px;border:1px solid rgba(127,127,127,.34);box-shadow:0 8px 24px rgba(0,0,0,.22);background:#fff;background:Canvas;color:#111;color:CanvasText}
 .dsh-forge-context-item{appearance:none;font:inherit;font-size:12.5px;line-height:1.5;text-align:left;padding:6px 9px;border:0;border-radius:5px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-forge-context-item:hover:not([disabled]){background:rgba(127,127,127,.18)}
 .dsh-forge-context-item[disabled]{opacity:.42;cursor:default}
 .dsh-forge-context-item.is-danger{color:#dc2626}
 .dsh-forge-context-item.is-danger:hover:not([disabled]){background:rgba(220,38,38,.12)}
+/* G25: the board picker a copy/move entry opens. It is the context menu's own
+   card with a header, so the two read as one gesture; the cancel row is dimmed
+   because it is the escape hatch, not an action. */
+.dsh-forge-context-head{padding:5px 9px 4px;font-size:10.5px;font-weight:600;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-forge-context-empty{padding:6px 9px;font-size:11px;opacity:.6;white-space:normal;line-height:1.5}
+.dsh-forge-context-item.is-cancel{margin-top:2px;border-top:1px solid rgba(127,127,127,.22);border-radius:0 0 5px 5px;opacity:.72}
 .dsh-forge-align{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
 .dsh-forge-align-btn{appearance:none;font:inherit;font-size:10.5px;line-height:1.4;padding:3px 6px;border-radius:5px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
 .dsh-forge-align-btn:hover{background:rgba(127,127,127,.13);border-color:rgba(127,127,127,.5)}

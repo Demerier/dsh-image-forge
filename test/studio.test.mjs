@@ -29,6 +29,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  CHILD_OFFSET_X,
+} from '../testlib/studio-canvas.js'
+import {
   decodeImportData,
   parseBoardAction,
   parseGenerate,
@@ -1707,15 +1710,27 @@ function buttonWithText(panel, text) {
   return entries
 }
 
+/** The open board picker's buttons, or `undefined` when it is not open. */
+function transferPicker(panel) {
+  const picker = fakeElementWithClass(panel.tree, 'dsh-forge-transfer')
+  if (picker === undefined) return undefined
+  const buttons = []
+  fakeVisit(picker, (entry) => {
+    if (entry.type !== 'button') return
+    buttons.push(entry)
+  })
+  return { head: fakeText(fakeElementWithClass(picker, 'dsh-forge-context-head') ?? []), buttons }
+}
+
 /** Mount the workbench with the three-node board, and give Node a rAF. */
-async function mountCanvasWorkbench() {
+async function mountCanvasWorkbench(options) {
   // §10.3 coalesces pointer moves into one animation frame; Node has none, so the
   // test frames immediately. This is the only browser API the wiring needs here.
   const requestFrame = globalThis.requestAnimationFrame
   const cancelFrame = globalThis.cancelAnimationFrame
   globalThis.requestAnimationFrame = (callback) => { callback(); return 1 }
   globalThis.cancelAnimationFrame = () => {}
-  const mounted = await mountWorkbench({ board: HARNESS_BOARD })
+  const mounted = await mountWorkbench({ board: HARNESS_BOARD, ...(options ?? {}) })
   mounted.restoreFrames = () => {
     if (requestFrame === undefined) delete globalThis.requestAnimationFrame
     else globalThis.requestAnimationFrame = requestFrame
@@ -1937,10 +1952,11 @@ test('right-click offers the §6.4 menu for blank canvas and for an image node',
       entries.map((entry) => fakeText(entry)),
       ['用作参考', '按这张图迭代（预填表单）', '查看原图（新窗）', '复制到画板…', '移动到画板…', '从画布移除（不删文件）', '删除文件…'],
     )
-    // Cross-board entries are visible but not yet wired (C12).
+    // G25: cross-board entries are wired now, so nothing in this menu is grey.
     assert.deepEqual(
       entries.filter((entry) => entry.props.disabled !== true).map((entry) => fakeText(entry)),
-      ['用作参考', '按这张图迭代（预填表单）', '查看原图（新窗）', '从画布移除（不删文件）', '删除文件…'],
+      ['用作参考', '按这张图迭代（预填表单）', '查看原图（新窗）', '复制到画板…', '移动到画板…', '从画布移除（不删文件）', '删除文件…'],
+      'every image menu entry has a handler',
     )
 
     // "Remove" acts on the right-clicked node and takes it off the canvas.
@@ -1975,6 +1991,16 @@ test('the canvas bundle ships the pan/zoom wheel split, a pixel-wide edge and th
   // G23: an SVG stroke in the world layer scales with the zoom, so at 0.1× every
   // wire was a fifth of a pixel wide. `vector-effect` is what pins it to screen px.
   assert.ok(CLIENT_SOURCE.includes('vector-effect:non-scaling-stroke'), 'edges must keep a screen-pixel stroke width')
+})
+
+test('the fit path reports the zoom-floor clamp instead of failing silently', () => {
+  // G15: `fitCamera` clamps at 10%, and past ~36 nodes the far columns stayed
+  // off-screen with no message. The predicate is unit-tested in
+  // studio-canvas.test.mjs; this asserts the panel asks it and says so. The
+  // canvas element is not measurable in this harness, so the handler itself
+  // cannot run here.
+  assert.ok(CLIENT_SOURCE.includes('fitNeedsClamp('), '适应 must ask whether the clamp bit')
+  assert.ok(CLIENT_SOURCE.includes('已到最小缩放（10%）'), 'and say so instead of silently framing part of the board')
 })
 
 test('Ctrl+V lands under the pointer, and at the view centre only without one', async () => {
@@ -2033,6 +2059,109 @@ test('a paste with no pointer history still lands at the view centre', async () 
     // rule must not become a crash or a silent no-op.
     assert.equal(copies.length, 3, 'every copied node is written')
     assert.deepEqual(copies.map((body) => [body.x, body.y]), [[0, 0], [0, 0], [0, 0]])
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// G25: the copy/move-to-board menu entries are wired to the C12 routes.
+// ---------------------------------------------------------------------------
+
+/** A second board so the picker has somewhere to send the item. */
+const OTHER_BOARD_SUMMARY = {
+  id: 'cbrdother',
+  name: '收藏板',
+  itemCount: 2,
+  cover: null,
+  createdAt: '2026-11-17T00:00:00.000Z',
+  updatedAt: '2026-11-17T00:00:00.000Z',
+  sessionId: null,
+}
+
+/** Right-click the second node so its image menu is open, selection = it. */
+async function openImageMenu(panel) {
+  canvasElement(panel).props.onContextMenu(pointerEvent({
+    clientX: 700,
+    clientY: 60,
+    target: { closest: (selector) => (selector === '.dsh-forge-node' ? { dataset: { nodeId: 'ibbb2' } } : null) },
+  }))
+  await settle(panel)
+  return menuEntries(panel)
+}
+
+test('G25: 复制到画板 opens a board picker and posts the C12 copy route', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench({
+    configOverrides: { boards: [OTHER_BOARD_SUMMARY], activeBoard: HARNESS_BOARD.id },
+  })
+  try {
+    const entries = await openImageMenu(panel)
+    assert.notEqual(entries.find((entry) => fakeText(entry) === '复制到画板…').props.disabled, true)
+    entries.find((entry) => fakeText(entry) === '复制到画板…').props.onClick()
+    await settle(panel)
+
+    // The picker replaced the menu, listing only the *other* boards.
+    assert.equal(menuEntries(panel), undefined, 'choosing the action closes the menu')
+    const picker = transferPicker(panel)
+    assert.ok(picker !== undefined, 'a board picker opens')
+    assert.ok(picker.head.includes('复制 1 张'), 'the picker states what it will do')
+    assert.deepEqual(picker.buttons.map((button) => fakeText(button)), ['收藏板 · 2 张', '取消'], 'the current board is not a destination')
+
+    picker.buttons[0].props.onClick()
+    await settle(panel)
+
+    const copies = boardMutations(network).filter((body) => body.action === 'copy-item')
+    assert.deepEqual(copies, [{ action: 'copy-item', board: 'cbrdharness', item: 'ibbb2', toBoard: 'cbrdother' }])
+    assert.equal(transferPicker(panel), undefined, 'the picker closes after the write')
+    assert.equal(nodeElements(panel).length, 3, 'a copy leaves the source board alone')
+    assert.ok(noteText(panel).includes('已复制 1 张到「收藏板」'), 'the result is stated in the status line')
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('G25: 移动到画板 moves it and forgets the node without a second remove-item', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench({
+    configOverrides: { boards: [OTHER_BOARD_SUMMARY], activeBoard: HARNESS_BOARD.id },
+  })
+  try {
+    const entries = await openImageMenu(panel)
+    entries.find((entry) => fakeText(entry) === '移动到画板…').props.onClick()
+    await settle(panel)
+    const picker = transferPicker(panel)
+    assert.ok(picker.head.includes('移动 1 张'))
+    picker.buttons.find((button) => fakeText(button) === '收藏板 · 2 张').props.onClick()
+    await settle(panel)
+
+    const writes = boardMutations(network)
+    assert.deepEqual(
+      writes.filter((body) => body.action === 'move-item'),
+      [{ action: 'move-item', board: 'cbrdharness', item: 'ibbb2', toBoard: 'cbrdother' }],
+    )
+    // The move already took it off this board server-side; a remove-item would 404.
+    assert.deepEqual(writes.filter((body) => body.action === 'remove-item'), [], 'no follow-up remove-item')
+    assert.equal(nodeElements(panel).length, 2, 'the moved node leaves the canvas')
+    assert.deepEqual(nodeElements(panel).map((entry) => entry.props['data-node-id']), ['iaaa1', 'iccc3'])
+    assert.ok(noteText(panel).includes('已移动 1 张到「收藏板」'))
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('G25: with no other board the picker says so instead of offering nothing', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    const entries = await openImageMenu(panel)
+    entries.find((entry) => fakeText(entry) === '复制到画板…').props.onClick()
+    await settle(panel)
+    const picker = transferPicker(panel)
+    assert.ok(picker !== undefined)
+    assert.ok(picker.head.includes('复制 1 张'))
+    assert.deepEqual(picker.buttons.map((button) => fakeText(button)), ['取消'], 'only the escape hatch is offered')
+    assert.ok(fakeText(fakeElementWithClass(panel.tree, 'dsh-forge-context-empty') ?? []).includes('还没有别的画板'))
   } finally {
     restoreFrames()
     network.restore()
@@ -2248,7 +2377,7 @@ test('C11: generation drops a task node carrying its clientId, and the response 
     const task = taskNodeElement(panel)
     assert.equal(task.props['data-node-id'], clientId, 'the task node id is the clientId')
     assert.equal(task.props['data-task-status'], 'idle')
-    assert.equal(task.props.style.left, '1440px', 'landing clears the widest right-most node')
+    assert.equal(task.props.style.left, `${String(CHILD_OFFSET_X)}px`, 'landing is one child-offset right of the reference it grows from')
     assert.equal(task.props.style.width, '208px', 'a task node is the fixed default box')
     assert.ok(fakeText(task).includes('一只橘猫坐在窗台上'), 'the node shows the prompt')
     assert.ok(fakeText(task).includes('1:1 · 40 步 · 1 张'), 'the node shows the parameter summary')
@@ -2289,7 +2418,7 @@ test('C11: generation drops a task node carrying its clientId, and the response 
     assert.equal(nodesOfKind(panel, 'task').length, 0, 'the task node is gone')
     const converted = nodesOfKind(panel, 'image').find((entry) => entry.props['data-node-id'] === 'iimg1')
     assert.ok(converted !== undefined, 'the result is an image node keyed by the board item id')
-    assert.equal(converted.props.style.left, '1440px')
+    assert.equal(converted.props.style.left, `${String(CHILD_OFFSET_X)}px`, 'the result takes the task node spot (right of its parent)')
     assert.equal(converted.props.style.top, '0px')
     assert.ok(edgeKeys(panel).includes('iaaa1->iimg1'), 'parents crossed the conversion as a drawn edge')
     assert.equal(nodeElements(panel).length, 4, 'three board pictures plus the new one')
@@ -2514,8 +2643,10 @@ test('C11: count>1 keeps the first image in place and fans the rest out to the r
     assert.ok(first !== undefined && second !== undefined)
     assert.equal(first.props.style.left, left, 'the first picture takes the task position')
     assert.equal(first.props.style.top, top)
-    // The first picture is 200 wide at 1440, so the fan-out clears 1640 + 40.
-    assert.equal(second.props.style.left, '1680px', 'the extra picture lands to the right of every node')
+    // G15: the extras now fan out from the task node they belong to (its own
+    // right side + CHILD_OFFSET_X), not from the board's right-most node.
+    const taskX = Number(left.replace('px', ''))
+    assert.equal(second.props.style.left, `${String(taskX + CHILD_OFFSET_X)}px`, 'the extra picture lands right of its own parent')
     assert.equal(nodeElements(panel).length, 5)
   } finally {
     network.restore()

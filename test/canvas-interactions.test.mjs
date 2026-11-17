@@ -410,12 +410,15 @@ test('contextMenuItems: the image menu is the full §6.4 list', () => {
   // Deleting the file is the one irreversible item, and it is marked so.
   assert.equal(items.find((item) => item.id === 'delete-file').danger, true)
   assert.equal(items.find((item) => item.id === 'remove').danger, undefined, 'unplace is not destructive')
-  // Cross-board copy/move belong to C12 and are shown disabled with the reason.
+  // G25: cross-board copy/move are wired to the C12 routes now, so the menu is
+  // fully live for pictures — no disabled placeholder left in this list.
   for (const id of ['copy-item', 'move-item']) {
     const item = items.find((entry) => entry.id === id)
-    assert.equal(item.disabled, true)
-    assert.ok(item.hint.includes('C12'))
+    assert.equal(item.disabled, undefined, `${id} must be clickable`)
+    assert.ok(item.hint !== undefined && item.hint.length > 0, `${id} still explains what it does`)
+    assert.ok(!item.hint.includes('尚未接线'), `${id} must not present itself as unwired`)
   }
+  assert.deepEqual(items.filter((item) => item.disabled === true), [], 'the image menu has no grey entries left')
   // No label is empty: a menu of blanks would be unusable.
   for (const item of items) assert.ok(item.label.length > 0)
 })

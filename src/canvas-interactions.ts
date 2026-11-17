@@ -680,10 +680,12 @@ export interface ContextMenuItem {
  * Items whose implementation belongs to a later task are present and `disabled`
  * with the reason attached rather than omitted: the user sees that the action
  * exists and is not wired, which is more honest than a menu that silently grows
- * new entries between releases. Cross-board copy/move is C12 (§7.2), the layout
- * node and its export are C13, board export is C15, and the task entries are C11
- * — that last group is also why `nodeKind` is a parameter now (C11 turns the
- * kind on, not this function).
+ * new entries between releases. The layout node and its export are C13, board
+ * export is C15, and the task entries are C11 — that last group is also why
+ * `nodeKind` is a parameter now (C11 turns the kind on, not this function).
+ * Cross-board copy/move used to be the remaining placeholder; G25 wired both to
+ * the C12 routes, so the only still-disabled entries are the three layout-node
+ * conveniences whose affordance already lives in the embedded editor.
  *
  * Batch (`selectionSize >= 2`) menus act on the whole selection, so they offer no
  * single-image affordances: "用作参考" for two pictures is an ambiguous command.
@@ -734,8 +736,11 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
   if (count >= 2) {
     return [
       { id: 'remove', label: `从画布移除所选 ${String(count)} 张（不删文件）` },
-      { id: 'copy-item', label: '复制所选到画板…', disabled: true, hint: '用 Ctrl+C / 拖到目标画板完成（C12 已有入口）' },
-      { id: 'move-item', label: '移动所选到画板…', disabled: true, hint: '拖到目标画板时按住 Alt 即为移动（C12 已有入口）' },
+      // G25: wired to the C12 routes (`copy-item` / `move-item`). The view opens a
+      // small board picker and posts one request per item; the menu itself only
+      // names the action, which is why these entries are data.
+      { id: 'copy-item', label: '复制所选到画板…', hint: `把所选 ${String(count)} 张复制到另一个画板（文件不复制，两个画板共用一张 PNG）` },
+      { id: 'move-item', label: '移动所选到画板…', hint: `把所选 ${String(count)} 张移出当前画板` },
       { id: 'delete-file', label: `删除所选 ${String(count)} 个文件…`, danger: true, hint: '逐个二次确认太吵，这里只确认一次' },
     ]
   }
@@ -743,8 +748,8 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
     { id: 'reference', label: '用作参考' },
     { id: 'branch', label: '按这张图迭代（预填表单）' },
     { id: 'original', label: '查看原图（新窗）' },
-    { id: 'copy-item', label: '复制到画板…', disabled: true, hint: '选中后 Ctrl+C，到目标画板 Ctrl+V（C12）' },
-    { id: 'move-item', label: '移动到画板…', disabled: true, hint: '从素材页拖到目标画板时按住 Alt（C12）' },
+    { id: 'copy-item', label: '复制到画板…', hint: '复制到另一个画板（共用同一张 PNG）' },
+    { id: 'move-item', label: '移动到画板…', hint: '移出当前画板，换到另一个画板' },
     { id: 'remove', label: '从画布移除（不删文件）' },
     { id: 'delete-file', label: '删除文件…', danger: true, hint: '二次确认后删除磁盘上的 PNG' },
   ]

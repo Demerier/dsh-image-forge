@@ -1192,6 +1192,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     /** The node it was opened on; `undefined` for the blank-canvas menu. */
     readonly target?: string
   } | undefined>(undefined)
+  // G25: "copy/move to board…" asks which board, and the answer is a small list
+  // placed where the menu was. It is a mode of the canvas, not a new dialog
+  // framework: one panel, one click, dismissed by Escape or a blank click.
+  const [transfer, setTransfer] = useState<{
+    readonly mode: 'copy' | 'move'
+    readonly ids: readonly string[]
+    readonly x: number
+    readonly y: number
+  } | undefined>(undefined)
   // Space is a *held* state, so it lives in a ref the pointer handler can read at
   // pointer-down and in state only for the cursor affordance (§6.3, §6.6).
   const panRef = useRef(false)
@@ -1267,6 +1276,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setSelectedId(undefined)
       setSelection(new Set())
       setMenu(undefined)
+      setTransfer(undefined)
       persistedIdsRef.current = new Set()
       dirtyIdsRef.current.clear()
       lastCameraRef.current = undefined
@@ -1919,8 +1929,14 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     adoptBoard(result.board)
     const next = nodesRef.current.filter((node) => node.id !== taskNode.id)
     const created: ImageCanvasNode[] = []
+    // G15: the extra images of a batch fan out from the task node's own spot —
+    // the parent they belong to — instead of appending to the right-most node on
+    // the board, which turned a 20-image batch into one 20-node row.
+    const origin = nodeRect(taskNode)
     result.images.forEach((image: StudioImage, index: number) => {
-      const spot = index === 0 ? { x: taskNode.x, y: taskNode.y } : nextNodeSpot(next.map(nodeRect))
+      const spot = index === 0
+        ? { x: taskNode.x, y: taskNode.y }
+        : nextNodeSpot(next.map(nodeRect), origin, nodeDisplaySize(image.width, image.height))
       const node: ImageCanvasNode = {
         kind: 'image',
         // The board item id, not a client-side composite: the arrangement is
@@ -2003,8 +2019,17 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       }
     }
     const clientId = makeClientId()
+    // G15: a run that carries canvas parents is placed relative to the parent it
+    // grows from, not at the end of the board's right-most column.
+    const parentNode = (options.parents ?? previous?.parents ?? [])
+      .map((id) => nodesRef.current.find((node) => node.id === id))
+      .find((node): node is CanvasNode => node !== undefined)
     const spot = previous === undefined
-      ? nextNodeSpot(nodesRef.current.map(nodeRect))
+      ? nextNodeSpot(
+        nodesRef.current.map(nodeRect),
+        parentNode === undefined ? undefined : nodeRect(parentNode),
+        { width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT },
+      )
       : { x: previous.x, y: previous.y }
     const taskNode: TaskCanvasNode = {
       kind: 'task',
@@ -2304,12 +2329,25 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const shown = useMemo(() => visibleNodes(graph.views, camera, viewport), [graph, camera, viewport])
   const shownEdges = useMemo(() => visibleEdges(graph.edges, cullRect), [graph, cullRect])
 
-  /** Frame every node; a no-op on an empty canvas so the view never jumps. */
+  /**
+   * Frame every node; a no-op on an empty canvas so the view never jumps.
+   *
+   * G15: `fitCamera` clamps at {@link CANVAS_MIN_ZOOM}, so a board wide enough to
+   * need less than 10% was framed *around* its centre with the far nodes still
+   * off-screen — and said nothing. The note below is the missing half of that
+   * interaction: it is set only when the clamp actually bit, so a normal fit
+   * leaves whatever the panel was already saying alone.
+   */
   const fitView = useCallback(() => {
     const element = canvasRef.current
     if (element === null) return
     const box = element.getBoundingClientRect()
-    setCamera(fitCamera(nodes.map(nodeRect), { width: box.width, height: box.height }))
+    const rects = nodes.map(nodeRect)
+    const viewport = { width: box.width, height: box.height }
+    setCamera(fitCamera(rects, viewport))
+    if (fitNeedsClamp(rects, viewport)) {
+      setNote('已到最小缩放（10%），还有节点在视口外：用滚轮平移过去，或把这张画布拆成多个画板。')
+    }
     scheduleLayout()
   }, [nodes, scheduleLayout])
 
@@ -2451,12 +2489,22 @@ export function StudioPanel(): ReturnType<typeof createElement> {
    * actors (§6.5). Reloading after undoing a removal shows the item gone — the
    * honest limit of a session-scoped stack, stated rather than papered over.
    */
-  const removeNodes = useCallback((ids: readonly string[], deleteFile = false) => {
+  /**
+   * Remove nodes from the canvas state only — no board write.
+   *
+   * Split out of {@link removeNodes} for the cross-board move (G25): a move has
+   * already taken the entry off the server-side board, so posting `remove-item`
+   * afterwards would 404 ("这张图不在画板里"). Everything else the removal used
+   * to do locally — the undo step, the reference cleanup, the cancelled layout
+   * timers — still has to happen, and it must be the *same* code, not a copy.
+   */
+  const dropNodesLocally = useCallback((ids: readonly string[]): CanvasNode[] => {
     const drop = new Set(ids)
-    if (drop.size === 0) return
+    if (drop.size === 0) return []
     const before = nodesRef.current
+    const removed = before.filter((node) => drop.has(node.id))
+    if (removed.length === 0) return []
     const after = before.filter((node) => !drop.has(node.id))
-    if (after.length === before.length) return
     writeNodes(after)
     // A reference pointing at a removed node would draw an edge to nothing.
     setReferences((current) => current.filter((entry) => entry.nodeId === undefined || !drop.has(entry.nodeId)))
@@ -2476,13 +2524,18 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         layoutPersistTimersRef.current.delete(id)
       }
     }
+    return removed
+  }, [pushCommand, writeNodes])
+
+  const removeNodes = useCallback((ids: readonly string[], deleteFile = false) => {
+    const removed = dropNodesLocally(ids)
+    if (removed.length === 0) return
     const board = boardIdRef.current
     if (board === undefined) return
     // Pictures are board items by construction; a task/layout node is one only
     // after its own write landed (C14). Anything else is canvas-only and must
     // not produce a 404 "not on the board" alert.
-    for (const node of before) {
-      if (!drop.has(node.id)) continue
+    for (const node of removed) {
       const stored = isImageNode(node) || persistedIdsRef.current.has(node.id)
       if (!stored) continue
       persistedIdsRef.current.delete(node.id)
@@ -2497,7 +2550,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         if (error !== undefined) setBoardError(error)
       })
     }
-  }, [pushCommand, writeNodes])
+  }, [dropNodesLocally])
 
   /** The single-node form the inline node actions still use. */
   const removeNode = useCallback((id: string) => { removeNodes([id]) }, [removeNodes])
@@ -2519,8 +2572,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const onCanvasPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 && event.button !== 1) return
     const target = event.target as HTMLElement
-    // Any click outside the menu dismisses it (§6.4).
+    // Any click outside the menu dismisses it (§6.4), and the same goes for the
+    // board picker a copy/move entry opens (G25).
     setMenu(undefined)
+    setTransfer(undefined)
     // G12: remember where the pointer is, in viewport pixels, so a later paste
     // lands under it. Recorded before the node check because a click on a node
     // is just as good a "the user is looking here" signal as a click on blank.
@@ -2564,6 +2619,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (event.button !== 0) return
     event.stopPropagation()
     setMenu(undefined)
+    setTransfer(undefined)
     // G12: the node stopped the event, so the canvas handler never saw it and
     // this is the only place a click on a picture can record the pointer.
     const canvasBox = canvasRef.current?.getBoundingClientRect()
@@ -2978,6 +3034,44 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (created.length > 0) setSelection(new Set(created))
   }, [appendBoardItem])
 
+  /**
+   * G25: copy or move the given nodes onto another board through the C12 routes.
+   *
+   * One request per item — `copy-item`/`move-item` are per-item on the wire, and
+   * a batch that fails halfway should leave the successful half done instead of
+   * pretending the whole transfer was atomic. A **copy** leaves the source items
+   * alone (the two boards share one PNG); a **move** has already taken them off
+   * this board server-side, so the canvas forgets them locally with the same
+   * bookkeeping a removal uses — minus a second `remove-item` that would 404.
+   */
+  const transferItems = useCallback(async (mode: 'copy' | 'move', ids: readonly string[], toBoard: string) => {
+    const board = boardIdRef.current
+    setTransfer(undefined)
+    if (board === undefined || toBoard === board || ids.length === 0) return
+    const done: string[] = []
+    for (const id of ids) {
+      const { error, payload } = await postBoardRaw({
+        action: mode === 'copy' ? 'copy-item' : 'move-item',
+        board,
+        item: id,
+        toBoard,
+      })
+      if (error !== undefined) {
+        setBoardError(error)
+        continue
+      }
+      done.push(id)
+      // The response carries the destination summary: keep its item count honest
+      // without a second library read.
+      const summary = payload?.board as BoardSummary | undefined
+      if (summary !== undefined) setBoards((current) => upsertBoard(current, summary))
+    }
+    if (done.length === 0) return
+    if (mode === 'move') dropNodesLocally(done)
+    const name = boards.find((entry) => entry.id === toBoard)?.name ?? '目标画板'
+    setNote(`已${mode === 'copy' ? '复制' : '移动'} ${String(done.length)} 张到「${name}」`)
+  }, [boards, dropNodesLocally])
+
   /* ------------------------------------------------------------------------ */
   /* Export (C15 §9.6 / DD14): board JSON + contact-sheet PNG                 */
   /* ------------------------------------------------------------------------ */
@@ -3343,6 +3437,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
           }
         }
         setMenu(undefined)
+        setTransfer(undefined)
         setMarquee(undefined)
         setSelection(new Set())
         break
@@ -3491,6 +3586,20 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       case 'new-layout':
         addLayoutNode()
         break
+      case 'copy-item':
+      case 'move-item': {
+        // G25: the picker, not a dialog. It opens where the menu was and lists
+        // the boards the items can go to; `transferItems` does the writes.
+        const ids = menuIds(target)
+        if (ids.length === 0) break
+        setTransfer({
+          mode: id === 'copy-item' ? 'copy' : 'move',
+          ids,
+          x: menu?.x ?? 0,
+          y: menu?.y ?? 0,
+        })
+        break
+      }
       case 'paste':
         void pasteClipboard()
         break
@@ -3512,6 +3621,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     fitView,
     generateLayoutNode,
     menu?.target,
+    menu?.x,
+    menu?.y,
     menuIds,
     pasteClipboard,
     referenceNode,
@@ -4622,6 +4733,57 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   },
                   item.label,
                 )),
+              ),
+            // G25: the board picker a copy/move entry opens. Same panel family
+            // as the context menu (one card, one click), not a modal on top of a
+            // modal — the user is already in a menu.
+            transfer === undefined
+              ? null
+              : createElement(
+                'div',
+                {
+                  className: 'dsh-forge-transfer',
+                  role: 'dialog',
+                  'aria-label': transfer.mode === 'copy' ? '复制到画板' : '移动到画板',
+                  style: { left: `${String(transfer.x)}px`, top: `${String(transfer.y)}px` },
+                  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { event.stopPropagation() },
+                  onContextMenu: (event: ReactPointerEvent<HTMLDivElement>) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                  },
+                },
+                createElement(
+                  'div',
+                  { className: 'dsh-forge-context-head' },
+                  transfer.mode === 'copy'
+                    ? `复制 ${String(transfer.ids.length)} 张到：`
+                    : `移动 ${String(transfer.ids.length)} 张到：`,
+                ),
+                ...(boards.filter((entry) => entry.id !== boardId).length === 0
+                  ? [createElement('div', { key: 'empty', className: 'dsh-forge-context-empty' }, '还没有别的画板：先在上面「新建」一个。')]
+                  : boards
+                    .filter((entry) => entry.id !== boardId)
+                    .map((entry) => createElement(
+                      'button',
+                      {
+                        key: entry.id,
+                        type: 'button',
+                        className: 'dsh-forge-context-item',
+                        title: `${entry.name} · ${String(entry.itemCount)} 张`,
+                        onClick: () => { void transferItems(transfer.mode, transfer.ids, entry.id) },
+                      },
+                      `${entry.name} · ${String(entry.itemCount)} 张`,
+                    ))),
+                createElement(
+                  'button',
+                  {
+                    key: 'cancel',
+                    type: 'button',
+                    className: 'dsh-forge-context-item is-cancel',
+                    onClick: () => { setTransfer(undefined) },
+                  },
+                  '取消',
+                ),
               ),
             createElement(
               'div',
