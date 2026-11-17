@@ -57,6 +57,57 @@ export const DEFAULT_SIZES: Readonly<Record<WhRatio, readonly [number, number]>>
   '9:16': [928, 1664],
 }
 
+/** The pixel budgets the canvas tables can run at. */
+export const SIZE_TIERS = ['1.5mp', '2k'] as const
+
+/** One canvas budget tier. */
+export type SizeTier = (typeof SIZE_TIERS)[number]
+
+/** The tier used when the caller does not pick one: the 8 GB-friendly ~1.5 MP table. */
+export const DEFAULT_SIZE_TIER: SizeTier = '1.5mp'
+
+/** Pixel budget each tier targets, in millions of pixels. */
+export const SIZE_TIER_MEGAPIXELS: Readonly<Record<SizeTier, number>> = {
+  '1.5mp': DEFAULT_MEGAPIXELS,
+  '2k': 4.2,
+}
+
+/**
+ * The official 4.2 MP (2K) table from the Qwen-Image 2.1 model card.
+ *
+ * The card prints 1:1 2048×2048, 4:3 2400×1792, 3:2 2528×1696, 16:9 2752×1536 and
+ * 9:16 1536×2752; 3:4 / 2:3 are their exact transposes (transposition preserves
+ * both the ratio and the area, so they are not invented numbers). Every pair is
+ * 32-aligned; 16:9 / 9:16 cannot be exact on a 32 grid and report their residue,
+ * exactly like {@link DEFAULT_SIZES}.
+ *
+ * **Not the default**: 4.2 MP is the model card's native 2K tier, but it is ~2.8×
+ * the pixels of the shipped 1.5 MP table (the budget an 8 GB card is sized for),
+ * so it is opt-in per call. Above 2K the model loses prompt adherence (4K warning
+ * in the official docs), which is why there is no 4K tier.
+ */
+export const OFFICIAL_2K_SIZES: Readonly<Record<WhRatio, readonly [number, number]>> = {
+  '1:1': [2048, 2048],
+  '4:3': [2400, 1792],
+  '3:4': [1792, 2400],
+  '3:2': [2528, 1696],
+  '2:3': [1696, 2528],
+  '16:9': [2752, 1536],
+  '9:16': [1536, 2752],
+}
+
+/**
+ * The canvas table one tier runs.
+ *
+ * @param tier - the budget tier; defaults to the shipped 1.5 MP table.
+ * @returns the seven-tier table for that budget.
+ */
+export function sizesForTier(
+  tier: SizeTier = DEFAULT_SIZE_TIER,
+): Readonly<Record<WhRatio, readonly [number, number]>> {
+  return tier === '2k' ? OFFICIAL_2K_SIZES : DEFAULT_SIZES
+}
+
 /** A resolved, backend-ready canvas size. */
 export interface ResolvedSize {
   /** Aligned width in pixels. */
@@ -95,17 +146,19 @@ function gcd(a: number, b: number): number {
  * The ratio is reduced first, so a reference image that measures `2048:1152` —
  * exactly `16:9` — lands on the documented canvas instead of on a second,
  * search-derived answer for the same shape. Any other shape (`21:9`) falls through
- * to {@link resolveSize} at the default budget. Explicit `width`/`height` never
- * reach this function; the tool layer validates and honours them first.
+ * to {@link resolveSize} at the tier's budget. Explicit `width`/`height` never reach
+ * this function; the tool layer validates and honours them first.
  *
  * @param whRatio - any `a:b`, tier or not.
+ * @param tier - which documented canvas table to use; defaults to the shipped
+ *   1.5 MP table, so an unset tier keeps every existing answer byte-identical.
  * @returns the aligned size plus its deviation from the *requested* ratio.
  */
-export function resolveDefaultSize(whRatio: string): ResolvedSize {
+export function resolveDefaultSize(whRatio: string, tier: SizeTier = DEFAULT_SIZE_TIER): ResolvedSize {
   const { a, b } = parseRatio(whRatio)
   const divisor = gcd(a, b)
-  const pair = (DEFAULT_SIZES as Record<string, readonly [number, number] | undefined>)[`${a / divisor}:${b / divisor}`]
-  if (pair === undefined) return resolveSize(whRatio, DEFAULT_MEGAPIXELS)
+  const pair = (sizesForTier(tier) as Record<string, readonly [number, number] | undefined>)[`${a / divisor}:${b / divisor}`]
+  if (pair === undefined) return resolveSize(whRatio, SIZE_TIER_MEGAPIXELS[tier])
   const [width, height] = pair
   const ratioDeviationPercent = ((width / height) / (a / b) - 1) * 100
   return {

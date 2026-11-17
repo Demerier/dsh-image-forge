@@ -38,13 +38,16 @@ import { makeItemId, recordItems } from './boards.ts'
 import { firstLine } from './studio-shared.ts'
 import { MAX_REFERENCES, loadReferenceImages, probeImageSize, resolveRatioFollow, type ReferenceImage } from './refs.ts'
 import {
+  DEFAULT_SIZE_TIER,
   MAX_SIDE,
   MIN_SIDE,
   SIZE_MULTIPLE,
+  SIZE_TIERS,
   WH_RATIOS,
   nearestRatio,
   resolveDefaultSize,
   validateSize,
+  type SizeTier,
 } from './ratio.ts'
 import type { Config } from './index.ts'
 
@@ -73,6 +76,17 @@ const QUALITY_PARAMETERS: ParameterSchemaSpec = {
   },
 }
 
+/** The optional canvas-budget select both image tools carry. */
+const SIZE_TIER_PARAMETER: ParameterSchemaSpec['size_tier'] = {
+  type: 'string',
+  enum: SIZE_TIERS,
+  description:
+    '画布像素预算档：`1.5mp`（默认，8GB 卡友好；七档 32 对齐，即本插件一直用的 ~1.5MP 表）或 ' +
+    '`2k`（官方模型卡 4.2MP 七档表，1:1 = 2048×2048，16:9 = 2752×1536）。' +
+    '**画面里要出现文字时建议用 2k**（小字精度随分辨率提升）；2k 的像素约为默认档 2.8 倍，8GB 卡上显存与耗时风险明显。' +
+    '显式 `width`/`height` 优先于本档；4K 不是一个档（官方明确 4K 丢提示词贴合度）。',
+}
+
 /** Everything `qwen_image_generate` accepts, as one schema reused by validation. */
 const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   prompt: {
@@ -88,8 +102,10 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
     description:
       '画幅比（一等参数，官方 7 档）：1:1 / 4:3 / 3:4 / 3:2 / 2:3 / 16:9 / 9:16。' +
       '本插件按 ~1.5MP 预算换算成 32 对齐的像素尺寸（换算表见 skill `qwen-image-forge` 正文「画幅比与像素」一节），' +
-      '因此契约里的 wh_ratio 不需要人工换算成宽高。省略时用 1:1；给了 width/height 时以 width/height 为准。',
+      '因此契约里的 wh_ratio 不需要人工换算成宽高（`size_tier: 2k` 时换成官方 4.2MP 表）。' +
+      '省略时用 1:1；给了 width/height 时以 width/height 为准。',
   },
+  size_tier: SIZE_TIER_PARAMETER,
   width: {
     type: 'integer',
     description: `显式覆盖宽度（像素）。必须与 height 成对给出，且为 ${SIZE_MULTIPLE} 的倍数、位于 ${MIN_SIDE}–${MAX_SIDE}；不合法时会报错并给出最近的合法值。`,
@@ -162,8 +178,10 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
     description:
       `画布固定比例（官方 7 档）：${WH_RATIOS.join(' / ')}。与 ratio_follow **互斥**；` +
       '本插件按 ~1.5MP 预算换算成 32 对齐的像素尺寸。省略且没给 ratio_follow 时，默认跟随第一张参考图（不是 1:1）。' +
-      '七档画布在 ComfyUI 改图工作流上都能跑；参考图会先缩放到与画布同量级再进条件化（官方模板的要求）。',
+      '七档画布在 ComfyUI 改图工作流上都能跑；参考图会先缩放到与画布同量级再进条件化（官方模板的要求）。' +
+      '`size_tier: 2k` 时用官方 4.2MP 表（显存/耗时风险随之上升）。',
   },
+  size_tier: SIZE_TIER_PARAMETER,
   width: {
     type: 'integer',
     description: `显式覆盖宽度（像素）。必须与 height 成对给出，且为 ${SIZE_MULTIPLE} 的倍数、位于 ${MIN_SIDE}–${MAX_SIDE}；给了就以 width/height 为准（此时 ratio_follow / wh_ratio 被覆盖）。`,
@@ -214,6 +232,15 @@ function asNumber(value: number | undefined, label: string): number | undefined 
     throw new Error(`${label} must be a finite number, got ${String(value)}`)
   }
   return value
+}
+
+/** Validate the optional `size_tier` select; absent means the shipped 1.5 MP table. */
+function asSizeTier(value: string | undefined): SizeTier {
+  if (value === undefined) return DEFAULT_SIZE_TIER
+  if (!(SIZE_TIERS as readonly string[]).includes(value)) {
+    throw new Error(`size_tier must be one of ${SIZE_TIERS.join(' / ')}, got ${String(value)}`)
+  }
+  return value as SizeTier
 }
 
 /** Coerce a caller string, treating a blank one as absent. */
@@ -347,6 +374,10 @@ interface ChosenSize {
   readonly whRatio: string
   readonly ratioDeviationPercent: number
   readonly exactRatio: boolean
+  /** Canvas-budget tier the decision ran on. */
+  readonly sizeTier: SizeTier
+  /** False when explicit `width`/`height` overrode the tier. */
+  readonly sizeTierApplied: boolean
 }
 
 /**
@@ -355,10 +386,16 @@ interface ChosenSize {
  * @param whRatio - caller ratio; defaults to `1:1` when nothing was supplied.
  * @param width - explicit width, if any.
  * @param height - explicit height, if any.
+ * @param tier - canvas-budget tier for the `wh_ratio` path; explicit sizes win.
  * @returns the aligned size and the provenance of the decision.
  * @throws When only one of width/height is given, or a side is not 32-aligned.
  */
-export function chooseSize(whRatio: string | undefined, width: number | undefined, height: number | undefined): ChosenSize {
+export function chooseSize(
+  whRatio: string | undefined,
+  width: number | undefined,
+  height: number | undefined,
+  tier: SizeTier = DEFAULT_SIZE_TIER,
+): ChosenSize {
   if ((width === undefined) !== (height === undefined)) {
     throw new Error('width and height must be given together; pass neither to use wh_ratio')
   }
@@ -372,10 +409,12 @@ export function chooseSize(whRatio: string | undefined, width: number | undefine
       whRatio: nearest.whRatio,
       ratioDeviationPercent: nearest.deviationPercent,
       exactRatio: Math.abs(nearest.deviationPercent) < 0.001,
+      sizeTier: tier,
+      sizeTierApplied: false,
     }
   }
   const ratio = whRatio ?? '1:1'
-  const size = resolveDefaultSize(ratio)
+  const size = resolveDefaultSize(ratio, tier)
   return {
     width: size.width,
     height: size.height,
@@ -383,6 +422,8 @@ export function chooseSize(whRatio: string | undefined, width: number | undefine
     whRatio: ratio,
     ratioDeviationPercent: size.ratioDeviationPercent,
     exactRatio: size.exact,
+    sizeTier: tier,
+    sizeTierApplied: true,
   }
 }
 
@@ -404,6 +445,10 @@ export interface EditSizeChoice {
   readonly followed: ReferenceImage | null
   /** True when the caller asked for neither a ratio nor a size. */
   readonly followedByDefault: boolean
+  /** Canvas-budget tier the decision ran on. */
+  readonly sizeTier: SizeTier
+  /** False when explicit `width`/`height` overrode the tier. */
+  readonly sizeTierApplied: boolean
 }
 
 /**
@@ -420,6 +465,7 @@ export interface EditSizeChoice {
  * @param width - explicit width, if any.
  * @param height - explicit height, if any.
  * @param references - the loaded reference images, in prompt order.
+ * @param tier - canvas-budget tier for the ratio paths; explicit sizes win.
  * @returns the aligned canvas and the provenance of the decision.
  * @throws When `wh_ratio` and `ratio_follow` are both set, when only one of
  *   width/height is given, when an explicit side is illegal, or when
@@ -431,6 +477,7 @@ export function chooseEditSize(
   width: number | undefined,
   height: number | undefined,
   references: readonly ReferenceImage[],
+  tier: SizeTier = DEFAULT_SIZE_TIER,
 ): EditSizeChoice {
   const ratio = whRatio?.trim()
   const follow = ratioFollow?.trim()
@@ -445,14 +492,14 @@ export function chooseEditSize(
     )
   }
   if (width !== undefined || height !== undefined) {
-    const size = chooseSize(undefined, width, height)
+    const size = chooseSize(undefined, width, height, tier)
     return { ...size, followed: null, followedByDefault: false }
   }
   const defaulted = (follow === undefined || follow.length === 0) && (ratio === undefined || ratio.length === 0)
   if (defaulted || (follow !== undefined && follow.length > 0)) {
     const reference = defaulted ? (references[0] as ReferenceImage) : resolveRatioFollow(follow as string, references)
     if (reference === undefined) throw new Error('ratio_follow needs at least one reference image')
-    const size = resolveDefaultSize(`${reference.width}:${reference.height}`)
+    const size = resolveDefaultSize(`${reference.width}:${reference.height}`, tier)
     return {
       width: size.width,
       height: size.height,
@@ -462,9 +509,11 @@ export function chooseEditSize(
       exactRatio: size.exact,
       followed: reference,
       followedByDefault: defaulted,
+      sizeTier: tier,
+      sizeTierApplied: true,
     }
   }
-  const size = chooseSize(ratio, undefined, undefined)
+  const size = chooseSize(ratio, undefined, undefined, tier)
   return { ...size, followed: null, followedByDefault: false }
 }
 
@@ -764,7 +813,8 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       const settings = resolveSettings(getConfig())
       const prompt = args.prompt.trim()
       if (prompt.length === 0) throw new Error('prompt must not be blank')
-      const size = chooseSize(args.wh_ratio, asInteger(args.width, 'width'), asInteger(args.height, 'height'))
+      const sizeTier = asSizeTier(args.size_tier)
+      const size = chooseSize(args.wh_ratio, asInteger(args.width, 'width'), asInteger(args.height, 'height'), sizeTier)
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
       // Resolve the quality tier before any backend is touched: an invalid cfg, or a
@@ -841,6 +891,8 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         wh_ratio_requested: args.wh_ratio ?? null,
         size: { width: size.width, height: size.height },
         size_source: size.sizeSource,
+        size_tier: size.sizeTier,
+        size_tier_applied: size.sizeTierApplied,
         ratio_deviation_percent: size.ratioDeviationPercent,
         exact_ratio: size.exactRatio,
         count,
@@ -909,12 +961,14 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       // Loaded before any backend is touched: a bad reference must fail here, where
       // the message can name which one it was, not inside a graph or a request body.
       const references = await loadReferenceImages(args.images)
+      const sizeTier = asSizeTier(args.size_tier)
       const size = chooseEditSize(
         args.wh_ratio,
         args.ratio_follow,
         asInteger(args.width, 'width'),
         asInteger(args.height, 'height'),
         references,
+        sizeTier,
       )
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
@@ -1014,6 +1068,8 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
             : { index: followed.index, source: followed.source, size: { width: followed.width, height: followed.height } },
         size: { width: size.width, height: size.height },
         size_source: size.sizeSource,
+        size_tier: size.sizeTier,
+        size_tier_applied: size.sizeTierApplied,
         ratio_deviation_percent: size.ratioDeviationPercent,
         exact_ratio: size.exactRatio,
         references: references.map((reference) => ({

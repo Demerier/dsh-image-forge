@@ -32,6 +32,25 @@ qwen_image_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
 （`test/ratio.test.mjs` 逐个钉住）。比例**先约分再查表**，所以 `2048:1152` 这种参照图会落到同一张
 `16:9` 画布上；**表外**的比例（`21:9`）仍走搜索：最小化「比例偏差 + 0.5 × 像素预算偏差」，同分取更大的画布。
 
+**2K 档（可选，默认不开）**：`size_tier: "2k"` 把上表换成官方模型卡的 **4.2MP 七档表**
+（默认仍是 1.5MP，8GB 卡友好）：
+
+| `wh_ratio` | 2K 像素 | 像素数 |
+|---|---|---|
+| `1:1` | 2048×2048 | 4.194 MP |
+| `4:3` | 2400×1792 | 4.301 MP |
+| `3:4` | 1792×2400 | 4.301 MP |
+| `3:2` | 2528×1696 | 4.287 MP |
+| `2:3` | 1696×2528 | 4.287 MP |
+| `16:9` | 2752×1536 | 4.227 MP |
+| `9:16` | 1536×2752 | 4.227 MP |
+
+`3:4` / `2:3` 是官方 `4:3` / `3:2` 的精确转置（比例与面积都一致，不是自算值）；`16:9` / `9:16`
+在 32 网格上有 ±0.78% 的固定残差，返回里的 `ratio_deviation_percent` 会照实报。**2K 的像素约为默认档
+2.8 倍**，8GB 卡上耗时与显存压力明显上升——只在「画面里要出现文字」或出终稿时才开；**4K 不是一个档**：
+官方明确 4K 会丢提示词贴合度。显式 `width`/`height` 仍优先于 `size_tier`；表外比例（`21:9`）在
+2K 档下按 4.2MP 预算搜索。返回里带 `size_tier` 与 `size_tier_applied`（被显式像素覆盖时为 false）。
+
 显存：插件不做任何前置显存门禁，**编辑时的显存压力要自己看着办**——
 真不够是 ComfyUI 回报的 CUDA OOM，缩 `width`/`height` 是唯一可靠的减法。
 要显式像素就用 `width`/`height`（必须 32 的倍数，否则报错并给出最近的合法值）——**显式值永远优先**。
@@ -107,8 +126,8 @@ qwen_image_edit(prompt = <成品改图指令>, images = ["D:\\pictures\\room.png
 
 | 工具 | 说明 |
 |---|---|
-| `qwen_image_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`preset`、`board`（画板 id/名字，**省略就新建**，见「画板」一节） |
-| `qwen_image_edit` | **参考图编辑（图生图）**。`prompt`（成品修改指令，必填）、`images`（1–10 张绝对路径或 `data:image/…;base64,…`，必填，按序对应 `<image1>`…）、`ratio_follow`（画布跟随某张参考图的宽高比；`image1`… 或该图在 `images` 里的原字符串）、`wh_ratio`（**与 `ratio_follow` 互斥**）、`width`/`height`、`steps`、`seed`、`count`、`preset`（默认 `edit`）、`board`（改图通常传参考图所在画板的 id） |
+| `qwen_image_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`size_tier`（`1.5mp` 默认 / `2k` 官方 4.2MP 表）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`preset`、`board`（画板 id/名字，**省略就新建**，见「画板」一节）、以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见[配置](configuration.md)） |
+| `qwen_image_edit` | **参考图编辑（图生图）**。`prompt`（成品修改指令，必填）、`images`（1–10 张绝对路径或 `data:image/…;base64,…`，必填，按序对应 `<image1>`…）、`ratio_follow`（画布跟随某张参考图的宽高比；`image1`… 或该图在 `images` 里的原字符串）、`wh_ratio`（**与 `ratio_follow` 互斥**）、`size_tier`、`width`/`height`、`steps`、`seed`、`count`、`preset`（默认 `edit`）、`board`（改图通常传参考图所在画板的 id） |
 | `qwen_image_status` | **只读**体检：**本机 ComfyUI 是否在跑**（探了哪几个端口、三个权重能不能枚举到、显卡型号与显存余量）、输出目录能否写。不产图、不写盘、不改配置，也不拉起或杀掉任何进程 |
 
 排障顺序：先 `qwen_image_status`，`next_steps` 非空就照着那句话做。

@@ -149,6 +149,40 @@ test('the wh_ratio description cites a document that really prints the conversio
     )
   }
 })
+/** The official 4.2 MP table as `skill.md` prints it, for the opt-in `2k` tier. */
+const CONVERSION_TABLE_2K = {
+  '1:1': '2048×2048',
+  '4:3': '2400×1792',
+  '3:4': '1792×2400',
+  '3:2': '2528×1696',
+  '2:3': '1696×2528',
+  '16:9': '2752×1536',
+  '9:16': '1536×2752',
+}
+
+test('size_tier offers the two documented budgets, and skill.md prints the 2K table', () => {
+  const { ctx, tools } = captureContext()
+  plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-tier-schema-')) }))
+  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+    const parameters = tools.get(tool).parameters
+    const node = parameters?.properties?.size_tier ?? parameters?.size_tier
+    assert.ok(node !== undefined, `${tool} must expose size_tier`)
+    assert.equal(node.type, 'string')
+    assert.deepEqual(node.enum, ['1.5mp', '2k'])
+    assert.equal(node.required, undefined, 'size_tier must be optional (default 1.5mp)')
+  }
+  // The opt-in 2K rows live in the same document the wh_ratio description cites.
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const doc = readFileSync(join(root, 'skill.md'), 'utf8')
+  for (const [ratio, pixels] of Object.entries(CONVERSION_TABLE_2K)) {
+    assert.match(
+      doc,
+      new RegExp(`^\\|[^|\\n]*${ratio}[^|\\n]*\\|\\s*${pixels}\\s*\\|`, 'm'),
+      `skill.md must print the 2K ${ratio} → ${pixels} row`,
+    )
+  }
+})
+
 test('the image tools expose the optional quality tier, default-free', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-quality-schema-')) }))

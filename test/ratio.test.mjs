@@ -14,13 +14,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DEFAULT_MEGAPIXELS,
+  DEFAULT_SIZE_TIER,
   DEFAULT_SIZES,
+  OFFICIAL_2K_SIZES,
   SIZE_MULTIPLE,
+  SIZE_TIERS,
+  SIZE_TIER_MEGAPIXELS,
   WH_RATIOS,
   nearestRatio,
   parseRatio,
   resolveDefaultSize,
   resolveSize,
+  sizesForTier,
   validateSize,
 } from '../src/ratio.ts'
 import { chooseSize } from '../testlib/tools.js'
@@ -108,6 +113,66 @@ test('an explicit width/height still beats the default table', () => {
   assert.equal(ratio.sizeSource, 'wh_ratio')
   assert.deepEqual([ratio.width, ratio.height], [1664, 928])
   assert.throws(() => chooseSize('16:9', 1000, 512), /must be a multiple of 32/)
+})
+
+/** The official 4.2 MP (2K) table: model-card values plus the two exact transposes. */
+const EXPECTED_2K = {
+  '1:1': [2048, 2048],
+  '4:3': [2400, 1792],
+  '3:4': [1792, 2400],
+  '3:2': [2528, 1696],
+  '2:3': [1696, 2528],
+  '16:9': [2752, 1536],
+  '9:16': [1536, 2752],
+}
+
+test('the 2K tier is the official 4.2 MP table, 32-aligned and opt-in', () => {
+  assert.deepEqual([...SIZE_TIERS], ['1.5mp', '2k'])
+  assert.equal(DEFAULT_SIZE_TIER, '1.5mp')
+  assert.deepEqual(OFFICIAL_2K_SIZES, EXPECTED_2K)
+  assert.deepEqual(sizesForTier(), DEFAULT_SIZES, 'an absent tier must keep the shipped table')
+  assert.deepEqual(sizesForTier('1.5mp'), DEFAULT_SIZES)
+  assert.deepEqual(sizesForTier('2k'), OFFICIAL_2K_SIZES)
+
+  const rows = []
+  for (const whRatio of WH_RATIOS) {
+    const size = resolveDefaultSize(whRatio, '2k')
+    assert.deepEqual([size.width, size.height], EXPECTED_2K[whRatio], `2K ${whRatio} drifted from the official table`)
+    assert.equal(size.width % SIZE_MULTIPLE, 0, `2K ${whRatio} width must be 32-aligned`)
+    assert.equal(size.height % SIZE_MULTIPLE, 0, `2K ${whRatio} height must be 32-aligned`)
+    const area = (size.width * size.height) / 1_000_000
+    assert.ok(Math.abs(area - SIZE_TIER_MEGAPIXELS['2k']) < 0.15, `2K ${whRatio} area ${area}MP strays from 4.2MP`)
+    rows.push({ wh_ratio: whRatio, size: `${size.width}x${size.height}`, megapixels: Number(area.toFixed(3)) })
+  }
+  console.log('wh_ratio -> size table (official 2K tier):')
+  console.table(rows)
+  assert.equal(SIZE_TIER_MEGAPIXELS['1.5mp'], DEFAULT_MEGAPIXELS)
+
+  // The default answers never move when a tier is not asked for.
+  assert.deepEqual([resolveDefaultSize('1:1').width, resolveDefaultSize('1:1').height], [1248, 1248])
+  assert.deepEqual([resolveDefaultSize('16:9').width, resolveDefaultSize('16:9').height], [1664, 928])
+
+  // 16:9 / 9:16 stay honest about the 32-grid residue, same as the 1.5 MP table.
+  const wide = resolveDefaultSize('16:9', '2k')
+  assert.equal(wide.exact, false)
+  assert.ok(wide.ratioDeviationPercent > 0 && wide.ratioDeviationPercent < 1, `2K 16:9 deviation ${wide.ratioDeviationPercent}%`)
+  // Off-table shapes search at the 4.2 MP budget instead of falling back to 1.5 MP.
+  const ultrawide = resolveDefaultSize('21:9', '2k')
+  const ultraArea = (ultrawide.width * ultrawide.height) / 1_000_000
+  assert.ok(Math.abs(ultraArea - 4.2) < 0.3, `21:9 2K search area ${ultraArea}MP`)
+})
+
+test('the tool layer passes the tier through, and explicit sizes still win', () => {
+  const wide = chooseSize('16:9', undefined, undefined, '2k')
+  assert.equal(wide.sizeTier, '2k')
+  assert.equal(wide.sizeTierApplied, true)
+  assert.deepEqual([wide.width, wide.height], [2752, 1536])
+  const explicit = chooseSize('16:9', 1024, 512, '2k')
+  assert.equal(explicit.sizeTierApplied, false, 'explicit width/height beat the tier')
+  assert.deepEqual([explicit.width, explicit.height], [1024, 512])
+  const shipped = chooseSize('16:9', undefined, undefined)
+  assert.equal(shipped.sizeTier, '1.5mp')
+  assert.deepEqual([shipped.width, shipped.height], [1664, 928])
 })
 
 test('resolution is deterministic', () => {
