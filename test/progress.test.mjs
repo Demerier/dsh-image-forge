@@ -27,6 +27,7 @@ import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { registerStudioRoutes } from '../testlib/studio-routes.js'
 import { STUDIO_EVENTS_ROUTE } from '../testlib/studio-shared.js'
+import { createRunRegistry } from '../src/runs.ts'
 
 /** RFC 6455 handshake GUID. */
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -140,7 +141,7 @@ function settingsFor(endpoint) {
  * Mount the Studio routes on a throwaway server, the way the host does, and
  * hand the base URL to `run`.
  */
-async function withStudio(endpoint, run) {
+async function withStudio(endpoint, run, options = {}) {
   const registered = []
   const fakeCtx = {
     webServer: {
@@ -157,6 +158,9 @@ async function withStudio(endpoint, run) {
     // Shrink the backoff: the reconnect test would otherwise sleep through a
     // production-sized delay.
     progress: { reconnectBaseMs: 20, reconnectMaxMs: 80, discoverTimeoutMs: 1000 },
+    // DD7: the association test owns the registry so it can register a run
+    // without a live generation; production creates one per registration.
+    ...(options.runs === undefined ? {} : { runs: options.runs }),
   })
   const route = registered.find((candidate) => candidate.path === STUDIO_EVENTS_ROUTE)
   assert.ok(route, 'the SSE route must be registered')
@@ -445,6 +449,73 @@ test('an unwatched Studio never connects to ComfyUI', async () => {
       await delay(150)
       assert.equal(comfy.connections.length, 0, 'constructing the routes must not open the socket')
     })
+  } finally {
+    await comfy.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// DD7: a canvas run's events carry the task that asked for it; other runs do not.
+// ---------------------------------------------------------------------------
+
+test('a registered run is linked to its clientId/boardId, an unregistered one stays as before', async () => {
+  const comfy = fakeComfy()
+  const endpoint = await comfy.listen()
+  const socket = { current: undefined }
+  comfy.onConnection((connection) => { socket.current = connection })
+  const runs = createRunRegistry()
+  try {
+    await withStudio(endpoint, async (base) => {
+      const stream = await openStream(base)
+      try {
+        await stream.waitFor('connected state', (event) => event.type === 'state' && event.state === 'connected')
+        const connection = socket.current
+        assert.ok(connection, 'the bridge must have dialed the fake ComfyUI')
+
+        // Registration is broadcast immediately: the task node leaves `idle` for
+        // `queued` without waiting for ComfyUI's first frame.
+        const runEvent = stream.waitFor('run event', (event) => event.type === 'run')
+        runs.register('prompt-canvas', { clientId: 'cabc123', boardId: 'b1' })
+        assert.deepEqual(await runEvent, {
+          type: 'run',
+          promptId: 'prompt-canvas',
+          clientId: 'cabc123',
+          boardId: 'b1',
+        })
+
+        connection.send({ type: 'execution_start', data: { prompt_id: 'prompt-canvas' } })
+        const start = await stream.waitFor('linked start', (event) => event.type === 'start' && event.promptId === 'prompt-canvas')
+        assert.equal(start.clientId, 'cabc123')
+        assert.equal(start.boardId, 'b1')
+
+        connection.send({ type: 'progress', data: { value: 17, max: 50, prompt_id: 'prompt-canvas', node: '3' } })
+        const progress = await stream.waitFor('linked progress', (event) => event.type === 'progress')
+        assert.equal(progress.clientId, 'cabc123')
+        assert.equal(progress.boardId, 'b1')
+
+        // The Agent tools' runs are never registered: their events keep the exact
+        // pre-DD7 shape, which is what makes the change backward compatible.
+        connection.send({ type: 'execution_start', data: { prompt_id: 'prompt-tool' } })
+        const toolStart = await stream.waitFor('unlinked start', (event) => event.type === 'start' && event.promptId === 'prompt-tool')
+        assert.ok(!('clientId' in toolStart), 'an unregistered run must not gain a clientId')
+        assert.ok(!('boardId' in toolStart), 'an unregistered run must not gain a boardId')
+
+        // `cached` is a renderer cache hint, not a lifecycle event the design
+        // list links (CANVAS-DESIGN §4.3): it stays unlinked even for a task run.
+        connection.send({ type: 'execution_cached', data: { prompt_id: 'prompt-canvas', nodes: ['3'] } })
+        const cached = await stream.waitFor('cached', (event) => event.type === 'cached')
+        assert.ok(!('clientId' in cached))
+
+        // A released run still resolves while the TTL keeps late frames alive.
+        runs.release('prompt-canvas')
+        connection.send({ type: 'execution_success', data: { prompt_id: 'prompt-canvas' } })
+        const done = await stream.waitFor('linked done', (event) => event.type === 'done')
+        assert.equal(done.clientId, 'cabc123')
+        assert.equal(done.boardId, 'b1')
+      } finally {
+        await stream.close()
+      }
+    }, { runs })
   } finally {
     await comfy.close()
   }

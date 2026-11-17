@@ -49,6 +49,7 @@
  */
 import { comfyOptionsOf, discoverComfyUi, type ComfySettingsFields } from './comfyui.ts'
 import { firstLine, type StudioProgressEvent } from './studio-shared.ts'
+import type { RunRegistry } from './runs.ts'
 
 /**
  * ComfyUI socket id this plugin registers as.
@@ -124,6 +125,14 @@ export interface ProgressBridgeOptions extends ProgressBridgeTiming {
   settings: () => ComfySettingsFields
   /** Socket id to register as; defaults to {@link COMFY_CLIENT_ID}. */
   clientId?: string
+  /**
+   * Session run registry (DD7).
+   *
+   * When given, every event that names a registered prompt gains that run's
+   * `clientId`/`boardId`, and one registration is broadcast as a `run` event so
+   * the canvas can move its task node to `queued` before the first frame.
+   */
+  runs?: RunRegistry
 }
 
 /** One live progress bridge. */
@@ -166,6 +175,7 @@ interface BridgeState {
 export function createProgressBridge(options: ProgressBridgeOptions): ProgressBridge {
   const listeners = new Set<(event: StudioProgressEvent) => void>()
   const clientId = options.clientId ?? COMFY_CLIENT_ID
+  const runs = options.runs
   const reconnectBaseMs = Math.max(1, options.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS)
   const reconnectMaxMs = Math.max(reconnectBaseMs, options.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS)
   const discoverTimeoutMs = Math.max(1, options.discoverTimeoutMs ?? DEFAULT_DISCOVER_TIMEOUT_MS)
@@ -209,6 +219,19 @@ export function createProgressBridge(options: ProgressBridgeOptions): ProgressBr
       }
     }
   }
+
+  // DD7: a freshly registered run is broadcast immediately, so the canvas does
+  // not have to wait for the first renderer frame to pair task node and run.
+  // Registered against the bridge's own lifetime rather than one SSE response:
+  // a panel that reconnects still needs the next registration.
+  const unsubscribeRuns = runs?.subscribe((record) => {
+    emit({
+      type: 'run',
+      promptId: record.promptId,
+      clientId: record.clientId,
+      ...(record.boardId === undefined ? {} : { boardId: record.boardId }),
+    })
+  })
 
   /** Publish a state change, skipping the event when nothing changed. */
   function setState(next: BridgeState): void {
@@ -324,10 +347,36 @@ export function createProgressBridge(options: ProgressBridgeOptions): ProgressBr
     attach(ws, ticket)
   }
 
+  /**
+   * Attach the canvas link to one event, when its run was registered.
+   *
+   * `cached` is deliberately left alone: it is a renderer cache hint, not a
+   * lifecycle event, and the design list (`docs/CANVAS-DESIGN.md` §4.3) names
+   * only the events the task node renders. A run that was never registered (the
+   * Agent tools') keeps the exact pre-DD7 shape, which is the
+   * backward-compatibility half of DD7.
+   *
+   * @param event - one normalized event.
+   * @returns the event, with `clientId`/`boardId` when its run is known.
+   */
+  function linkRun(event: StudioProgressEvent): StudioProgressEvent {
+    if (runs === undefined) return event
+    if (event.type === 'state' || event.type === 'queue' || event.type === 'cached' || event.type === 'run') return event
+    const promptId = 'promptId' in event ? event.promptId : undefined
+    if (promptId === undefined) return event
+    const record = runs.lookup(promptId)
+    if (record === undefined) return event
+    return {
+      ...event,
+      clientId: record.clientId,
+      ...(record.boardId === undefined ? {} : { boardId: record.boardId }),
+    } as StudioProgressEvent
+  }
+
   /** Parse one text frame and emit whatever it normalizes to. */
   function receive(raw: string): void {
     const event = normalize(raw)
-    if (event !== undefined) emit(event)
+    if (event !== undefined) emit(linkRun(event))
   }
 
   /**
@@ -517,6 +566,7 @@ export function createProgressBridge(options: ProgressBridgeOptions): ProgressBr
     },
     stop() {
       stopped = true
+      unsubscribeRuns?.()
       listeners.clear()
       teardown()
     },

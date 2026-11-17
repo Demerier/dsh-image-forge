@@ -208,6 +208,37 @@ export interface StudioGenerateRequest {
    * brand-new board when there is no active one.
    */
   board?: string
+  /**
+   * Canvas task this run belongs to: `c` + base36, at most 32 characters.
+   *
+   * Optional and additive (DD7): a request without it behaves exactly like
+   * before. The panel sends it so the host can echo it on every SSE event of
+   * this run, which is how a task node knows an event is its own.
+   */
+  clientId?: string
+}
+
+/** Longest accepted `clientId`, including its `c` prefix. */
+export const STUDIO_CLIENT_ID_MAX_CHARS = 32
+
+/**
+ * Canonical canvas task id: `c` + 1–31 lowercase base36 characters.
+ *
+ * Mirrors `makeItemId` in `boards.ts` (a `c`-prefixed random base36 string) and
+ * is validated on the host because it is a single-value field: a malformed one
+ * is refused outright, unlike the per-entry coordinate lists the board route
+ * drops one by one (CANVAS-DESIGN §14.3).
+ */
+export const STUDIO_CLIENT_ID_PATTERN = /^c[0-9a-z]{1,31}$/
+
+/**
+ * True when a value is a canonical canvas task id.
+ *
+ * @param value - untrusted wire value.
+ * @returns whether it can be echoed back to the panel as a task id.
+ */
+export function isStudioClientId(value: unknown): value is string {
+  return typeof value === 'string' && STUDIO_CLIENT_ID_PATTERN.test(value)
 }
 
 /** One produced image. */
@@ -466,6 +497,20 @@ export function firstLine(error: unknown, fallback = '未知错误'): string {
 }
 
 /**
+ * DD7 canvas association carried by every event that names a prompt.
+ *
+ * Additive and optional: runs started by the Agent tools are never registered,
+ * so their events keep the exact pre-DD7 shape, and a front end that does not
+ * know these fields simply ignores them.
+ */
+export interface StudioRunLink {
+  /** Canvas task node that initiated the run. */
+  clientId?: string
+  /** Board the result will be recorded on. */
+  boardId?: string
+}
+
+/**
  * One message on {@link STUDIO_EVENTS_ROUTE}'s stream.
  *
  * This union is the whole contract between the backend bridge
@@ -482,20 +527,29 @@ export type StudioProgressEvent =
   | { type: 'state'; state: 'connecting' | 'connected' | 'disconnected'; endpoint?: string; reason?: string }
   /** Tasks ComfyUI still has queued, pushed on every queue change. */
   | { type: 'queue'; remaining: number }
+  /**
+   * A canvas task's run was registered on the host (DD7).
+   *
+   * Emitted at submission, before ComfyUI executes anything, so the task node
+   * can leave `idle` for `queued` and keep a local clientId↔promptId mapping
+   * that survives a stream reconnect. Not part of ComfyUI's vocabulary; a panel
+   * that does not know the type drops it through its reducer's default branch.
+   */
+  | { type: 'run'; promptId: string; clientId: string; boardId?: string }
   /** A prompt began executing (ComfyUI `execution_start`). */
-  | { type: 'start'; promptId: string }
+  | ({ type: 'start'; promptId: string } & StudioRunLink)
   /** Nodes reused from ComfyUI's cache (ComfyUI `execution_cached`). */
   | { type: 'cached'; promptId: string; nodes: string[] }
   /** A node started executing; the id the panel can name. */
-  | { type: 'node'; promptId: string; node: string; displayNode?: string }
+  | ({ type: 'node'; promptId: string; node: string; displayNode?: string } & StudioRunLink)
   /**
    * One sampler step: `value` of `max`, with `label` already in the
    * "17/50" form the panel prints verbatim.
    */
-  | { type: 'progress'; promptId: string; node?: string; value: number; max: number; percent: number; label: string }
+  | ({ type: 'progress'; promptId: string; node?: string; value: number; max: number; percent: number; label: string } & StudioRunLink)
   /** The run finished successfully, once per prompt. */
-  | { type: 'done'; promptId: string }
+  | ({ type: 'done'; promptId: string } & StudioRunLink)
   /** ComfyUI `execution_error`, with the exception headline only. */
-  | { type: 'error'; promptId?: string; node?: string; nodeType?: string; message: string }
+  | ({ type: 'error'; promptId?: string; node?: string; nodeType?: string; message: string } & StudioRunLink)
   /** ComfyUI's interrupt fired (ComfyUI `execution_interrupted`). */
-  | { type: 'interrupted'; promptId: string }
+  | ({ type: 'interrupted'; promptId: string } & StudioRunLink)

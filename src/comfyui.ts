@@ -155,6 +155,15 @@ export interface ComfyOptions {
   readonly portProbeTimeoutMs?: number
   /** Gap between `/history` polls. */
   readonly pollIntervalMs?: number
+  /**
+   * Called once with the prompt id `/prompt` accepted, before any polling.
+   *
+   * The Studio uses it to map the ComfyUI run back to the canvas task that asked
+   * for it (DD7, `docs/CANVAS-DESIGN.md` §4.3). Optional by design: when it is
+   * absent the submission body and the request sequence are byte-identical to
+   * before, which is what keeps the conversation-tool path untouched.
+   */
+  readonly onPromptId?: (promptId: string) => void
 }
 
 /**
@@ -1189,6 +1198,11 @@ async function runGraph(
       `comfyui backend: /prompt 没有返回 prompt_id（拿到 ${submission.raw.slice(0, 200)}）— 无法跟踪这次任务。`,
     )
   }
+  // The run exists now: tell the caller before the first `/history` poll, so a
+  // canvas task node can attach while ComfyUI is still queueing. `/prompt` here
+  // is the adapter's only submission point — every generate variant funnels
+  // through `runGraph` — so one callback covers all paths.
+  options.onPromptId?.(promptId)
 
   for (;;) {
     const history = await requestJson(`${target.endpoint}/history/${promptId}`, { method: 'GET' }, remaining(), signal)

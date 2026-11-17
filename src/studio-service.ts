@@ -41,6 +41,7 @@ import {
   parseComfyPorts,
   TURBO_STEPS,
   type ComfyModels,
+  type ComfyOptions,
   type ComfyTarget,
 } from './comfyui.ts'
 import { presetSteps, resolveProfile, type ComfyModelId, type ModelProfile, type MossSamplingPreset } from './model-profiles.ts'
@@ -61,6 +62,7 @@ import {
   type StudioRatio,
   type StudioReferencePayload,
 } from './studio-shared.ts'
+import type { RunRegistry } from './runs.ts'
 import { optimizerAvailable, resolveOptimizerFor } from './studio-prompt.ts'
 
 /** Everything the pipeline reads off the resolved plugin config. */
@@ -331,6 +333,27 @@ function outputPrefix(referenceCount: number): string {
 }
 
 /**
+ * Resolve the board id a run should be associated with, before submission.
+ *
+ * Mirrors the recording step's target choice (`input.board`, then the active
+ * board) without creating anything: a name is accepted as-is here because only
+ * the record step may create or resolve boards. Failures are swallowed — the
+ * hint is optional wire metadata, and a read-only metadata directory must not
+ * turn into a failed generation.
+ *
+ * @param outputDir - resolved Studio output directory.
+ * @param requested - the board the request named, already trimmed.
+ * @returns a board id or name to echo on the `run` event, when one is known.
+ */
+async function boardHintOf(outputDir: string, requested: string | undefined): Promise<string | undefined> {
+  try {
+    return requested ?? (await activeBoardId(outputDir)) ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Run one Studio generation end to end.
  *
  * The order matters: canvas and prompt are validated **before** any socket
@@ -341,6 +364,9 @@ function outputPrefix(referenceCount: number): string {
  * @param settings - resolved Studio settings (endpoint, limits, output dir).
  * @param input - the validated request body.
  * @param signal - cancellation; forwarded to every ComfyUI call.
+ * @param runs - session run registry for the canvas task association (DD7);
+ *   absent means the run is not observable from the SSE stream, which is the
+ *   pre-DD7 behaviour.
  * @returns the written images plus the exact parameters that produced them.
  * @throws With the user-facing message the panel shows verbatim.
  */
@@ -348,6 +374,7 @@ export async function runStudioGeneration(
   settings: StudioSettings,
   input: StudioGenerateRequest,
   signal: AbortSignal,
+  runs?: RunRegistry,
 ): Promise<StudioGenerateResponse> {
   const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
   if (prompt.length === 0) throw new Error('请输入提示词')
@@ -370,8 +397,33 @@ export async function runStudioGeneration(
   const references = referencePayloads(input.references)
   const mode: 'generate' | 'edit' = references.length > 0 ? 'edit' : 'generate'
 
+  // Resolve where this run will be recorded **before** submitting: the `run`
+  // SSE event carries the board id, so resolving it after the run (as the
+  // recording step below does) would be too late for the canvas to attach its
+  // task node. The recording path stays the authority; this is only the wire
+  // hint, and a broken metadata directory must not block the run.
+  const requestedBoard = typeof input.board === 'string' && input.board.trim().length > 0
+    ? input.board.trim()
+    : undefined
+  const boardHint = await boardHintOf(settings.outputDir, requestedBoard)
+
   const startedAt = Date.now()
   const options = comfyOptionsOf(settings)
+  // DD7: the adapter's `/prompt` callback is the one place a run's prompt id
+  // becomes known, so the registry hook is installed here and nowhere else.
+  // Without a clientId (an old panel, or the Agent tools' path) the options are
+  // passed through untouched — that path must stay byte-identical.
+  let promptId: string | undefined
+  const clientId = input.clientId
+  const submitOptions: ComfyOptions = clientId === undefined || runs === undefined
+    ? options
+    : {
+        ...options,
+        onPromptId: (id) => {
+          promptId = id
+          runs.register(id, { clientId, ...(boardHint === undefined ? {} : { boardId: boardHint }) })
+        },
+      }
   let target: ComfyTarget
   let models: ComfyModels
   let images: GeneratedImage[]
@@ -421,7 +473,7 @@ export async function runStudioGeneration(
           seed,
           images: references,
         },
-        options,
+        submitOptions,
         signal,
       )
       : await (turbo ? generateViaComfyUiTurbo : generateViaComfyUi)(
@@ -435,13 +487,18 @@ export async function runStudioGeneration(
           steps,
           seed,
         },
-        options,
+        submitOptions,
         signal,
       )
   } catch (error) {
     // The adapter's messages are multi-line and already name the fix; keep only
     // the first line on the wire so a long traceback cannot bloat the response.
     throw new Error(firstLine(error))
+  } finally {
+    // The run has settled: keep the mapping for the TTL so frames that were
+    // already in flight (a `done` racing the HTTP answer) still resolve to the
+    // canvas task node.
+    if (promptId !== undefined) runs?.release(promptId)
   }
 
   const written = await writeImages(settings.outputDir, outputPrefix(references.length), size.width, size.height, images)
@@ -453,8 +510,7 @@ export async function runStudioGeneration(
   let board: BoardSummary | undefined
   let boardNote: string | undefined
   try {
-    const requested = typeof input.board === 'string' && input.board.trim().length > 0 ? input.board.trim() : undefined
-    const target = requested ?? (await activeBoardId(settings.outputDir)) ?? undefined
+    const target = requestedBoard ?? (await activeBoardId(settings.outputDir)) ?? undefined
     const recorded = await recordItems(settings.outputDir, target, written.map((image, index) => ({
       id: itemIds[index],
       path: image.path,

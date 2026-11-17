@@ -60,11 +60,13 @@ import {
 } from '../testlib/studio-prompt.js'
 import {
   STUDIO_BOARD_ROUTE,
+  STUDIO_CLIENT_ID_MAX_CHARS,
   STUDIO_CONFIG_ROUTE,
   STUDIO_EVENTS_ROUTE,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_RATIOS,
+  isStudioClientId,
 } from '../testlib/studio-shared.js'
 import { resolveDefaultSize } from '../testlib/ratio.js'
 
@@ -179,6 +181,39 @@ test('a generation body carries its board, and a blank one means "new board"', (
   assert.ok(!('board' in parseGenerate({ prompt: '猫', ratio: '1:1', board: '   ' })))
   assert.ok(!('board' in parseGenerate({ prompt: '猫', ratio: '1:1', board: 42 })))
   assert.equal(parseGenerate({ prompt: '猫', ratio: '1:1', board: 'x'.repeat(200) }).board.length, 80)
+})
+
+test('a generation body carries an optional canvas clientId, and a malformed one is refused', () => {
+  // Absent is the old wire: the parsed body is exactly the pre-DD7 shape, so a
+  // tab that predates the canvas behaves identically.
+  assert.deepEqual(parseGenerate({ prompt: '猫', ratio: '1:1' }), { prompt: '猫', ratio: '1:1' })
+  assert.ok(!('clientId' in parseGenerate({ prompt: '猫', ratio: '1:1' })))
+
+  // Present is the canvas wire: `c` + base36, bounded at 32 characters.
+  assert.deepEqual(
+    parseGenerate({ prompt: '猫', ratio: '1:1', clientId: 'c1a2b3' }),
+    { prompt: '猫', ratio: '1:1', clientId: 'c1a2b3' },
+  )
+  assert.equal(
+    parseGenerate({ prompt: '猫', ratio: '1:1', clientId: 'c' + 'z'.repeat(31) }).clientId.length,
+    STUDIO_CLIENT_ID_MAX_CHARS,
+  )
+  // A single-value field is refused when malformed, unlike the board route's
+  // per-entry coordinate lists: a typo here would silently detach a task node
+  // from every event of its own run.
+  for (const clientId of ['', 'abc', 'Cabc123', 'cABC123', 'c-123', 'c' + 'z'.repeat(32), 42, {}]) {
+    assert.throws(
+      () => parseGenerate({ prompt: '猫', ratio: '1:1', clientId }),
+      /clientId 格式无效/,
+      'malformed clientId must be refused: ' + JSON.stringify(clientId),
+    )
+  }
+  // The validator is shared with the panel's id generator, so both halves agree
+  // on what a canonical id is.
+  assert.equal(isStudioClientId('c1a2b3'), true)
+  assert.equal(isStudioClientId('c'), false)
+  assert.equal(isStudioClientId('x123'), false)
+  assert.equal(isStudioClientId(42), false)
 })
 
 test('a board mutation is a closed action set with bounded payloads', () => {

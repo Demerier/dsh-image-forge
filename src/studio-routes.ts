@@ -50,8 +50,10 @@ import {
   type StudioProgressEvent,
   type StudioReferencePayload,
   firstLine,
+  isStudioClientId,
 } from './studio-shared.ts'
 import { createProgressBridge, type ProgressBridgeTiming } from './progress.ts'
+import { createRunRegistry, type RunRegistry } from './runs.ts'
 import {
   activeBoardId,
   createBoard,
@@ -88,6 +90,13 @@ export interface StudioRouteDeps {
    * out and takes the defaults.
    */
   progress?: ProgressBridgeTiming
+  /**
+   * Session run registry shared by the generate route and the SSE bridge.
+   *
+   * One is created per registration when omitted; tests pass their own so they
+   * can register a run without a live ComfyUI.
+   */
+  runs?: RunRegistry
 }
 
 /** Wrap one handler so a thrown error becomes a JSON 500 instead of a dead socket. */
@@ -115,7 +124,10 @@ export function registerStudioRoutes(
   // One bridge per registration: every SSE response shares the same ComfyUI
   // socket, and the bridge stays inert (no socket, no timer, no probe) until
   // the first panel subscribes.
-  const progress = createProgressBridge({ settings: deps.settings, ...(deps.progress ?? {}) })
+  // One registry per registration: the generation path registers runs into it
+  // and the SSE bridge looks events up against it, so both must share it.
+  const runs = deps.runs ?? createRunRegistry()
+  const progress = createProgressBridge({ settings: deps.settings, runs, ...(deps.progress ?? {}) })
 
   const disposers = [
     server.register({
@@ -159,7 +171,7 @@ export function registerStudioRoutes(
           if (!res.destroyed && !res.writableEnded) res.write('\n')
         }, HEARTBEAT_MS)
         try {
-          const output = await runStudioGeneration(deps.settings(), input, controller.signal)
+          const output = await runStudioGeneration(deps.settings(), input, controller.signal, runs)
           if (!res.destroyed && !res.writableEnded) res.end(JSON.stringify(output))
         } catch (error) {
           if (!res.destroyed && !res.writableEnded) res.end(JSON.stringify({ error: firstLine(error) }))
@@ -455,6 +467,7 @@ export function parseGenerate(value: unknown): StudioGenerateRequest {
   const count = optionalInteger(body.count, '出图张数')
   const references = body.references === undefined ? undefined : parseReferences(body.references)
   const board = typeof body.board === 'string' && body.board.trim().length > 0 ? body.board.trim().slice(0, 80) : undefined
+  const clientId = parseClientId(body.clientId)
   return {
     prompt,
     ratio,
@@ -463,6 +476,7 @@ export function parseGenerate(value: unknown): StudioGenerateRequest {
     ...(count === undefined ? {} : { count }),
     ...(references === undefined || references.length === 0 ? {} : { references }),
     ...(board === undefined ? {} : { board }),
+    ...(clientId === undefined ? {} : { clientId }),
   }
 }
 
@@ -597,6 +611,21 @@ function parseReferences(value: unknown): StudioReferencePayload[] {
     }
     return { data: reference.data, mediaType, ...(name === undefined ? {} : { name }) }
   })
+}
+
+/**
+ * Accept the optional canvas task id.
+ *
+ * Absent means "an old panel / the Agent tools": the field is not added to the
+ * parsed body, so the request behaves exactly as before. A malformed value is
+ * refused rather than dropped — unlike the board route's per-entry coordinates,
+ * a clientId is a single value and a typo would silently disconnect a task node
+ * from every event of its own run.
+ */
+function parseClientId(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!isStudioClientId(value)) throw new Error('clientId 格式无效')
+  return value
 }
 
 function requiredText(value: unknown, message: string, maxLength: number): string {
