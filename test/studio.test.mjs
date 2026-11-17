@@ -80,6 +80,7 @@ import {
   STUDIO_RATIOS,
   fitStudioRatio,
   isStudioClientId,
+  stepperStepsOf,
 } from '../testlib/studio-shared.js'
 import { compileLayout } from '../src/layout-editor.ts'
 
@@ -1232,7 +1233,7 @@ function installFakeNetwork(options) {
   // C11: generation is stubbed per test — the panel's POST is the conversion
   // authority, so a test owns when (and whether) the response arrives.
   const generate = options === undefined ? undefined : options.generate
-  const config = board === undefined
+  const baseConfig = board === undefined
     ? HARNESS_CONFIG
     : {
       ...HARNESS_CONFIG,
@@ -1245,6 +1246,9 @@ function installFakeNetwork(options) {
       }],
       activeBoard: board.id,
     }
+  // T22: tests need snapshots that are *not* ready (stepper failure states).
+  const overrides = options === undefined ? undefined : options.configOverrides
+  const config = overrides === undefined ? baseConfig : { ...baseConfig, ...overrides }
   globalThis.fetch = async (input, init) => {
     const url = String(input)
     calls.push({
@@ -1921,6 +1925,97 @@ test('right-click offers the §6.4 menu for blank canvas and for an image node',
     assert.ok(!selectedIds(panel).includes('ibbb2'))
   } finally {
     restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// T22: the install → first picture stepper (P6).
+// ---------------------------------------------------------------------------
+
+test('T22: the stepper maps snapshot + live phase onto four steps', () => {
+  const models = { unet: 'unet.safetensors', clip: 'clip.safetensors', vae: 'vae.safetensors' }
+  assert.deepEqual(
+    stepperStepsOf({ ready: true, models, endpoint: 'http://127.0.0.1:8188', itemCount: 0 }).map((step) => step.id),
+    ['runtime', 'install', 'weights', 'first-run'],
+  )
+  assert.deepEqual(
+    stepperStepsOf({ ready: true, models, endpoint: 'http://127.0.0.1:8188', itemCount: 0 }).map((step) => step.state),
+    ['done', 'done', 'done', 'pending'],
+    'ready on a fresh board: everything installed, first picture still to do',
+  )
+
+  // Not installed: the runtime step fails with the reason's first line only.
+  const off = stepperStepsOf({ ready: false, reason: 'ComfyUI 未连接：探了 8188\n第二行不展示', itemCount: 0 })
+  assert.equal(off[0].state, 'failed')
+  assert.ok(off[0].detail.includes('ComfyUI 未连接'))
+  assert.ok(!off[0].detail.includes('第二行'), 'only the headline reaches the row')
+  assert.equal(off[2].state, 'pending')
+
+  // Connected but weights missing is a distinct failure (the T14 download step).
+  const noWeights = stepperStepsOf({ ready: true, itemCount: 0 })
+  assert.equal(noWeights[2].state, 'failed')
+  assert.ok(noWeights[2].detail.includes('qwen_image_setup'), 'the row names the managed download entry')
+
+  // The live SSE phase drives the last step.
+  const running = stepperStepsOf({ ready: true, models, itemCount: 0, livePhase: 'running', livePercent: 34 })
+  assert.equal(running[3].state, 'active')
+  assert.ok(running[3].detail.includes('34%'))
+  const failed = stepperStepsOf({ ready: true, models, itemCount: 0, livePhase: 'error', liveMessage: 'CUDA out of memory' })
+  assert.equal(failed[3].state, 'failed')
+  assert.ok(failed[3].detail.includes('CUDA out of memory'))
+  assert.equal(stepperStepsOf({ ready: true, models, itemCount: 2 }).at(-1).state, 'done', 'an existing picture finishes the ladder')
+})
+
+test('T22: the panel renders the stepper, and 重新检测 re-reads the snapshot', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    const steps = []
+    fakeVisit(panel.tree, (entry) => {
+      if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps.push(entry)
+    })
+    assert.deepEqual(steps.map((step) => step.props['data-step']), ['runtime', 'install', 'weights', 'first-run'])
+    assert.deepEqual(steps.map((step) => step.props['data-step-state']), ['done', 'done', 'done', 'pending'])
+
+    const configCalls = () => network.calls.filter((call) => call.url.indexOf(STUDIO_CONFIG_ROUTE) === 0).length
+    const before = configCalls()
+    const retry = buttonWithText(panel, '重新检测')
+    assert.ok(retry !== undefined, 'the stepper must offer a recheck entry')
+    retry.props.onClick()
+    await settle(panel)
+    assert.ok(configCalls() > before, '重新检测 re-reads the capability snapshot')
+
+    // The live stream advances the last step to active with its percent.
+    const source = network.open()
+    source.emit('message', { type: 'start', promptId: 'p-stepper' })
+    source.emit('message', { type: 'progress', promptId: 'p-stepper', value: 17, max: 50, percent: 34, label: '17/50' })
+    await settle(panel)
+    let firstRun
+    fakeVisit(panel.tree, (entry) => {
+      if (entry.props['data-step'] === 'first-run') firstRun = entry
+    })
+    assert.equal(firstRun.props['data-step-state'], 'active')
+    assert.ok(fakeText(firstRun).includes('34%'))
+  } finally {
+    network.restore()
+  }
+})
+
+test('T22: a not-ready snapshot puts its reason on the failed step', async () => {
+  const { network, panel } = await mountWorkbench({
+    configOverrides: { ready: false, reason: 'ComfyUI 未连接：探了 8188 等端口', models: undefined },
+  })
+  try {
+    let runtime
+    let weights
+    fakeVisit(panel.tree, (entry) => {
+      if (entry.props['data-step'] === 'runtime') runtime = entry
+      if (entry.props['data-step'] === 'weights') weights = entry
+    })
+    assert.equal(runtime.props['data-step-state'], 'failed')
+    assert.ok(fakeText(runtime).includes('ComfyUI 未连接'))
+    assert.equal(weights.props['data-step-state'], 'pending', 'weights cannot be checked before the runtime is up')
+  } finally {
     network.restore()
   }
 })

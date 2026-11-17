@@ -50,6 +50,13 @@ test('the config schema resolves every documented field', () => {
     'turboSteps',
     'outputDir',
     'timeoutMs',
+    // T22: the execution-backend chain, promoted from environment variables.
+    'executionBackend',
+    'comfyMcpBin',
+    'comfyBin',
+    'backendTimeoutMs',
+    'mcpDebug',
+    'backendTmpDir',
   ]) {
     assert.ok(field in resolved, `Config must expose ${field}`)
   }

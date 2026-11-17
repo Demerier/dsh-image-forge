@@ -173,6 +173,17 @@ export const STUDIO_CSS = `
 .dsh-forge-asset-btn{appearance:none;border:1px solid rgba(127,127,127,.28);background:transparent;color:inherit;font:inherit;font-size:10.5px;line-height:1.4;padding:2px 7px;border-radius:4px;cursor:pointer;opacity:.72;transition:opacity .15s,border-color .15s}
 .dsh-forge-asset-btn:hover{opacity:1;border-color:rgba(127,127,127,.5)}
 .dsh-forge-asset-btn.is-danger:hover{border-color:rgba(239,68,68,.5);color:#ef4444}
+.dsh-forge-stepper{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid rgba(127,127,127,.22);border-radius:8px;background:rgba(127,127,127,.03)}
+.dsh-forge-step{display:flex;align-items:flex-start;gap:8px;padding:2px 0;min-width:0}
+.dsh-forge-step-dot{flex:none;width:9px;height:9px;margin-top:5px;border-radius:50%;border:1px solid rgba(127,127,127,.55);background:transparent}
+.dsh-forge-step.is-done .dsh-forge-step-dot{background:#16a34a;border-color:#16a34a}
+.dsh-forge-step.is-active .dsh-forge-step-dot{background:#3b82f6;border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.18)}
+.dsh-forge-step.is-failed .dsh-forge-step-dot{background:#dc2626;border-color:#dc2626}
+.dsh-forge-step-body{display:flex;flex-direction:column;min-width:0;gap:0}
+.dsh-forge-step-label{font-size:11.5px;font-weight:600;line-height:1.5}
+.dsh-forge-step-detail{font-size:10.5px;line-height:1.45;opacity:.62;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.dsh-forge-step.is-failed .dsh-forge-step-detail{color:#dc2626;opacity:.95}
+.dsh-forge-step-retry{align-self:flex-end;margin-top:4px}
 `
 
 /** The stylesheet text, exported so tests can pin the rules without a DOM. */

@@ -70,6 +70,34 @@ node scripts/start-comfyui.mjs --dir D:\path\to\ComfyUI   # 手动指定安装�
 
 ---
 
+## 0.7 出图走哪条后端（T15 引入，T22 变成设置项）
+
+插件的执行链是**一条图、三种运输方式**：图由 `src/comfyui.ts` 构建，随后按顺序尝试
+
+1. **MCP（主通道）**：拉起官方 `comfy-mcp`（stdio），用宿主提供的 `@modelcontextprotocol/client` 驱动；
+   `run_workflow` 提交、`job` 轮询、`fetch_outputs` 取回。
+2. **comfy CLI（回退）**：直接 `comfy run --workflow …` + `comfy download`，不需要 MCP 层。
+3. **HTTP（兜底）**：插件内置的 `/prompt → /history → /view`，任何工具链缺失都不会丢功能。
+
+默认 `executionBackend = auto`：MCP → CLI → HTTP 依次回退；`mcp` / `cli` 是**严格模式**，
+该后端失败就是本次调用失败，不会静默换路；`http` 跳过工具链（等价 T15 之前的全部行为）。
+
+设置页「ComfyUI → 执行后端」暴露全部旋钮：`executionBackend`、`comfyMcpBin`、`comfyBin`、
+`backendTimeoutMs`、`mcpDebug`、`backendTmpDir`。T15 的环境变量仍**优先于设置**，旧部署不用改：
+`DSH_IMAGE_FORGE_BACKEND` / `…_COMFY_MCP_BIN` / `…_COMFY_BIN` / `…_BACKEND_TIMEOUT_MS` /
+`…_MCP_DEBUG` / `…_BACKEND_TMPDIR`。
+
+结果镜像（T22）：MCP 的 `fetch_outputs` 与 CLI 的 `download` 的 `out_dir` 落在
+`<outputDir>/.dsh-image-forge/backend-mirror/<prompt_id>/`（工作区内画板目录旁），**跑完保留**，
+随后仍由现有写图/画板机制归档出图；`backendTmpDir` 可改父目录。
+
+## 0.8 工作台里的「从安装到出图」stepper（T22）
+
+工作台顶部常驻四步：**ComfyUI 运行 → 安装/受管环境 → 权重就绪 → 首次出图**。状态来自能力快照
+（宿主用环境探测/`/object_info` 生成）与实时 SSE；安装与下载动作由 `qwen_image_setup` 执行，
+面板自己只提供「重新检测」。任一步失败时该行直接显示原因首行，不把失败藏进日志。
+---
+
 ## 0.6 让 qwen_image_setup 带你装、带你下权重（P1b）
 
 插件里的环境工具 `qwen_image_setup` 是从零到能出图的入口，能力与上面的手工步骤一一对应：

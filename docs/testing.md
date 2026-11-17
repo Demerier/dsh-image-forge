@@ -7,11 +7,12 @@ pnpm build
 pnpm test
 ```
 
-**22 个文件 / 397 个用例**（2026-11-18 T15 时点计数），全部不需要 GPU、ComfyUI、comfy-mcp
-或任何权重（ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / moss-edit 3 / settings 59 /
-studio 72 / studio-canvas 29 / boards 24 / board-migration 8 / output 3 / package-contents 4 /
-studio-file-route 3 / model-profiles 7 / progress 8 / runs 7 / environment 28 / layout-editor 16 /
-studio-lineage 5 / canvas-interactions 27 / moss-layout 9 / mcp-backend 19）。
+**23 个文件 / 410 个用例**（2026-11-18 T22 收口时点计数；画布批 C01–C15 与 T22 全部入链），
+全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重（ratio 14 / surface 13 / comfyui-e2e 31 /
+edit-e2e 8 / moss-edit 3 / settings 60 / studio 75 / studio-canvas 29 / boards 24 /
+board-migration 8 / output 3 / package-contents 4 / studio-file-route 3 / model-profiles 7 /
+progress 8 / runs 7 / environment 28 / layout-editor 16 / studio-lineage 5 /
+canvas-interactions 27 / canvas-export 6 / moss-layout 9 / mcp-backend 22）。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——
@@ -23,7 +24,7 @@ studio-lineage 5 / canvas-interactions 27 / moss-layout 9 / mcp-backend 19）。
 
 ## 每个文件钉住了什么
 
-### `test/settings.test.mjs`（59）
+### `test/settings.test.mjs`（60）
 
 设置分区的完整契约：
 
@@ -59,7 +60,7 @@ schema 里 **10** 个字段齐全且 5 个云端字段绝迹、
 `minFreeVramMiB` / `local_edit_budget` / `apiKey`，并且必须写到 `comfyModel`、`turbo`、`8 步`、`turbo_fallback`
 与部署文档的路径。
 
-### `test/mcp-backend.test.mjs`（19，T15 新增）
+### `test/mcp-backend.test.mjs`（22；T15 新增，T22 +3）
 
 后端接线与自研 MCP client。**假的是 stdio 连接缝，不是断言**：宿主随包的
 `@modelcontextprotocol/client` 是 peerDependency，由 DSH profile 运行时解析，普通
@@ -86,7 +87,7 @@ schema 里 **10** 个字段齐全且 5 个云端字段绝迹、
   有设置页控件（`test/settings.test.mjs` 会失败），而 `src/settings-fields.ts` 不在 T15
   写入范围；「配置项进 schema + 控件」记为 T15 未完成项，交 T22/协调者。
 
-### `test/comfyui-e2e.test.mjs`（10）
+### `test/comfyui-e2e.test.mjs`（31）
 
 假 ComfyUI 端到端（多端口探测 → `/object_info` 选权重 → `/prompt` 注入工作流 → 轮询 `/history` →
 `/view` 取图 → 落盘**逐字节一致**）、缺文件点名、没在跑时报出探过的端口、
@@ -113,7 +114,7 @@ Windows 路径出 `…\models\clip\`、POSIX 路径出 `…/models/clip/`，两�
 - **文生图不上传**：同一台假 ComfyUI 上先编辑（2 次上传、2 个 `LoadImage`），再文生图（上传数不变、
   图里没有 `LoadImage` 节点）。
 
-### `test/studio.test.mjs`（28）与 `test/studio-canvas.test.mjs`（9）
+### `test/studio.test.mjs`（75）与 `test/studio-canvas.test.mjs`（29）
 
 工作台的**纯函数契约**，在请求上线之前就拦住问题——请求体字段收窄（`undefined` 保持缺省而不是变 0/NaN）、
 **画幅必须是选择器真正提供过的那 7 档**（未知比例直接拒绝，而不是悄悄当成正方形）、提示词长度上下界、
@@ -136,7 +137,7 @@ filenamePrefix；MOSS 双采样档（`comfy` 25 / CFG 2.5 / `er_sde`，`official
 MOSS 改图在发请求前显式拒绝；MOSS 假服务端到端（不做 `/qwen/i` 硬门、`EmptyFlux2LatentImage`、16px 对齐）；
 步数解析在 MOSS profile 下的分支。
 
-### `test/progress.test.mjs`（7）
+### `test/progress.test.mjs`（8）
 
 P3a 进度后端的纯函数契约：SSE 帧编解码、事件名与 JSON 载荷、心跳、关闭与错误路径。
 
@@ -150,7 +151,7 @@ Desktop 注册表 → 启动计划（torch 解释器的选择、argv 顺序、en
 **假闭环「下载 → 改名 → `/object_info` 可见」**、dry-run 不写盘、无运行实例时只报 `unverified` 绝不报 `ready`、
 安装引导的授权门槛（未授权绝不调用自动化，授权后才调用执行器）。
 
-### `test/boards.test.mjs`（18）
+### `test/boards.test.mjs`（24）
 
 画板存储，全部打在**真实临时目录**上（契约是文件系统，mock 掉 `fs` 等于什么都没测）：
 省略 `board` 时**按提示词新建**、再省略再新建；按 id / 按名字（大小写不敏感）找到同一块；
@@ -161,7 +162,7 @@ Desktop 注册表 → 启动计划（torch 解释器的选择、argv 顺序、en
 **并发写同一画板不丢条目**（每目录写队列）；损坏的画板文件只隐藏那块画板，不拖垮库；
 active 画板的记忆与 `state.json` 的形状。
 
-### `test/ratio.test.mjs`（12）
+### `test/ratio.test.mjs`（14）
 
 7 档换算、32 对齐、确定性、显式尺寸校验。
 
@@ -176,6 +177,26 @@ active 画板的记忆与 `state.json` 的形状。
 `docs/*.md` 这个 glob（而不是某个一次性条目）让部署文档可被发现、`docs/plans/` **不入包**、
 **`resources/` 与 6 个已删除的源文件不许再出现**、以及许可证与第三方声明随包分发。
 
+### `test/canvas-export.test.mjs`（6，T22 入链）
+
+C15 的纯函数导出层：contact sheet 网格（行优先 256px cell、label 条、canvas 尺寸）、等比缩放不拉伸、
+200 张上限与列/格钳制、空板零尺寸、prompt 首行 label、非图片节点不进拼版、画板 JSON 序列化与安全文件名；
+外加 DD12 的服务端子集保存守护（只发 dirty id 时未命名条目坐标不变）。
+
+## T22 断言变更清单（D5 可追溯）
+
+T22 把 T15 的后端选择从「环境变量专属」提升为配置项、补上 stepper 与结果镜像，逐条改动如下：
+
+| 文件 | 改了什么 | 为什么 |
+|---|---|---|
+| `test/settings.test.mjs` | schema 10 → 16 字段（`executionBackend` / `comfyMcpBin` / `comfyBin` / `backendTimeoutMs` / `mcpDebug` / `backendTmpDir`），新增 T22 覆盖断言；文本预算 470→700 / 125→165；resolved 类型集加入 `boolean` | 新配置必须有控件与默认值断言；预算显式上调用例说明 |
+| `test/surface.test.mjs` | 文档化字段列表补 6 个新字段 | 已发布 schema 的字段集合必须可执行核对 |
+| `test/mcp-backend.test.mjs` | +3：配置默认值/环境变量优先（含显式 `MCP_DEBUG=0`）、MCP `fetch_outputs` 工作区镜像保留、CLI `download` 镜像 | 结果镜像与「旧环境变量行为不变」必须机器判定 |
+| `test/studio.test.mjs` | +3：stepper 四步纯函数映射（ready/未安装/权重缺失/运行中/失败/已有图）、面板渲染与「重新检测」、未就绪原因落到失败步 | stepper 是 P6 的可见交付，状态必须可测 |
+| 本文件 | 12 个旧章节计数同步到实际值（comfyui-e2e 31 / studio 75 / studio-canvas 29 / progress 8 / boards 24 / ratio 14）；补 canvas-export 与本节 | 终态核对：`npm test` 的 23 个文件逐个计数与文档一致 |
+
+口径边界不变：`backend`（旧云端字段）、`qwen_image_env`、`一键部署`/`127.0.0.1:8411` 仍禁止；
+`RETIRED_FIELDS` 26 个字段一个不少。新增的 `executionBackend` 是**本地执行链选择**，不是云端后端回魂。
 ## T14 断言变更清单（D5 可追溯）
 
 T14 把「零下载 / 一键部署」的旧口径换成了**受管安装 + 按需权重下载**，逐条改动如下：

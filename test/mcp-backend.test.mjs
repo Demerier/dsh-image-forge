@@ -13,7 +13,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -26,6 +26,7 @@ import {
   ENV_BACKEND_TIMEOUT_MS,
   ENV_COMFY_BIN,
   ENV_MCP_BIN,
+  configureBackendDefaults,
   findExecutable,
   resolveBackendPlan,
   runThroughBackends,
@@ -317,6 +318,83 @@ test('CLI fallback: a failed envelope surfaces comfy-cli\'s own message', async 
     }),
   })
   await assert.rejects(() => backend.run(request()), /comfy run failed \[internal_error\]: boom/)
+})
+
+test('T22: config defaults feed the backend plan, and environment variables still win', () => {
+  configureBackendDefaults({
+    backend: 'cli',
+    comfyMcpBin: 'C:/cfg/comfy-mcp.exe',
+    comfyBin: 'C:/cfg/comfy.exe',
+    backendTimeoutMs: 999,
+    mcpDebug: true,
+    backendTmpDir: 'C:/cfg/tmp',
+    outputDir: 'C:/work',
+  })
+  try {
+    const plan = resolveBackendPlan({ PATH: '' })
+    assert.equal(plan.mode, 'cli')
+    assert.equal(plan.mcpCommand, 'C:/cfg/comfy-mcp.exe')
+    assert.equal(plan.comfyCommand, 'C:/cfg/comfy.exe')
+    assert.equal(plan.timeoutMsOverride, 999)
+    assert.equal(plan.scratchRoot, 'C:/cfg/tmp')
+    assert.equal(plan.debug, true)
+    // The workspace mirror root is derived from outputDir, never from tmpdir().
+    assert.equal(plan.mirrorRoot, join('C:/work', '.dsh-image-forge', 'backend-mirror'))
+
+    // Environment variables keep overriding the settings (T15 compatibility).
+    const overridden = resolveBackendPlan({
+      PATH: '',
+      [ENV_BACKEND]: 'http',
+      [ENV_MCP_BIN]: 'C:/env/comfy-mcp.exe',
+      DSH_IMAGE_FORGE_MCP_DEBUG: '0',
+      DSH_IMAGE_FORGE_BACKEND_TMPDIR: 'C:/env/tmp',
+    })
+    assert.equal(overridden.mode, 'http')
+    assert.equal(overridden.mcpCommand, 'C:/env/comfy-mcp.exe')
+    assert.equal(overridden.debug, false, 'an explicit env 0 can switch debug off')
+    assert.equal(overridden.scratchRoot, 'C:/env/tmp')
+  } finally {
+    configureBackendDefaults({})
+  }
+})
+
+test('T22: fetch_outputs mirrors into the workspace root, and the files survive the run', async () => {
+  const mirror = scratch()
+  const { session } = fakeSession({
+    handlers: {
+      run_workflow: () => ({ prompt_id: 'p-mirror', ok: true }),
+      job: () => ({ completed: true, prompt_id: 'p-mirror' }),
+      fetch_outputs: (args) => {
+        const target = join(args.out_dir, 'qwen_00001_.png')
+        writeFileSync(target, PNG)
+        return { copied: [target] }
+      },
+    },
+  })
+  const backend = new McpBackend({ command: 'comfy-mcp', connect: async () => session, sleep: async () => undefined, mirrorRoot: mirror })
+  const images = await backend.run(request())
+  assert.equal(images.length, 1)
+  const mirrored = join(mirror, 'p-mirror', 'qwen_00001_.png')
+  assert.ok(existsSync(mirrored), 'the fetch_outputs copy stays in the workspace mirror')
+  assert.deepEqual(readdirSync(mirror), ['p-mirror'])
+})
+
+test('CLI fallback: download out-dir can also be the workspace mirror', async () => {
+  const mirror = scratch()
+  const spawnCommand = async (args) => {
+    if (args.includes('run')) {
+      return { code: 0, stdout: JSON.stringify({ schema: 'envelope/1', ok: true, data: { prompt_id: 'cli-mirror' } }), stderr: '' }
+    }
+    const index = args.indexOf('--out-dir')
+    const outDir = args[index + 1]
+    mkdirSync(outDir, { recursive: true })
+    writeFileSync(join(outDir, 'out_00001_.png'), PNG)
+    return { code: 0, stdout: JSON.stringify({ ok: true, data: { files: [] } }), stderr: '' }
+  }
+  const backend = new CliBackend({ command: 'comfy', spawnCommand, mirrorRoot: mirror })
+  const images = await backend.run(request())
+  assert.equal(images.length, 1)
+  assert.ok(existsSync(join(mirror, 'cli-mirror', 'out_00001_.png')), 'the CLI download lands in the workspace mirror too')
 })
 
 test('the MCP backend is private: no mcpManager registration, no mcp__* tools in the host bundle', async () => {

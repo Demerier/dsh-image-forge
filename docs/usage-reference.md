@@ -169,6 +169,40 @@ PNG 落在同一个 `outputDir` 里，但「哪几张图属于同一件事」由
 - **拼版 PNG**：把画板里的图片按 4 列、256 px 缩略图拼成一张图（≤200 张，超出截断并在提示里说明），每格下方是 prompt 首行。图片经插件同源文件路由加载，正常情况**不会被跨源污染**；某张加载失败只留灰块 + 文件名，不中断整版；若 `canvas.toBlob` 仍因污染失败，面板会明确报错而不是给一张空图。
 - **增量保存口径**：拖动/对齐/微移只把变化的节点 ID 与（变化了的）相机发给服务端，700 ms 防抖，页面关闭时冲刷。用户可见的结果不变：拖完很快落盘，重开画板恢复排布与相机。
 
+## 执行后端与受管环境（T22）
+
+### 三条运输方式，一条图
+
+出图/改图只有一份图构建逻辑（`src/comfyui.ts`），执行按设置里的 `executionBackend` 选择：
+
+| 值 | 行为 |
+|---|---|
+| `auto`（默认） | MCP → comfy CLI → HTTP 依次尝试；前两者失败只记录 skipped，最后走 HTTP |
+| `mcp` | 只走 comfy-mcp；它失败就是本次调用失败（不静默回退） |
+| `cli` | 只走 comfy CLI（`comfy run` + `comfy download`） |
+| `http` | 跳过工具链，等价 T15 之前的直连路径 |
+
+MCP 主通道需要宿主提供 `@modelcontextprotocol/client`（peerDependency）；没有工具链时 `auto` 自然落回 HTTP，
+功能不丢。设置页可配 `comfyMcpBin` / `comfyBin` / `backendTimeoutMs` / `mcpDebug` / `backendTmpDir`，
+T15 的 `DSH_IMAGE_FORGE_*` 环境变量仍优先于设置；默认值与原环境变量行为一致。
+
+### 结果镜像
+
+MCP `fetch_outputs` 与 CLI `download` 的 `out_dir` 指向**工作区内**的
+`<outputDir>/.dsh-image-forge/backend-mirror/<prompt_id>/`，跑完保留；画板归档仍走原有
+「写图 → recordItems」链路，所以 MCP、CLI、HTTP 三条路径的画板行为一致。`backendTmpDir` 可改
+镜像父目录；空的临时目录设置不再把产物写到系统 temp 后删掉。
+
+### 受管安装 stepper
+
+工作台顶部常驻四步：**ComfyUI 运行 → 安装/受管环境 → 权重就绪 → 首次出图**。
+
+- 状态来自能力快照（环境探测 + `/object_info`）与实时 SSE；失败步骤显示原因首行。
+- 「重新检测」只重新读快照；**安装 / 下载**由 agent 调用 `qwen_image_setup`：
+  `status`（默认）、`start`/`stop`、`install`（未获 computer use 授权只给图文步骤）、
+  `download`（默认 dry-run，`confirm: true` 才下载当前 `comfyModel` 三权重）。
+- 双底模口径：`qwen21-base` 40 步 / `qwen21-turbo` 8 步（缺 turbo 权重明确退化到 base）/ `moss-sft`
+  MOSS-Image（25 步模板；缺权重直接报错，不静默）。
 ## 参考图编辑（图生图）
 
 用户给了参考图（一张或多张）时，这是**改图任务**，走 `qwen_image_edit`：

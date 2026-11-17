@@ -14,7 +14,7 @@
  */
 
 /** The coarse buckets the settings page shows, in display order. */
-export type SettingsGroupId = 'steps' | 'comfyui' | 'output'
+export type SettingsGroupId = 'steps' | 'comfyui' | 'backend' | 'output'
 
 /**
  * One tab of the settings page.
@@ -50,7 +50,7 @@ export const SETTINGS_TABS: readonly SettingsTab[] = [
     id: 'comfyui',
     label: 'ComfyUI',
     hint: '复用你自己装好的 ComfyUI（本地推荐部署见 docs/comfyui-deployment.md）。',
-    groupIds: ['comfyui'],
+    groupIds: ['comfyui', 'backend'],
   },
 ]
 
@@ -148,6 +148,11 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
     hint: '地址、端口与权重目录。',
   },
   {
+    id: 'backend',
+    label: '执行后端',
+    hint: '默认 auto：MCP → CLI → HTTP 依次回退。',
+  },
+  {
     id: 'output',
     label: '输出与超时',
     hint: '图片落到哪里，等多久。',
@@ -233,6 +238,61 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: 'ComfyUI 模型目录',
     hint: '桌面版在「设置 → 模型路径」里；用来把「放哪里」写进报错。',
     kind: 'path',
+  },
+  {
+    key: 'executionBackend',
+    group: 'backend',
+    label: '执行后端',
+    hint: 'auto=依次回退；mcp/cli 严格不回退。',
+    kind: 'enum',
+    choices: [
+      { value: 'auto', label: 'auto（MCP→CLI→HTTP）' },
+      { value: 'mcp', label: 'mcp（comfy-mcp 严格）' },
+      { value: 'cli', label: 'cli（comfy CLI 严格）' },
+      { value: 'http', label: 'http（内置直连）' },
+    ],
+  },
+  {
+    key: 'comfyMcpBin',
+    group: 'backend',
+    label: 'comfy-mcp 路径',
+    hint: '留空 = PATH 里找 comfy-mcp。',
+    kind: 'path',
+    placeholder: 'C:\\tools\\comfy-mcp.exe',
+  },
+  {
+    key: 'comfyBin',
+    group: 'backend',
+    label: 'comfy CLI 路径',
+    hint: '交给 MCP 子进程用；留空 = PATH。',
+    kind: 'path',
+    placeholder: 'C:\\tools\\comfy.exe',
+  },
+  {
+    key: 'backendTimeoutMs',
+    group: 'backend',
+    label: '后端超时预算',
+    hint: '留空 = 用单次调用超时。',
+    kind: 'number',
+    min: 1000,
+    max: 3_600_000,
+    unit: '毫秒',
+    nullable: true,
+  },
+  {
+    key: 'mcpDebug',
+    group: 'backend',
+    label: 'MCP 调试日志',
+    hint: '开=每次工具调用写一行 stderr。',
+    kind: 'boolean',
+  },
+  {
+    key: 'backendTmpDir',
+    group: 'backend',
+    label: '临时/镜像目录',
+    hint: '留空 = 工作区 .dsh-image-forge/backend-mirror。',
+    kind: 'path',
+    placeholder: 'C:\\temp\\forge',
   },
   {
     key: 'outputDir',

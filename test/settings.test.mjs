@@ -608,7 +608,8 @@ test('the real schema defaults survive a resolve round trip as plain data', () =
   const resolved = resolveConfigFields(schemaDefaults(plugin.Config({})), plugin.Config({}))
   const kinds = new Set(Object.values(resolved).filter((value) => value !== undefined).map((value) => typeof value))
   console.log('resolved value types:', JSON.stringify([...kinds]))
-  assert.deepEqual([...kinds].sort(), ['number', 'string'], 'the surviving fields are strings and numbers only')
+  // T22 added the one boolean (`mcpDebug`); the rest stay scalar data.
+  assert.deepEqual([...kinds].sort(), ['boolean', 'number', 'string'], 'the surviving fields are plain scalars only')
   assert.equal(resolved.timeoutMs, 180000)
   assert.equal(resolved.defaultSteps, 40)
   // Profiles replaced the `base` / `turbo` pair: the default is now the
@@ -617,7 +618,7 @@ test('the real schema defaults survive a resolve round trip as plain data', () =
   assert.equal(resolved.comfyModel, 'qwen21-base')
   // The two overrides are declared-but-unset, which is a real state: the key
   // exists and its value is undefined, so the resolver falls through.
-  assert.equal(Object.keys(resolved).length, 10, 'the documented field count')
+  assert.equal(Object.keys(resolved).length, 16, 'the documented field count (10 + T22 backend chain)')
   assert.ok('comfyuiSteps' in resolved, 'a nullable field must keep its key')
   assert.equal(resolved.comfyuiSteps, undefined)
   assert.equal(resolved.turboSteps, undefined)
@@ -646,7 +647,7 @@ test('every field in the config schema has a control on the settings page', () =
   assert.deepEqual(missing, [], 'these config fields have no control on the settings page')
   assert.deepEqual(stale, [], 'the settings page renders controls for fields the schema does not declare')
   assert.equal(SETTINGS_FIELD_KEYS.length, declared.length)
-  assert.equal(declared.length, 10, 'the documented field count')
+  assert.equal(declared.length, 16, 'the documented field count (10 + T22 backend chain)')
   // Nothing is hidden: the page shows every remaining field, because none of
   // them is plumbing any more.
   assert.deepEqual(HIDDEN_FIELD_KEYS, [], 'no surviving field is hidden')
@@ -656,6 +657,31 @@ test('every field in the config schema has a control on the settings page', () =
     assert.ok(declared.includes(key), `${key} must be a schema field`)
     assert.ok(SETTINGS_FIELD_KEYS.includes(key), `${key} must have a control`)
   }
+})
+
+test('T22: the execution-backend chain is config, and every field has a control', () => {
+  const resolved = plugin.Config({})
+  assert.equal(resolved.executionBackend.get(), 'auto', 'auto keeps the historical chain')
+  assert.equal(resolved.mcpDebug.get(), false)
+  assert.equal(resolved.comfyMcpBin.get(), '')
+  assert.equal(resolved.comfyBin.get(), '')
+  assert.equal(resolved.backendTmpDir.get(), '')
+  assert.equal(resolved.backendTimeoutMs.get(), undefined, 'unset budget falls through to the request timeout')
+  for (const value of ['auto', 'mcp', 'cli', 'http']) {
+    assert.equal(plugin.Config({ executionBackend: value }).executionBackend.get(), value)
+  }
+  assert.throws(() => plugin.Config({ executionBackend: 'worker' }), /executionBackend/)
+
+  const byKey = Object.fromEntries(SETTINGS_FIELDS.map((field) => [field.key, field]))
+  for (const key of ['executionBackend', 'comfyMcpBin', 'comfyBin', 'backendTimeoutMs', 'mcpDebug', 'backendTmpDir']) {
+    assert.ok(byKey[key] !== undefined, key + ' needs a settings control (T22)')
+    assert.equal(byKey[key].group, 'backend', key + ' belongs to the backend group')
+  }
+  // The six controls are visible: no hidden escape hatch on the settings page.
+  assert.deepEqual(
+    VISIBLE_FIELD_KEYS.filter((key) => byKey[key].group === 'backend'),
+    ['executionBackend', 'comfyMcpBin', 'comfyBin', 'backendTimeoutMs', 'mcpDebug', 'backendTmpDir'],
+  )
 })
 
 test('the retired local-runtime fields are gone from both the schema and the page', () => {
@@ -1001,12 +1027,12 @@ test('the advisory and every hint stay inside their text budget', () => {
   const MAX_FIELD_HINT_PATHED = 110
   const MAX_GROUP_HINT = 36
   const MAX_ADVISORY = 180
-  // The totals were reset with the local-runtime teardown: 14 controls replaced
-  // 35, and the surviving hints were rewritten around turbo/base. The slack over
-  // the measured 459 / 117 is deliberately thin — the next addition has to argue
-  // for its characters here.
-  const MAX_FIELD_TOTAL = 470
-  const MAX_GROUP_TOTAL = 125
+  // The totals were reset with the local-runtime teardown (14 controls replaced
+  // 35). T22 added the six execution-backend controls, which is +6 labels and
+  // hints: 470 → 700, 125 → 165. Slacks stay thin on purpose — the next addition
+  // has to argue for its characters here.
+  const MAX_FIELD_TOTAL = 700
+  const MAX_GROUP_TOTAL = 165
 
   const longestField = SETTINGS_FIELDS.reduce(
     (worst, field) => (field.hint.length > worst.hint.length ? field : worst),

@@ -638,6 +638,104 @@ export interface StudioAssetsResponse {
   total: number
 }
 
+
+// ---------------------------------------------------------------------------
+// T22: the installer stepper
+// ---------------------------------------------------------------------------
+
+/** The four steps from "nothing installed" to "first picture" (direction §6.1 P6). */
+export type StepperStepId = 'runtime' | 'install' | 'weights' | 'first-run'
+
+/** One step's state; `active` means this is what the user is waiting on now. */
+export type StepperStepState = 'done' | 'active' | 'pending' | 'failed'
+
+/** One rendered stepper row. */
+export interface StepperStep {
+  readonly id: StepperStepId
+  readonly label: string
+  readonly state: StepperStepState
+  /** One line of why/what-next; safe to show verbatim. */
+  readonly detail: string
+}
+
+/** What the stepper needs to know; all of it already rides the config snapshot or SSE. */
+export interface StepperInput {
+  /** ComfyUI answered and the three weights resolved. */
+  readonly ready: boolean
+  /** Why it is not ready, when it is not (the config snapshot's `reason`). */
+  readonly reason?: string
+  /** Weight files the probe resolved; absent when the probe failed. */
+  readonly models?: { readonly unet: string; readonly clip: string; readonly vae: string }
+  /** Endpoint that answered, for the runtime step's detail. */
+  readonly endpoint?: string
+  /** Total pictures already recorded on the visible boards. */
+  readonly itemCount: number
+  /** The live SSE phase, when the panel has one. */
+  readonly livePhase?: 'idle' | 'queued' | 'running' | 'done' | 'error' | 'interrupted'
+  /** Step percent from the SSE stream, when running. */
+  readonly livePercent?: number
+  /** Failure headline from the last run, when the phase is `error`. */
+  readonly liveMessage?: string
+}
+
+/**
+ * Derive the four-step installation/first-picture ladder.
+ *
+ * Pure on purpose: the states are the contract `test/studio.test.mjs` pins, and
+ * the panel only renders them. The real state machine lives in
+ * `src/environment.ts`; this is its **presentation projection** — the same
+ * facts the environment tool reports, mapped onto the four user-facing steps.
+ * Install/download themselves are run by `qwen_image_setup` (the managed entry);
+ * the stepper's own action is "重新检测", which re-reads the snapshot.
+ */
+export function stepperStepsOf(input: StepperInput): StepperStep[] {
+  const reason = typeof input.reason === 'string' && input.reason.length > 0 ? firstLine(input.reason) : undefined
+  const modelsReady = input.models !== undefined
+  const steps: StepperStep[] = []
+  steps.push({
+    id: 'runtime',
+    label: 'ComfyUI 运行',
+    state: input.ready ? 'done' : 'failed',
+    detail: input.ready
+      ? '已连接 ' + (input.endpoint ?? 'ComfyUI')
+      : (reason ?? '未检测到 ComfyUI；按 qwen_image_setup action=start 拉起或先安装'),
+  })
+  steps.push({
+    id: 'install',
+    label: '安装 / 受管环境',
+    state: input.ready ? 'done' : 'pending',
+    detail: input.ready
+      ? '受管入口 qwen_image_setup 可用'
+      : '让 agent 调 qwen_image_setup action=install 看引导，或按 docs/local-install.md 安装',
+  })
+  steps.push({
+    id: 'weights',
+    label: '权重就绪',
+    state: modelsReady ? 'done' : input.ready ? 'failed' : 'pending',
+    detail: modelsReady
+      ? [input.models?.unet, input.models?.clip, input.models?.vae].filter((value) => typeof value === 'string').join(' · ')
+      : input.ready
+        ? '已连上 ComfyUI 但三权重不齐：qwen_image_setup action=download'
+        : '等 ComfyUI 就绪后自动检查权重',
+  })
+  const phase = input.livePhase ?? 'idle'
+  const running = phase === 'queued' || phase === 'running'
+  const failed = phase === 'error'
+  const done = phase === 'done' || input.itemCount > 0
+  steps.push({
+    id: 'first-run',
+    label: '首次出图',
+    state: failed ? 'failed' : done ? 'done' : running ? 'active' : 'pending',
+    detail: failed
+      ? (input.liveMessage === undefined ? '本次生成失败，详见下方进度条' : firstLine(input.liveMessage))
+      : done
+        ? '画板上已有结果；这一单流程走完'
+        : running
+          ? (input.livePercent === undefined ? '正在生成…' : '正在生成… ' + String(input.livePercent) + '%')
+          : '用下方表单生成第一张图（首次会加载权重，可能比之后慢）',
+  })
+  return steps
+}
 /** Error body every Studio route answers with when it refuses. */
 export interface StudioErrorBody {
   error: string

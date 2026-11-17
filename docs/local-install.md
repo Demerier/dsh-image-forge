@@ -6,6 +6,18 @@
 
 ---
 
+## 〇、T22 之后的运行时口径（先读）
+
+- **受管环境**：装/起/权重下载由插件环境工具 `qwen_image_setup`（`status` / `start` / `stop` /
+  `install` / `download`）负责，工作台顶部的四步 stepper 只观察进度并给「重新检测」。
+- **双底模**：`qwen21-base`（40 步）/ `qwen21-turbo`（8 步）与 `moss-sft`（MOSS-Image，25 步模板）
+  三条 profile；缺 turbo 权重会明确退化到 base（`turbo_fallback`），MOSS 缺权重直接报错。
+- **MCP 主通道**：默认 `executionBackend=auto` 依次走 MCP → comfy CLI → HTTP；严格模式与各路径可
+  在设置页配置，T15 的 `DSH_IMAGE_FORGE_*` 环境变量仍优先。
+- **结果镜像**：MCP/CLI 取回的文件留在 `<outputDir>/.dsh-image-forge/backend-mirror/`，再由现有
+  画板机制归档。
+---
+
 ## 一、打包
 
 在仓库根目录执行：

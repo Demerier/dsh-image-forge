@@ -81,6 +81,13 @@ export interface McpBackendOptions {
   killTree?: (pid: number) => void
   /** Parent for per-run temp dirs; defaults to `os.tmpdir()`. */
   scratchRoot?: string
+  /**
+   * Workspace mirror root (T22): when set, `fetch_outputs` copies into
+   * `<mirrorRoot>/<promptId>/` and those files are **kept** so the archived
+   * artifacts live inside the workspace board directory. Only the scratch
+   * metadata dir is removed.
+   */
+  mirrorRoot?: string
   /** Sleep override (tests). */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   /** Write one stderr line per tool call (`DSH_IMAGE_FORGE_MCP_DEBUG=1`). */
@@ -323,7 +330,12 @@ export class McpBackend implements ImageBackend {
         await (this.options.sleep ?? defaultSleep)(interval, request.signal)
       }
 
-      const outDir = join(scratch, 'outputs')
+      // T22 result mirror: the transport's copies land in the workspace board
+      // area so they survive the run, not in the throwaway scratch dir.
+      const mirrorRoot = this.options.mirrorRoot
+      const outDir = mirrorRoot === undefined
+        ? join(scratch, 'outputs')
+        : join(mirrorRoot, promptId)
       mkdirSync(outDir, { recursive: true })
       // `fetch_outputs` shells out to `comfy download`, which needs comfy-cli's
       // own job-state file from the submit. Observed once on a just-completed job:

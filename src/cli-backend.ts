@@ -52,6 +52,8 @@ export interface CliBackendOptions {
   onSpawn?: (pid: number | undefined) => void
   /** Parent for per-run temp dirs; defaults to `os.tmpdir()`. */
   scratchRoot?: string
+  /** Workspace mirror root (T22): keep `download` results under it. */
+  mirrorRoot?: string
 }
 
 function deepFind(value: unknown, key: string, depth = 0): unknown {
@@ -181,7 +183,11 @@ export class CliBackend implements ImageBackend {
       }
       request.onPromptId?.(String(promptId))
 
-      const outDir = join(scratch, 'outputs')
+      // T22 result mirror: inside the workspace board area when configured, so
+      // the downloaded artifacts remain visible after the run.
+      const outDir = this.options.mirrorRoot === undefined
+        ? join(scratch, 'outputs')
+        : join(this.options.mirrorRoot, String(promptId))
       mkdirSync(outDir, { recursive: true })
       await this.invoke([
         ...base,

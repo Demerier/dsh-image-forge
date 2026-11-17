@@ -10,6 +10,7 @@ import {
 import { registerEnvironmentTools } from './environment.ts'
 import { registerImageForgeSkill } from './skill.ts'
 import { registerStudioRoutes } from './studio-routes.ts'
+import { configureBackendDefaults, type BackendDefaults, type BackendMode } from './backend.ts'
 import { studioSettingsOf } from './studio-service.ts'
 import { registerImageForgeTools } from './tools.ts'
 import {
@@ -100,6 +101,30 @@ export interface Config {
    * of neighbouring values and look at the pictures.
    */
   turboSteps: number | undefined
+  /**
+   * Which execution path a generated graph takes (T22; formerly the
+   * `DSH_IMAGE_FORGE_BACKEND` environment variable only).
+   *
+   * `auto` keeps the historical chain — MCP, then the comfy CLI, then the
+   * built-in HTTP path — and is the default. `mcp`/`cli` are **strict**: a
+   * failure of that backend is the call's failure, never a silent HTTP run.
+   * `http` skips the toolchain entirely, which is the pre-T15 behaviour.
+   */
+  executionBackend: BackendMode
+  /** Absolute path of `comfy-mcp(.exe)`; blank means PATH resolution. */
+  comfyMcpBin: string
+  /** Absolute path of `comfy(.exe)` handed to the MCP child as `COMFY_BIN`; blank means PATH. */
+  comfyBin: string
+  /** Per-backend timeout budget in ms; `undefined` keeps the request's own. */
+  backendTimeoutMs: number | undefined
+  /** Write one stderr line per MCP tool call (diagnostics). */
+  mcpDebug: boolean
+  /**
+   * Parent directory for per-run scratch/mirror dirs; blank derives
+   * `<outputDir>/.dsh-image-forge/backend-mirror`, which is what keeps
+   * `fetch_outputs` results inside the workspace.
+   */
+  backendTmpDir: string
 }
 
 /**
@@ -151,6 +176,15 @@ export const Config = Schema.object({
   // profiles without a register table (both Qwen ones) ignore the value.
   mossSampling: Schema.union([...MOSS_SAMPLING_PRESETS]).default(DEFAULT_MOSS_SAMPLING).volatile(),
   turboSteps: Schema.number().volatile(),
+  // T22: the T15 backend chain, promoted from environment variables to config so
+  // the settings page can reach it. The environment variables still win at
+  // resolve time (backend.ts), so an existing deployment keeps its behaviour.
+  executionBackend: Schema.union(['auto', 'mcp', 'cli', 'http'] as const).default('auto').volatile(),
+  comfyMcpBin: Schema.string().default('').volatile(),
+  comfyBin: Schema.string().default('').volatile(),
+  backendTimeoutMs: Schema.number().volatile(),
+  mcpDebug: Schema.boolean().default(false).volatile(),
+  backendTmpDir: Schema.string().default('').volatile(),
 })
 
 /**
@@ -203,10 +237,18 @@ function resolveConfig(config?: ConfigFields): Config {
  * @param config - the activation's config, volatile references included.
  */
 export function apply(ctx: Context, config?: ConfigFields): void {
-  registerImageForgeTools(ctx, () => resolveConfig(config))
-  registerEnvironmentTools(ctx, () => resolveConfig(config))
+  // One resolution path: every caller of the config also publishes the
+  // T22 backend defaults, so a settings save reaches the backend chain on the
+  // next call without re-activation.
+  const resolveAndConfigure = (): Config => {
+    const resolved = resolveConfig(config)
+    configureBackendDefaults(backendDefaultsOf(resolved))
+    return resolved
+  }
+  registerImageForgeTools(ctx, resolveAndConfigure)
+  registerEnvironmentTools(ctx, resolveAndConfigure)
   registerImageForgeSkill(ctx)
-  registerStudioRoutesIfMounted(ctx, config)
+  registerStudioRoutesIfMounted(ctx, config, resolveAndConfigure)
 }
 
 /**
@@ -228,7 +270,28 @@ export function apply(ctx: Context, config?: ConfigFields): void {
  * @param ctx - host context.
  * @param config - the activation's config, or undefined for the schema defaults.
  */
-function registerStudioRoutesIfMounted(ctx: Context, config?: ConfigFields): void {
+/** The T22 config fields, mapped onto the backend seam's defaults. */
+function backendDefaultsOf(config: Config): BackendDefaults {
+  return {
+    backend: config.executionBackend,
+    comfyMcpBin: config.comfyMcpBin,
+    comfyBin: config.comfyBin,
+    ...(config.backendTimeoutMs === undefined ? {} : { backendTimeoutMs: config.backendTimeoutMs }),
+    mcpDebug: config.mcpDebug,
+    backendTmpDir: config.backendTmpDir,
+    outputDir: config.outputDir,
+  }
+}
+
+/**
+ * Wire the Studio routes onto the host's web server, reading the config fresh
+ * per request so a settings save takes effect without a restart.
+ */
+function registerStudioRoutesIfMounted(
+  ctx: Context,
+  config?: ConfigFields,
+  resolveAndConfigure?: () => Config,
+): void {
   // A minimal or mocked context (the unit-test harness, a stripped embedder) may
   // not implement nested plugins. Skipping the Studio there loses only the HTTP
   // routes — never the tools — so it must not throw out of `apply`.
@@ -240,7 +303,7 @@ function registerStudioRoutesIfMounted(ctx: Context, config?: ConfigFields): voi
     inject: ['webServer'],
     apply: (svcCtx) => {
       const disposers = registerStudioRoutes(svcCtx, {
-        settings: () => studioSettingsOf(resolveConfig(config)),
+        settings: () => studioSettingsOf(resolveAndConfigure === undefined ? resolveConfig(config) : resolveAndConfigure()),
         ctx: svcCtx,
       })
       if (!disposers.length) {

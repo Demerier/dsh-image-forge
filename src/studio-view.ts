@@ -147,6 +147,7 @@ import {
   STUDIO_RATIOS,
   firstLine,
   fitStudioRatio,
+  stepperStepsOf,
   studioFileUrl,
   type BoardDetail,
   type BoardItem,
@@ -1309,6 +1310,21 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     })
     return () => { source.close() }
   }, [])
+
+  // T22 stepper: a projection of the config snapshot + live SSE phase. The
+  // install/download actions live in the managed environment tool; this block's
+  // own action is "重新检测", which re-reads the snapshot.
+  const stepperInput = useMemo(() => ({
+    ready: config?.ready === true,
+    ...(config?.reason === undefined ? {} : { reason: config.reason }),
+    ...(config?.models === undefined ? {} : { models: config.models }),
+    ...(config?.endpoint === undefined ? {} : { endpoint: config.endpoint }),
+    itemCount: boards.reduce((sum, entry) => sum + entry.itemCount, 0),
+    livePhase: live.phase,
+    ...(live.percent === undefined ? {} : { livePercent: live.percent }),
+    ...(live.message === undefined ? {} : { liveMessage: live.message }),
+  }), [boards, config, live])
+  const stepperSteps = useMemo(() => stepperStepsOf(stepperInput), [stepperInput])
 
   const selectedBatch = useMemo(
     () => batches.find((batch) => batch.id === selectedId) ?? batches[0],
@@ -3578,6 +3594,45 @@ export function StudioPanel(): ReturnType<typeof createElement> {
           },
           '重新检测',
         ),
+      ),
+    ),
+
+    // ---- install → first picture stepper (T22) -----------------------------
+    //
+    // Always visible: the four steps are the shortest honest answer to "why is
+    // this not generating yet". States come from the capability snapshot (which
+    // the host derives from its environment probe) and the live SSE phase; the
+    // own action here is re-checking, because install/download are the managed
+    // environment tool's job (qwen_image_setup).
+    createElement(
+      'section',
+      { className: 'dsh-forge-stepper', role: 'list', 'aria-label': '从安装到出图' },
+      ...stepperSteps.map((step) => createElement(
+        'div',
+        {
+          key: step.id,
+          className: 'dsh-forge-step is-' + step.state,
+          role: 'listitem',
+          'data-step': step.id,
+          'data-step-state': step.state,
+        },
+        createElement('span', { className: 'dsh-forge-step-dot', 'aria-hidden': true }),
+        createElement(
+          'div',
+          { className: 'dsh-forge-step-body' },
+          createElement('span', { className: 'dsh-forge-step-label' }, step.label),
+          createElement('span', { className: 'dsh-forge-step-detail', title: step.detail }, step.detail),
+        ),
+      )),
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-forge-btn is-ghost dsh-forge-step-retry',
+          title: '重新探测 ComfyUI 与权重（环境安装/下载由 qwen_image_setup 负责）',
+          onClick: () => { void loadConfig() },
+        },
+        '重新检测',
       ),
     ),
 

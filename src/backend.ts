@@ -13,10 +13,12 @@
  * 3. **HTTP** — the original `/prompt` → `/history` → `/view` path in
  *    `src/comfyui.ts`, kept last so a missing toolchain never loses a feature.
  *
- * Selection is **environment-only on purpose**: every config-schema field needs
- * a settings-page control (`test/settings.test.mjs`), and the support files for
- * that page were not part of T15's write scope. Documented variables (all
- * optional, an empty environment keeps the historical HTTP-only behaviour):
+ * Selection is **config-driven since T22** (`executionBackend` + the four
+ * executable/budget fields on the settings page), with the T15 environment
+ * variables kept as overrides so an existing deployment — and every CI fixture —
+ * behaves exactly as before. Precedence: environment variable > config field >
+ * PATH lookup. Documented variables (all optional; an empty environment keeps
+ * the historical HTTP-only behaviour):
  *
  * - `DSH_IMAGE_FORGE_BACKEND` — `auto` (default) | `mcp` | `cli` | `http`.
  *   `mcp`/`cli` are strict: that backend's failure is the call's failure, no
@@ -26,6 +28,8 @@
  * - `DSH_IMAGE_FORGE_COMFY_BIN` — absolute path of `comfy(.exe)` handed to the
  *   MCP child as `COMFY_BIN`; otherwise `comfy` on `PATH`.
  * - `DSH_IMAGE_FORGE_BACKEND_TIMEOUT_MS` — optional per-backend budget override.
+ * - `DSH_IMAGE_FORGE_MCP_DEBUG` — `1` writes one stderr line per MCP tool call.
+ * - `DSH_IMAGE_FORGE_BACKEND_TMPDIR` — parent of per-run scratch/mirror dirs.
  *
  * @module
  */
@@ -80,6 +84,20 @@ export interface BackendPlan {
   readonly comfyCommand: string | undefined
   /** Per-backend budget override; `undefined` keeps the caller's `timeoutMs`. */
   readonly timeoutMsOverride: number | undefined
+  /** Parent for per-run temp dirs; `undefined` means the OS temp dir. */
+  readonly scratchRoot: string | undefined
+  /**
+   * Workspace mirror root for `fetch_outputs` / `download` (T22).
+   *
+   * When set, the transport copies the produced files **into the workspace**
+   * (under the board store's directory) instead of a throwaway temp dir, so the
+   * mirrored artifacts are visible after the run and can be archived by the
+   * regular boards path. The files are kept; only the scratch metadata/workflow
+   * directory is removed.
+   */
+  readonly mirrorRoot: string | undefined
+  /** One stderr line per MCP tool call (`DSH_IMAGE_FORGE_MCP_DEBUG=1`). */
+  readonly debug: boolean
 }
 
 /** Injectable constructors, so tests need no real toolchain. */
@@ -120,19 +138,75 @@ export function findExecutable(
   return undefined
 }
 
-/** Read the backend plan from an environment (defaults to `process.env`). */
-export function resolveBackendPlan(env: { [key: string]: string | undefined } = process.env): BackendPlan {
+/** Values the activation's config contributes; environment variables still win. */
+export interface BackendDefaults {
+  /** `executionBackend` config field. */
+  readonly backend?: string
+  /** `comfyMcpBin` config field (absolute path, or blank for PATH). */
+  readonly comfyMcpBin?: string
+  /** `comfyBin` config field (absolute path, or blank for PATH). */
+  readonly comfyBin?: string
+  /** `backendTimeoutMs` config field. */
+  readonly backendTimeoutMs?: number
+  /** `mcpDebug` config field. */
+  readonly mcpDebug?: boolean
+  /** `backendTmpDir` config field. */
+  readonly backendTmpDir?: string
+  /** `outputDir` config field: the default mirror root when no tmp dir is set. */
+  readonly outputDir?: string
+}
+
+let backendDefaults: BackendDefaults = {}
+
+/** Install the config-derived defaults (called on every config resolution). */
+export function configureBackendDefaults(defaults: BackendDefaults): void {
+  backendDefaults = { ...defaults }
+}
+
+/** The currently installed defaults (tests and diagnostics). */
+export function currentBackendDefaults(): BackendDefaults {
+  return backendDefaults
+}
+
+/** `<outputDir>/.dsh-image-forge/backend-mirror`: inside the board store. */
+export function defaultMirrorRoot(outputDir: string | undefined): string | undefined {
+  return outputDir === undefined || outputDir.trim() === ''
+    ? undefined
+    : join(outputDir.trim(), '.dsh-image-forge', 'backend-mirror')
+}
+
+/** Read the backend plan from an environment + config defaults (env wins). */
+export function resolveBackendPlan(
+  env: { [key: string]: string | undefined } = process.env,
+  defaults: BackendDefaults = backendDefaults,
+): BackendPlan {
   const rawMode = (env[ENV_BACKEND] ?? '').trim().toLowerCase()
-  const mode: BackendMode = rawMode === 'mcp' || rawMode === 'cli' || rawMode === 'http' ? rawMode : 'auto'
+  // An invalid environment value stays a loud error; an invalid *config* value
+  // cannot reach here (the schema is a closed union) and falls back to auto.
+  const configuredMode = (defaults.backend ?? '').trim().toLowerCase()
+  const wanted = rawMode !== '' ? rawMode : configuredMode
+  const mode: BackendMode = wanted === 'mcp' || wanted === 'cli' || wanted === 'http' ? wanted : 'auto'
   if (rawMode !== '' && rawMode !== mode) {
     throw new Error(`${ENV_BACKEND}=${rawMode} 不合法：可选 auto / mcp / cli / http。`)
   }
   const timeout = Number((env[ENV_BACKEND_TIMEOUT_MS] ?? '').trim())
+  const configuredTimeout = defaults.backendTimeoutMs
+  const configuredDebug = defaults.mcpDebug === true
+  const debugEnv = env.DSH_IMAGE_FORGE_MCP_DEBUG
+  const tmpDir = (env.DSH_IMAGE_FORGE_BACKEND_TMPDIR ?? '').trim() || (defaults.backendTmpDir ?? '').trim()
   return {
     mode,
-    mcpCommand: (env[ENV_MCP_BIN] ?? '').trim() || findExecutable('comfy-mcp', env.PATH),
-    comfyCommand: (env[ENV_COMFY_BIN] ?? '').trim() || findExecutable('comfy', env.PATH),
-    timeoutMsOverride: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
+    mcpCommand: (env[ENV_MCP_BIN] ?? '').trim() || (defaults.comfyMcpBin ?? '').trim() || findExecutable('comfy-mcp', env.PATH),
+    comfyCommand: (env[ENV_COMFY_BIN] ?? '').trim() || (defaults.comfyBin ?? '').trim() || findExecutable('comfy', env.PATH),
+    timeoutMsOverride: Number.isFinite(timeout) && timeout > 0
+      ? timeout
+      : (Number.isFinite(configuredTimeout) && (configuredTimeout as number) > 0 ? configuredTimeout : undefined),
+    scratchRoot: tmpDir === '' ? undefined : tmpDir,
+    mirrorRoot: defaultMirrorRoot(defaults.outputDir),
+    // An explicit `0` in the environment must be able to switch debug off even
+    // when the settings page has it on, so an absent variable is the only case
+    // that reads the config field.
+    debug: debugEnv === undefined ? configuredDebug : debugEnv === '1',
   }
 }
 
@@ -160,8 +234,9 @@ export async function runThroughBackends(
           command: plan.mcpCommand as string,
           comfyBin: plan.comfyCommand,
           env: process.env,
-          debug: (process.env.DSH_IMAGE_FORGE_MCP_DEBUG ?? '') === '1',
-          scratchRoot: (process.env.DSH_IMAGE_FORGE_BACKEND_TMPDIR ?? '').trim() || undefined,
+          debug: plan.debug,
+          ...(plan.scratchRoot === undefined ? {} : { scratchRoot: plan.scratchRoot }),
+          ...(plan.mirrorRoot === undefined ? {} : { mirrorRoot: plan.mirrorRoot }),
         })
       }) as unknown as (plan: BackendPlan) => ImageBackend,
     })
@@ -174,7 +249,8 @@ export async function runThroughBackends(
         return createCliBackend({
           command: plan.comfyCommand as string,
           env: process.env,
-          scratchRoot: (process.env.DSH_IMAGE_FORGE_BACKEND_TMPDIR ?? '').trim() || undefined,
+          ...(plan.scratchRoot === undefined ? {} : { scratchRoot: plan.scratchRoot }),
+          ...(plan.mirrorRoot === undefined ? {} : { mirrorRoot: plan.mirrorRoot }),
         })
       }) as unknown as (plan: BackendPlan) => ImageBackend,
     })
