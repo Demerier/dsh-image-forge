@@ -300,7 +300,7 @@ function page() {
 </header>
 <main class="pv-page">
   <nav class="pv-nav">
-    <div class="pv-nav-item is-active">Qwen 出图</div>
+    <div class="pv-nav-item is-active">生图配置</div>
     <div class="pv-nav-item">模型与账号</div>
     <div class="pv-nav-item">插件</div>
   </nav>

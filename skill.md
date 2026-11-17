@@ -1,7 +1,7 @@
-# qwen-image-forge —— Qwen-Image 出图与提示词契约
+# qwen-image-forge —— 生图与提示词契约（Qwen-Image 2.1 / MOSS-Image）
 
-本技能把「用户的口语需求」变成「Qwen-Image 认的提示词」，并把**同一个契约里的画幅比**直接交给工具参数，一步出图。
-关键词：Qwen-Image、千问生图、通义万相出图、`wh_ratio`、提示词改写、改图/融图。
+本技能把「用户的口语需求」变成「底模认的提示词（Qwen-Image 契约）」，并把**同一个契约里的画幅比**直接交给工具参数，一步出图。
+关键词：Qwen-Image、MOSS-Image、千问生图、通义万相出图、`wh_ratio`、提示词改写、改图/融图。
 
 ## 这个技能解决什么
 
@@ -13,7 +13,7 @@ Qwen-Image 的提示词规范给出的答案不是一段随便的描述，而是
 
 ## 何时用
 
-- 用户想「画一张图 / 生成图片 / 出个海报 / 做个头像」，并且希望走 Qwen-Image
+- 用户想「画一张图 / 生成图片 / 出个海报 / 做个头像」，并且希望走本机 ComfyUI（底模 Qwen-Image 2.1 或 MOSS-Image，见「三个底模档位」）
 - 用户给了一段口语需求，需要先按契约改写成提示词再出图
 - 用户要按指定的画幅比出图（横版、竖版、方图、宽屏）
 - 用户要**改图 / 融图**（给了一张或多张参考图）——此时用 Edit 契约，见 `references/edit_rules.md`，
@@ -23,7 +23,7 @@ Qwen-Image 的提示词规范给出的答案不是一段随便的描述，而是
 
 - 用户只是问「Qwen-Image 怎么用」「帮我写一段提示词」而**不要出图**：只做改写与讲解，不要调用生成工具（不要凭空消耗额度）
 - 用户要的是**像素级后处理**（抠图、放大、裁剪、去水印）：本插件只做生成与参考图编辑，不做后处理
-- 用户想指定别的模型（Midjourney / SD / 豆包等）：本插件只面向 Qwen-Image
+- 用户想指定别的模型（Midjourney / SD / 豆包等）：本插件只接本机 ComfyUI 上的 **Qwen-Image 2.1 与 MOSS-Image** 两个底模，不接这些
 - 用户本机 ComfyUI 没起来或没装权重：如实说明这条前置条件（见下「后端」），不要反复重试
 
 ## 意图路由（三步）
@@ -83,7 +83,7 @@ Edit：
 ## 后端：只有本机 ComfyUI 一条路
 
 本插件**不自带任何本地运行时**——不建 venv、不下权重、不拉进程，也不再提供云端 API：
-出图与改图都跑在**用户自己装好的 ComfyUI** 与三个 Qwen-Image 权重上，零下载、零转换、完全离线。
+出图与改图都跑在**用户自己装好的 ComfyUI** 与当前 `comfyModel` 那一档的三个权重上（Qwen-Image 2.1 或 MOSS-Image），零下载、零转换、完全离线。
 没有别的后端档位，工具参数里也没有选后端的入口。
 
 - ComfyUI 没起来或缺权重时，报错会点名缺什么（探测过哪些端口、缺哪个文件、放进哪个目录），
@@ -94,13 +94,14 @@ Edit：
 **不要凭记忆报下载地址或目录名**：桌面版的目录叫 `unet`/`clip`/`vae`，不是 HF 仓库里的
 `diffusion_models`/`text_encoders`，写错一处就白等几十分钟下载。
 
-### 两个权重家族：base 与 turbo
+### 三个底模档位：qwen21-base / qwen21-turbo / moss-sft
 
-配置 `comfyModel` 决定跑哪一档（默认 `base`）：
+配置 `comfyModel` 决定跑哪一档（默认 `qwen21-base`；旧值 `base` / `turbo` 仍被接受并映射到前两个）：
 
-- `turbo`：8 步出图，比 base（40 步）快得多（25 步基准时实测约 2.7×）。**日常默认建议 turbo**。
-- `base`：40 步（官方推荐 40–50；≈1.6× 25 步耗时）。**写实人像、画面里要出现中文文字、古典/绘画性构图**这三类切 base——turbo 在这些题材上掉细节。
-- `comfyModel: "turbo"` 是**请求不是保证**：`/object_info` 里没有 turbo unet 时会自动回落 base，
+- `qwen21-turbo`：8 步出图，比 base（40 步）快得多（25 步基准时实测约 2.7×）。**日常默认建议 turbo**。
+- `qwen21-base`：40 步（官方推荐 40–50；≈1.6× 25 步耗时）。**写实人像、画面里要出现中文文字、古典/绘画性构图**这三类切 base——turbo 在这些题材上掉细节。
+- `moss-sft`：走 **MOSS-Image**，步数由 `mossSampling` 定（25 步 comfy 档 / 50 步 official 档），也可用 `layout` 做布局控制。文生图与改图都通——改图走社区 edit LoRA 通路（ComfyUI 的 `models/loras/` 里要有 `moss_image_edit_lora_rank_64_bf16.safetensors`，缺它会报错点名文件）；缺权重是**直接报错**，不像 turbo 那样回落。
+- `comfyModel: "qwen21-turbo"` 是**请求不是保证**：`/object_info` 里没有 turbo unet 时会自动回落 base，
   并在结果 `comfyui.turbo_fallback` 里说明。别据此向用户承诺速度。
 
 ### 质量档：`cfg` / `negative_prompt`（只对 base）

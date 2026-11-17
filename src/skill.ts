@@ -8,9 +8,11 @@ export const SKILL_NAME = 'qwen-image-forge'
 
 /** Short catalog blurb; the routing keywords live here, not in the body. */
 const SKILL_DESCRIPTION =
-  '用 Qwen-Image（千问生图）出图：把口语需求按提示词契约改写成成品 prompt，并把契约里的 wh_ratio ' +
+  '用本机 ComfyUI 生图/改图（底模由 `comfyModel` 选择：`qwen21-base` / `qwen21-turbo` 走 Qwen-Image 2.1，' +
+  '`moss-sft` 走 MOSS-Image）：把口语需求按提示词契约改写成成品 prompt，并把契约里的 wh_ratio ' +
   '直接作为工具的一等参数出图（无需人工换算像素）。当用户要求生成图片、出海报/头像/封面/壁纸、' +
-  '按指定画幅比出图，或要给了一/多张参考图的改图、融图需求写指令时使用。仅面向 Qwen-Image 模型。'
+  '按指定画幅比出图，或要给了一/多张参考图的改图、融图需求写指令时使用。' +
+  'Qwen-Image 2.1 与 MOSS-Image 都支持文生图与参考图编辑（MOSS 改图走社区 edit LoRA，需 ComfyUI 的 `models/loras/` 里装有该 LoRA，缺它会报错点名文件）。'
 
 /** Reference documents the body points at, loaded from the package root. */
 const REFERENCE_FILES = ['references/t2i_rules.md', 'references/edit_rules.md'] as const

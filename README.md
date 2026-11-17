@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
 
-在 DeepSeek Harness 里用 Qwen-Image 出图、改图。
+在 DeepSeek Harness 里生图、改图：底模是本机的 **Qwen-Image 2.1** 或 **MOSS-Image**，由设置页的 `comfyModel` 选。
 
 说「画一张 16:9 的夏日饮料海报」，出图；丢一张客厅照片说「改成晚上的」，改图。比例、像素由插件换算，不用你查表；成果按**画板**归档，工作台里能看、能摆、能接着改。
 
@@ -16,13 +16,13 @@
 
 **两个入口，一套后端**：对话里说一句话，模型按 Qwen 契约改写后调用工具；或者在左侧边栏点「图像工作台」进全局面板点按钮。两边共用同一份配置、同一个输出目录、同一批画板。
 
-**目录**：[能不能用](#能不能用) · [快速开始](#快速开始) · [出图](#出图) · [改图](#改图) · [工作台](#工作台) · [工具](#工具) · [提示词怎么写](#提示词怎么写) · [性能](#性能base-与-turbo) · [可能踩的坑](#可能踩的坑) · [许可](#许可) · [更多文档](#更多文档)
+**目录**：[能不能用](#能不能用) · [快速开始](#快速开始) · [出图](#出图) · [改图](#改图) · [工作台](#工作台) · [工具](#工具) · [提示词怎么写](#提示词怎么写) · [性能](#性能qwen21-base-与-qwen21-turbo) · [可能踩的坑](#可能踩的坑) · [许可](#许可) · [更多文档](#更多文档)
 
 ---
 
 ## 能不能用
 
-需要**本机装好的 ComfyUI + 三个 Qwen-Image 2.1 权重**。文生图、改图（图生图）都跑在这台机器上，
+需要**本机装好的 ComfyUI + 当前底模的三个权重**（默认 Qwen-Image 2.1，也可切 MOSS-Image）。文生图、改图（图生图）都跑在这台机器上，
 首次下载权重之后完全离线，不联网、不耗云端额度。
 
 - 显存 8 GB 起步（实测机型 RTX 4070 Laptop）。**已经装过 ComfyUI**：`node scripts/start-comfyui.mjs` 一条命令起后端并等到就绪，`--doctor` 只体检（安装/torch/五个权重/显存）。**没装过**：照 [部署指引](docs/comfyui-deployment.md) 从零装。
@@ -79,7 +79,7 @@ node scripts/start-comfyui.mjs --doctor  # 只看缺什么：安装、torch、�
 
 模型会把它改写成 Qwen 提示词契约再调工具，图片落盘并内联显示在回复里。也可以在左侧边栏打开「图像工作台」全局面板，手写提示词点「生成」（出图入口在面板里，设置页只放配置）。
 
-**验收标准**：对话里能看到 `qwen_image_generate` / `qwen_image_edit` / `qwen_image_status` 三个工具；设置页左侧出现「Qwen 出图」。跑不通先调 `qwen_image_status`，它会点名缺什么。
+**验收标准**：对话里能看到 `qwen_image_generate` / `qwen_image_edit` / `qwen_image_status` 三个工具；设置页左侧出现「生图配置」。跑不通先调 `qwen_image_status`，它会点名缺什么。
 
 本机改代码时：
 
@@ -189,13 +189,14 @@ ComfyUI 没起来时面板照样打开，顶部会写清查了哪些端口、为
 
 ---
 
-## 性能：base 与 turbo
+## 性能：qwen21-base 与 qwen21-turbo
 
-唯一影响速度与画质的选择是权重家族（设置页 `comfyModel`）：
+影响速度与画质的选择是底模档位（设置页 `comfyModel`）：
 
-- **base**：40 步（官方模型卡推荐值，默认）。写实、画面里的中文文字、古典构图用它。
-- **turbo**：8 步，快得多——25 步基准下实测约 2.7×（base 已默认 40 步，按线性外推约 4–5×，未重新实测）。**没装 turbo 权重会自动退回 `base`**，结果里会有提示。
+- **`qwen21-base`**：40 步（官方模型卡推荐值，默认）。写实、画面里的中文文字、古典构图用它。
+- **`qwen21-turbo`**：8 步，快得多——25 步基准下实测约 2.7×（base 已默认 40 步，按线性外推约 4–5×，未重新实测）。**没装 turbo 权重会自动退回 `qwen21-base`**，结果里会有提示。
   盲测 5 题 base 3 : 2 turbo，单张 27–29 s → 9–11 s。turbo 氛围更强，但材质细节、中文小字、印章、古典构图会输给 base。
+- **`moss-sft`**：第三个档位，走 MOSS-Image，步数由它自己的 `mossSampling`（25 步 comfy 档 / 50 步 official 档）决定，**不在上面这组 base/turbo 对比里**；改图也能跑，但要多装一个社区 edit LoRA。详见 [配置](docs/configuration.md)。
 
 8 GB 卡（RTX 4070 Laptop）实测：文生图 1312×736 约 2 s/步，1.5MP 的 8 步改图 19–23 s。
 全部实测数据见 [docs/configuration.md](docs/configuration.md) 的证据一节。

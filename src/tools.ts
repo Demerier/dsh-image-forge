@@ -929,7 +929,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
   ctx.tools.register(defineTool({
     name: 'qwen_image_generate',
     description:
-      '用 Qwen-Image 出图（本机 ComfyUI）。`prompt` 收**成品**提示词（本工具不改写），`wh_ratio` 是**一等参数**：' +
+      '用 Qwen-Image 2.1 或 MOSS-Image 生图（本机 ComfyUI；底模由 `comfyModel` 选择：`qwen21-base` / `qwen21-turbo` 走 Qwen-Image 2.1，`moss-sft` 走 MOSS-Image）。`prompt` 收**成品**提示词（本工具不改写），`wh_ratio` 是**一等参数**：' +
       `直接接受官方契约的 7 档画幅比（${WH_RATIOS.join(' / ')}），插件自己换算成 ${SIZE_MULTIPLE} 对齐的像素尺寸——` +
       '所以「契约输出 → 插件入参」不需要人工翻译。省略 wh_ratio 用 1:1，给了 width/height 则以它们为准。' +
       '结果落盘到配置的 outputDir 并把绝对路径写进正文 Markdown，同时回传结构化字段。' +
@@ -1115,7 +1115,8 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       '`ratio_follow` 让画布**跟随某张参考图的宽高比**（写 `image1`…`image10`，或直接把 `images` 里的那一项再写一遍）；' +
       '它与 `wh_ratio` **互斥**（官方契约里一个非空另一个必须为空），两个都不给时**默认跟随第一张参考图**。' +
       '参考图先上传进 ComfyUI 的 input/ 目录。' +
-      '改图只有 Qwen 通路：`comfyModel` 是 `moss-sft` 时会**明确报未接入**，不会递一张忽略参考图的图上去。' +
+      '改图在 `moss-sft` 下走 MOSS-Image 自己的 edit LoRA 通路（ComfyUI 的 `models/loras/` 里缺该 LoRA 时会报错点名文件）；' +
+      '不会递一张忽略参考图的图上去。' +
       '部署（ComfyUI 桌面版 + 三个权重）见 docs/comfyui-deployment.md。' +
       '结果落盘到 outputDir 并把绝对路径写进正文 Markdown。',
     parameters: EDIT_PARAMETERS,

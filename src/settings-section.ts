@@ -48,7 +48,7 @@ export const SETTINGS_SECTION_ORDER = 160
 export const SETTINGS_ENTRY_IDS: readonly string[] = ['dsh-image-forge']
 
 /** The menu label. A function, because the slot contract renders it lazily. */
-export const SETTINGS_SECTION_LABEL = 'Qwen 出图'
+export const SETTINGS_SECTION_LABEL = '生图配置'
 
 // ---------------------------------------------------------------------------
 // Structural views of the Host-provided services.

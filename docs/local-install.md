@@ -102,7 +102,7 @@ node -e "console.log(require('C:/Users/Demeri/.dsh/profiles/desktop/package.json
 | 位置 | 应该看到 |
 |---|---|
 | 对话工具列表 | `qwen_image_generate` / `qwen_image_edit` / `qwen_image_status` |
-| 设置页左侧一级条目 | 「Qwen 出图」 |
+| 设置页左侧一级条目 | 「生图配置」 |
 | 该条目第一个页签 | 工作台（ComfyUI 没开也能打开，顶部会写探测结果） |
 
 ### 3. 功能层面
