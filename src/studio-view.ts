@@ -123,6 +123,14 @@ import {
   type LayoutEditorState,
 } from './layout-editor.ts'
 import {
+  CONTACT_SHEET_THUMB_SIZE,
+  boardJsonFileName,
+  contactSheetLabel,
+  contactSheetLayout,
+  pictureItems,
+  serializeBoardDetail,
+} from './canvas-export.ts'
+import {
   STUDIO_ASSETS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CONFIG_ROUTE,
@@ -573,6 +581,37 @@ function parseDraggedAsset(raw: string): DraggedAsset | undefined {
   if (typeof record.boardId !== 'string' || record.boardId.length === 0) return undefined
   if (typeof record.itemId !== 'string' || record.itemId.length === 0) return undefined
   return { boardId: record.boardId, itemId: record.itemId }
+}
+
+/**
+ * Trigger one browser download for a Blob.
+ *
+ * A same-origin object URL + a synthetic `<a download>` click is the only
+ * download mechanism available inside a plugin panel: the host page owns the
+ * tab, so `window.open` on a blob URL would be blocked as a popup. The object
+ * URL is revoked on the next tick, after the browser has taken it.
+ */
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = name
+  anchor.rel = 'noreferrer'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => { URL.revokeObjectURL(url) }, 0)
+}
+
+/** Decode one image from a same-origin URL; rejects on load/decoding failure. */
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.decoding = 'async'
+    image.onload = () => { resolve(image) }
+    image.onerror = () => { reject(new Error('图片加载失败')) }
+    image.src = url
+  })
 }
 
 /** Read a JSON body defensively: a proxy error page is not JSON. */
@@ -1111,6 +1150,16 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   // Filled in once the layout persistence callback exists (it is declared after
   // the unmount effect); the cleanup calls it through the ref to flush drafts.
   const layoutFlushRef = useRef<() => void>(() => {})
+  // C15/DD12: ids whose coordinates changed since the last successful layout
+  // write, plus the camera that write carried. The debounce now sends only this
+  // subset — a 1000-node board no longer PUTs its whole arrangement per drag.
+  const dirtyIdsRef = useRef<Set<string>>(new Set())
+  const lastCameraRef = useRef<Camera | undefined>(undefined)
+  // C15/DD14: the board's stored items, so the JSON export keeps prompt/seed
+  // metadata that the canvas nodes themselves do not carry; `boardMetaRef` keeps
+  // the read board's timestamps/session for the same export.
+  const boardItemsRef = useRef<Map<string, BoardItem>>(new Map())
+  const boardMetaRef = useRef<BoardDetail | undefined>(undefined)
   // C12: the cross-board clipboard is memory-only (§6.3: never the system
   // clipboard), and a reveal request can wait for the canvas to be mounted.
   const clipboardRef = useRef<{ readonly boardId: string; readonly itemIds: readonly string[] } | undefined>(undefined)
@@ -1138,6 +1187,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setSelection(new Set())
       setMenu(undefined)
       persistedIdsRef.current = new Set()
+      dirtyIdsRef.current.clear()
+      lastCameraRef.current = undefined
+      boardItemsRef.current = new Map()
+      boardMetaRef.current = undefined
       for (const timer of layoutPersistTimersRef.current.values()) clearTimeout(timer)
       layoutPersistTimersRef.current.clear()
       // The undo history is per board (§6.5: "session-scoped" and the stack holds
@@ -1166,6 +1219,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       // Everything a board hands back is on disk by definition; a later failure
       // or layout write is what adds to this set during the session.
       persistedIdsRef.current = new Set(loaded.map((node) => node.id))
+      boardItemsRef.current = new Map(board.items.map((item) => [item.id, item]))
+      boardMetaRef.current = board
+      // A fresh read is the baseline for DD12: nothing is dirty and the camera is
+      // whatever the board stored (so opening a board never writes it back).
+      dirtyIdsRef.current.clear()
+      lastCameraRef.current = board.camera ?? { x: -28, y: -28, zoom: 1 }
       for (const timer of layoutPersistTimersRef.current.values()) clearTimeout(timer)
       layoutPersistTimersRef.current.clear()
       const restored = batchesFromBoard(board.items)
@@ -1261,23 +1320,52 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     return (value: string) => table.find((entry) => entry.ratio === value)
   }, [config])
 
-  /** Write the current arrangement back to the board. Best-effort. */
+  /** Write the arrangement back to the board — only what changed (DD12). */
   const persistLayout = useCallback(async () => {
-    const id = boardIdRef.current
-    if (id === undefined) return
+    const board = boardIdRef.current
+    const dirty = [...dirtyIdsRef.current]
+    const camera = cameraRef.current
+    const sentCamera = lastCameraRef.current
+    const cameraChanged = sentCamera === undefined
+      || sentCamera.x !== camera.x
+      || sentCamera.y !== camera.y
+      || sentCamera.zoom !== camera.zoom
+    if (board === undefined) {
+      dirtyIdsRef.current.clear()
+      lastCameraRef.current = camera
+      return
+    }
+    // A camera-only change is a real save (that is how the view reopens where it
+    // was); a no-op flush is not.
+    if (dirty.length === 0 && !cameraChanged) return
     const error = await postBoard({
       action: 'layout',
-      board: id,
+      board,
       // Pictures are board items; a task node is only a board item once its
       // terminal state was stored (DD6: a running task is never persisted), and
       // a layout node once its draft write landed. Everything else is session
       // state that no reload should see.
       items: nodesRef.current
+        .filter((node) => dirtyIdsRef.current.has(node.id))
         .filter((node) => isImageNode(node) || persistedIdsRef.current.has(node.id))
         .map((node) => ({ id: node.id, x: node.x, y: node.y })),
-      camera: cameraRef.current,
+      ...(cameraChanged ? { camera } : {}),
     })
-    if (error !== undefined) setBoardError(error)
+    if (error !== undefined) {
+      // Keep the dirty set: the next flush retries these positions rather than
+      // losing them to a transient refusal.
+      setBoardError(error)
+      return
+    }
+    // Delete only what this request carried: a drag that happened while the
+    // request was in flight stays dirty for the next one.
+    for (const id of dirty) dirtyIdsRef.current.delete(id)
+    lastCameraRef.current = camera
+  }, [])
+
+  /** Mark coordinates dirty; the next debounced flush carries them. */
+  const markDirty = useCallback((ids: Iterable<string>) => {
+    for (const id of ids) dirtyIdsRef.current.add(id)
   }, [])
 
   /**
@@ -1700,7 +1788,32 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     writeNodes(next)
     // The host recorded these items before answering, so they are on disk now:
     // a later removal has to go through the board route.
-    for (const node of created) persistedIdsRef.current.add(node.id)
+    for (const node of created) {
+      persistedIdsRef.current.add(node.id)
+      boardItemsRef.current.set(node.id, {
+        id: node.id,
+        kind: 'image',
+        path: node.image.path,
+        markdownPath: node.image.markdownPath,
+        width: node.image.width,
+        height: node.image.height,
+        bytes: node.image.bytes,
+        mediaType: node.image.mediaType,
+        prompt: result.prompt,
+        ratio: result.ratio,
+        steps: result.steps,
+        seed: result.seed,
+        mode: result.mode,
+        backend: 'studio',
+        parents: [...node.parents],
+        createdAt: new Date().toISOString(),
+        sessionId: null,
+        batchId: node.batchId,
+        x: node.x,
+        y: node.y,
+      })
+    }
+    markDirty(created.map((node) => node.id))
     scheduleLayout()
     if (created[0] !== undefined) setSelection(new Set([created[0].id]))
   }, [adoptBoard, failTask, scheduleLayout, writeNodes])
@@ -2049,11 +2162,14 @@ export function StudioPanel(): ReturnType<typeof createElement> {
 
   /** Set the coordinates of every node in `positions` in one write. */
   const applyPositions = useCallback((positions: ReadonlyMap<string, Point>) => {
+    // DD12: only these ids need to reach the board — including an undo, which
+    // has to restore the stored position as well as the drawn one.
+    markDirty(positions.keys())
     writeNodes(nodesRef.current.map((node) => {
       const point = positions.get(node.id)
       return point === undefined ? node : { ...node, x: point.x, y: point.y }
     }))
-  }, [writeNodes])
+  }, [markDirty, writeNodes])
 
   /** Where those ids are right now — the `before` side of an undo step. */
   const positionsOf = useCallback((ids: Iterable<string>): Map<string, Point> => {
@@ -2193,8 +2309,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       return next
     })
     pushCommand(snapshotCommand('remove', before, after, (list) => { writeNodes([...list]) }))
-    // A pending layout-draft write must not resurrect a removed node.
+    // A pending layout-draft write must not resurrect a removed node, and a
+    // removed id must not ride along in the next layout diff.
     for (const id of drop) {
+      dirtyIdsRef.current.delete(id)
       const timer = layoutPersistTimersRef.current.get(id)
       if (timer !== undefined) {
         clearTimeout(timer)
@@ -2504,6 +2622,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (board !== undefined) setBoards((current) => upsertBoard(current, board))
     // An imported/copied picture is recorded on the board before the host answers.
     persistedIdsRef.current.add(node.id)
+    boardItemsRef.current.set(node.id, item)
+    markDirty([node.id])
     scheduleLayout()
     return node
   }, [scheduleLayout, writeNodes])
@@ -2537,6 +2657,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       const before = new Map([[node.id, { x: node.x, y: node.y }]])
       const after = new Map([[node.id, { x: world.x, y: world.y }]])
       writeNodes(nodesRef.current.map((entry) => (entry.id === node.id ? { ...entry, x: world.x, y: world.y } : entry)))
+      markDirty([node.id])
       pushCommand(moveCommand('drag-in', before, after))
       scheduleLayout()
       return
@@ -2679,6 +2800,168 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   }, [appendBoardItem])
 
   /* ------------------------------------------------------------------------ */
+  /* Export (C15 §9.6 / DD14): board JSON + contact-sheet PNG                 */
+  /* ------------------------------------------------------------------------ */
+
+  /** The board's items as they would be stored right now (running tasks excluded). */
+  const currentBoardItems = useCallback((): BoardItem[] => {
+    const now = new Date().toISOString()
+    const stored = boardItemsRef.current
+    const placeholder = (id: string, kind: BoardItem['kind']): BoardItem => ({
+      id,
+      kind,
+      path: '',
+      markdownPath: '',
+      width: 0,
+      height: 0,
+      bytes: 0,
+      mediaType: '',
+      prompt: '',
+      ratio: null,
+      steps: null,
+      seed: null,
+      mode: 'generate',
+      backend: 'studio',
+      parents: [],
+      createdAt: now,
+      sessionId: null,
+      batchId: 'x' + id,
+      x: 0,
+      y: 0,
+    })
+    const items: BoardItem[] = []
+    for (const node of nodesRef.current) {
+      const base = stored.get(node.id)
+      if (isImageNode(node)) {
+        items.push({
+          ...(base ?? placeholder(node.id, 'image')),
+          ...node.image,
+          id: node.id,
+          kind: 'image',
+          parents: [...node.parents],
+          x: node.x,
+          y: node.y,
+          batchId: node.batchId,
+        })
+        continue
+      }
+      if (isTaskNode(node)) {
+        // Running tasks are session state (DD6); only a terminal failure is a
+        // board entry, so an export during a run skips it.
+        if (node.status !== 'failed' && node.status !== 'interrupted') continue
+        items.push({
+          ...(base ?? placeholder(node.id, 'task')),
+          id: node.id,
+          kind: 'task',
+          parents: [...node.parents],
+          x: node.x,
+          y: node.y,
+          task: {
+            status: node.status,
+            params: node.params,
+            ...(node.error === undefined ? {} : { error: node.error }),
+          },
+        })
+        continue
+      }
+      items.push({
+        ...(base ?? placeholder(node.id, 'layout')),
+        id: node.id,
+        kind: 'layout',
+        parents: [...node.parents],
+        x: node.x,
+        y: node.y,
+        draft: node.draft,
+        w: node.w,
+        h: node.h,
+      })
+    }
+    return items
+  }, [])
+
+  /** Download the current board as its v2 JSON (DD14; one-way export, no import). */
+  const exportBoardJson = useCallback(() => {
+    const id = boardIdRef.current
+    if (id === undefined) {
+      setBoardError('先打开或新建一个画板，再导出')
+      return
+    }
+    const meta = boardMetaRef.current
+    const items = currentBoardItems()
+    const cameraNow = cameraRef.current
+    const detail: BoardDetail = {
+      id,
+      name: boardName,
+      itemCount: items.length,
+      cover: [...items].reverse().find((item) => (item.kind ?? 'image') === 'image')?.markdownPath ?? null,
+      createdAt: meta?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      sessionId: meta?.sessionId ?? null,
+      camera: { x: cameraNow.x, y: cameraNow.y, zoom: cameraNow.zoom },
+      items,
+    }
+    const name = boardJsonFileName(detail.name)
+    downloadBlob(new Blob([serializeBoardDetail(detail)], { type: 'application/json' }), name)
+    setNote('已导出画板 JSON：' + name)
+  }, [boardName, currentBoardItems])
+
+  /**
+   * Render every picture on the board into one contact-sheet PNG (DD14).
+   *
+   * Pictures load through the plugin's same-origin file route, so the canvas is
+   * not tainted and `toBlob` can export it. A broken file leaves its grey
+   * placeholder and label — one failure must not abort a 200-cell sheet. A null
+   * or thrown `toBlob` (tainted canvas) is reported, never silently ignored.
+   */
+  const exportContactSheet = useCallback(async () => {
+    const items = pictureItems(currentBoardItems())
+    if (items.length === 0) {
+      setNote('这个画板还没有可拼版的图片')
+      return
+    }
+    const plan = contactSheetLayout(items, 4, CONTACT_SHEET_THUMB_SIZE)
+    const canvas = document.createElement('canvas')
+    canvas.width = plan.width
+    canvas.height = plan.height
+    const context = canvas.getContext('2d')
+    if (context === null) {
+      setBoardError('导出拼版失败：当前环境没有 canvas 2D')
+      return
+    }
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, plan.width, plan.height)
+    context.font = '13px system-ui, sans-serif'
+    for (const slot of plan.slots) {
+      context.fillStyle = '#e5e7eb'
+      context.fillRect(slot.imageX, slot.imageY, slot.imageWidth, slot.imageHeight)
+      try {
+        const image = await loadImage(studioFileUrl(slot.item.markdownPath))
+        context.drawImage(image, slot.imageX, slot.imageY, slot.imageWidth, slot.imageHeight)
+      } catch {
+        // The grey block stays; the label still identifies the picture.
+      }
+      context.fillStyle = '#374151'
+      context.fillText(contactSheetLabel(slot.item.prompt).slice(0, 32), slot.x, slot.labelY + 16, slot.width)
+    }
+    let blob: Blob | undefined
+    try {
+      blob = await new Promise<Blob | undefined>((resolve) => {
+        canvas.toBlob((value) => { resolve(value ?? undefined) }, 'image/png')
+      })
+    } catch (cause) {
+      setBoardError('导出拼版失败：' + (cause instanceof Error ? cause.message : String(cause)) + '（canvas 可能被跨源图片污染）')
+      return
+    }
+    if (blob === undefined) {
+      setBoardError('导出拼版失败：canvas 无法导出 PNG（可能被跨源图片污染）')
+      return
+    }
+    const name = boardJsonFileName(boardName).replace(/\.board\.json$/, '') + '.sheet.png'
+    downloadBlob(blob, name)
+    setNote('已导出拼版 PNG：' + name + '（' + String(plan.slots.length) + ' 张' + (plan.truncated ? '，已截断到 200' : '') + '）')
+  }, [boardName, currentBoardItems])
+
+  /* ------------------------------------------------------------------------ */
   /* Layout nodes (C13 §8): one editor per node, width-driven resize           */
   /* ------------------------------------------------------------------------ */
 
@@ -2742,6 +3025,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     const before = nodesRef.current
     const after = [...before, node]
     writeNodes(after)
+    markDirty([node.id])
     // §6.5 lists "add node" among the undoable commands; creation is cheap to
     // revert (the draft was never persisted), so it goes on the stack.
     pushCommand(snapshotCommand('add-layout', before, after, (list) => { writeNodes([...list]) }))
@@ -3022,10 +3306,39 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       case 'task-cancel':
         if (target !== undefined) cancelTask(target)
         break
+      case 'layout-generate':
+        if (target !== undefined) generateLayoutNode(target)
+        break
+      case 'new-layout':
+        addLayoutNode()
+        break
+      case 'paste':
+        void pasteClipboard()
+        break
+      case 'export-board':
+        exportBoardJson()
+        break
+      case 'export-sheet':
+        void exportContactSheet()
+        break
       default:
         break
     }
-  }, [cancelTask, editTaskParams, fitView, menu?.target, menuIds, referenceNode, removeNodes, retryTask])
+  }, [
+    addLayoutNode,
+    cancelTask,
+    editTaskParams,
+    exportBoardJson,
+    exportContactSheet,
+    fitView,
+    generateLayoutNode,
+    menu?.target,
+    menuIds,
+    pasteClipboard,
+    referenceNode,
+    removeNodes,
+    retryTask,
+  ])
 
   /**
    * Open the board an asset lives on, select it **and travel to it** (§7.4).
@@ -3703,6 +4016,28 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   onClick: () => { addLayoutNode() },
                 },
                 '新建布局',
+              ),
+              // C15/DD14: the two export entries live here as well as in the
+              // blank right-click menu (§9.6 asks for both entry points).
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-forge-btn is-ghost',
+                  title: '导出当前画板 JSON（v2，含布局草稿与失败任务）',
+                  onClick: () => { exportBoardJson() },
+                },
+                '导出',
+              ),
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-forge-btn is-ghost',
+                  title: '把画板里的图片拼成一张 PNG（≤200 张，256px 缩略图）',
+                  onClick: () => { void exportContactSheet() },
+                },
+                '拼版',
               ),
             )
             : createElement(

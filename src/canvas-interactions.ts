@@ -693,33 +693,40 @@ export interface ContextMenuItem {
 export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
   if (target.kind === 'blank') {
     return [
-      { id: 'new-layout', label: '新建布局节点', disabled: true, hint: '布局节点随 C13 落地' },
-      { id: 'paste', label: '粘贴', disabled: true, hint: '跨板粘贴随 C12 落地（服务端 copy-item）' },
+      // C15 activates these three: the layout node entry (C13), the clipboard
+      // paste (C12's Ctrl+V) and the two exports (C15/DD14).
+      { id: 'new-layout', label: '新建布局节点' },
+      { id: 'paste', label: '粘贴', hint: '把 Ctrl+C 复制的节点粘到当前画板' },
       { id: 'select-all', label: '全选' },
       { id: 'fit', label: '适应视图' },
-      { id: 'export-board', label: '导出画板…', disabled: true, hint: '导出随 C15 落地' },
+      { id: 'export-board', label: '导出画板 JSON…', hint: '下载当前画板的 v2 JSON（含布局草稿/失败任务）' },
+      { id: 'export-sheet', label: '导出拼版 PNG…', hint: '把全部图片缩略图拼成一张图（≤200 张）' },
     ]
   }
   const kind = target.nodeKind ?? 'image'
   if (kind === 'task') {
     const running = target.taskState === 'queued' || target.taskState === 'running'
+    // C15 activates the C11 entries: they all have real handlers now.
     return running
       ? [
-        { id: 'task-cancel', label: '取消', disabled: true, hint: '任务节点随 C11 落地' },
+        { id: 'task-cancel', label: '取消', hint: '中断这次生成（任务节点落到已中断，可重试）' },
         { id: 'remove', label: '从画布移除（不删文件）' },
       ]
       : [
-        { id: 'task-retry', label: '重试', disabled: true, hint: '任务节点随 C11 落地' },
-        { id: 'task-edit', label: '编辑参数重发', disabled: true, hint: '任务节点随 C11 落地' },
+        { id: 'task-retry', label: '重试', hint: '原参数快照重发，原位置替换' },
+        { id: 'task-edit', label: '编辑参数重发', hint: '参数回填表单，改完再点生成替换该节点' },
         { id: 'remove', label: '从画布移除（不删文件）' },
       ]
   }
   if (kind === 'layout') {
     return [
-      { id: 'layout-generate', label: '生成', disabled: true, hint: '布局入参契约随 T21/C14' },
-      { id: 'layout-send-form', label: '发送到表单', disabled: true, hint: '布局节点随 C13 落地' },
-      { id: 'layout-export-draft', label: '导出 draft', disabled: true, hint: '布局节点随 C13 落地' },
-      { id: 'layout-export-compiled', label: '导出 compiled', disabled: true, hint: '布局节点随 C13 落地' },
+      // C14 landed the layout generation path; the other three are still UI
+      // conveniences without a wired handler, and the hint says so instead of
+      // naming a task that has already shipped.
+      { id: 'layout-generate', label: '生成', hint: 'compiled 作为 MOSS 正向编码文本（仅 moss-sft）' },
+      { id: 'layout-send-form', label: '发送到表单', disabled: true, hint: '尚未接线：标题栏「生成」已可直接出图' },
+      { id: 'layout-export-draft', label: '导出 draft', disabled: true, hint: '尚未接线：内嵌编辑器底部有导出按钮' },
+      { id: 'layout-export-compiled', label: '导出 compiled', disabled: true, hint: '尚未接线：内嵌编辑器底部有导出按钮' },
       { id: 'remove', label: '删除节点' },
     ]
   }
@@ -727,8 +734,8 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
   if (count >= 2) {
     return [
       { id: 'remove', label: `从画布移除所选 ${String(count)} 张（不删文件）` },
-      { id: 'copy-item', label: '复制所选到画板…', disabled: true, hint: '跨板复制随 C12 落地（服务端 copy-item）' },
-      { id: 'move-item', label: '移动所选到画板…', disabled: true, hint: '跨板移动随 C12 落地（服务端 move-item）' },
+      { id: 'copy-item', label: '复制所选到画板…', disabled: true, hint: '用 Ctrl+C / 拖到目标画板完成（C12 已有入口）' },
+      { id: 'move-item', label: '移动所选到画板…', disabled: true, hint: '拖到目标画板时按住 Alt 即为移动（C12 已有入口）' },
       { id: 'delete-file', label: `删除所选 ${String(count)} 个文件…`, danger: true, hint: '逐个二次确认太吵，这里只确认一次' },
     ]
   }
@@ -736,8 +743,8 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
     { id: 'reference', label: '用作参考' },
     { id: 'branch', label: '按这张图迭代（预填表单）' },
     { id: 'original', label: '查看原图（新窗）' },
-    { id: 'copy-item', label: '复制到画板…', disabled: true, hint: '跨板复制随 C12 落地（服务端 copy-item）' },
-    { id: 'move-item', label: '移动到画板…', disabled: true, hint: '跨板移动随 C12 落地（服务端 move-item）' },
+    { id: 'copy-item', label: '复制到画板…', disabled: true, hint: '选中后 Ctrl+C，到目标画板 Ctrl+V（C12）' },
+    { id: 'move-item', label: '移动到画板…', disabled: true, hint: '从素材页拖到目标画板时按住 Alt（C12）' },
     { id: 'remove', label: '从画布移除（不删文件）' },
     { id: 'delete-file', label: '删除文件…', danger: true, hint: '二次确认后删除磁盘上的 PNG' },
   ]

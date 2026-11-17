@@ -1868,8 +1868,8 @@ test('right-click offers the §6.4 menu for blank canvas and for an image node',
     assert.ok(entries !== undefined, 'right-click opens a menu')
     assert.deepEqual(
       entries.filter((entry) => entry.props.disabled !== true).map((entry) => fakeText(entry)),
-      ['全选', '适应视图'],
-      'only the actions this build can run are clickable on blank canvas',
+      ['新建布局节点', '粘贴', '全选', '适应视图', '导出画板 JSON…', '导出拼版 PNG…'],
+      'C15 activated the blank menu: every entry has a handler now',
     )
 
     // The menu's 全选 runs.
@@ -2842,6 +2842,86 @@ test('C14: a new layout node is written after the debounce and removed with its 
     assert.equal(nodesOfKind(panel, 'layout').length, 0)
     const removals = boardMutations(network).filter((call) => call.action === 'remove-item')
     assert.ok(removals.some((call) => call.item === nodeId), 'the stored layout entry is removed')
+  } finally {
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// C15: incremental layout save (DD12) and the activated §6.4 entries.
+// ---------------------------------------------------------------------------
+
+test('C15: a layout save carries only the dirty nodes, and the camera only when it moved', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    // Drag one node: the debounced flush must send that node alone.
+    nodeElements(panel)[0].props.onPointerDown(pointerEvent({ clientX: 10, clientY: 10 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerMove(pointerEvent({ clientX: 60, clientY: 40 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    await new Promise((resolve) => setTimeout(resolve, 750))
+    await settle(panel)
+
+    // Stale debounce timers from earlier panels may fire into this test's stub
+    // (they carry their own board id); only this board's writes are this test's.
+    const canvasLayouts = () => boardMutations(network)
+      .filter((call) => call.action === 'layout' && call.board === HARNESS_BOARD.id)
+    let layouts = canvasLayouts()
+    assert.equal(layouts.length, 1, 'one debounced write')
+    assert.deepEqual(layouts[0].items.map((entry) => entry.id), ['iaaa1'], 'only the dragged node is sent')
+    assert.equal('camera' in layouts[0], false, 'an unchanged camera is not resent')
+
+    // Pan in hand mode: only the camera changed, so the body is an empty diff + camera.
+    buttonWithText(panel, '平移').props.onClick()
+    await settle(panel)
+    canvasElement(panel).props.onPointerDown(pointerEvent({ clientX: 100, clientY: 100 }))
+    canvasElement(panel).props.onPointerMove(pointerEvent({ clientX: 160, clientY: 130 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    await new Promise((resolve) => setTimeout(resolve, 750))
+    await settle(panel)
+
+    layouts = canvasLayouts()
+    assert.equal(layouts.length, 2)
+    assert.deepEqual(layouts[1].items, [], 'a pan dirties no node')
+    assert.deepEqual(layouts[1].camera, { x: -60, y: -30, zoom: 1 }, 'the moved camera is saved')
+
+    // The next drag carries only its own node and no camera: the previous write
+    // cleared both the dirty set and the sent-camera baseline.
+    nodeElements(panel)[1].props.onPointerDown(pointerEvent({ clientX: 610, clientY: 10 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerMove(pointerEvent({ clientX: 640, clientY: 10 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    await new Promise((resolve) => setTimeout(resolve, 750))
+    await settle(panel)
+    layouts = canvasLayouts()
+    assert.equal(layouts.length, 3)
+    assert.deepEqual(layouts[2].items.map((entry) => entry.id), ['ibbb2'])
+    assert.equal('camera' in layouts[2], false)
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('C15: the blank menu creates a layout node from its now-live entry', async () => {
+  const { network, panel } = await mountWorkbench()
+  try {
+    assert.equal(nodesOfKind(panel, 'layout').length, 0)
+    canvasElement(panel).props.onContextMenu(pointerEvent({ clientX: 40, clientY: 40 }))
+    await settle(panel)
+    const create = menuEntries(panel).find((entry) => fakeText(entry) === '新建布局节点')
+    assert.ok(create !== undefined, 'the blank menu must offer the layout entry')
+    assert.notEqual(create.props.disabled, true, 'C15 activated it')
+    create.props.onClick()
+    await settle(panel)
+    assert.equal(nodesOfKind(panel, 'layout').length, 1)
+    assert.equal(menuEntries(panel), undefined, 'running a menu item closes the menu')
   } finally {
     network.restore()
   }

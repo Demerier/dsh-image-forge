@@ -436,28 +436,41 @@ test('contextMenuItems: a multi-selection gets a batch menu, not single-image ac
   )
 })
 
-test('contextMenuItems: blank canvas offers select-all and fit now, the rest by task', () => {
+test('contextMenuItems: blank canvas offers every §6.4 action now that its owners landed', () => {
   const items = contextMenuItems({ kind: 'blank' })
-  assert.deepEqual(items.map((item) => item.id), ['new-layout', 'paste', 'select-all', 'fit', 'export-board'])
-  const enabled = items.filter((item) => item.disabled !== true).map((item) => item.id)
-  assert.deepEqual(enabled, ['select-all', 'fit'], 'only what this build can do is clickable')
-  for (const item of items.filter((entry) => entry.disabled === true)) {
-    assert.ok(item.hint.length > 0, `${item.id} must say why it is disabled`)
-  }
-  // §6.4 names the layout menu's entries; they exist even before C13 renders one.
   assert.deepEqual(
-    contextMenuItems({ kind: 'node', nodeKind: 'layout' }).map((item) => item.id),
+    items.map((item) => item.id),
+    ['new-layout', 'paste', 'select-all', 'fit', 'export-board', 'export-sheet'],
+  )
+  // C15 activates the blank entries: C13's layout node, C12's paste and the two
+  // C15 exports. Nothing in this menu is a placeholder any more.
+  const enabled = items.filter((item) => item.disabled !== true).map((item) => item.id)
+  assert.deepEqual(enabled, items.map((item) => item.id))
+  for (const item of items) assert.ok(item.label.length > 0, `${item.id} needs a label`)
+
+  // §6.4's layout menu: generation is live (C14); the three conveniences say
+  // why they are not instead of naming a task that already shipped.
+  const layout = contextMenuItems({ kind: 'node', nodeKind: 'layout' })
+  assert.deepEqual(
+    layout.map((item) => item.id),
     ['layout-generate', 'layout-send-form', 'layout-export-draft', 'layout-export-compiled', 'remove'],
   )
-  // A running task can be cancelled; a failed one retried (§6.4).
-  assert.deepEqual(
-    contextMenuItems({ kind: 'node', nodeKind: 'task', taskState: 'running' }).map((item) => item.id),
-    ['task-cancel', 'remove'],
-  )
-  assert.deepEqual(
-    contextMenuItems({ kind: 'node', nodeKind: 'task', taskState: 'failed' }).map((item) => item.id),
-    ['task-retry', 'task-edit', 'remove'],
-  )
+  assert.equal(layout[0].disabled, undefined, 'layout generation is clickable')
+  for (const item of layout.filter((entry) => entry.disabled === true)) {
+    assert.ok(item.hint.length > 0, `${item.id} must say why it is disabled`)
+  }
+
+  // A running task can be cancelled; a failed one retried — both are C11
+  // handlers, so both are clickable (C15 activation).
+  for (const [state, ids] of [
+    ['running', ['task-cancel', 'remove']],
+    ['failed', ['task-retry', 'task-edit', 'remove']],
+  ]) {
+    const task = contextMenuItems({ kind: 'node', nodeKind: 'task', taskState: state })
+    assert.deepEqual(task.map((item) => item.id), ids)
+    for (const item of task) assert.notEqual(item.disabled, true, state + ' task entries are live')
+  }
+
   // Every menu returns a fresh array, so a caller cannot corrupt the next one.
   assert.notEqual(contextMenuItems({ kind: 'blank' }), contextMenuItems({ kind: 'blank' }))
 })
