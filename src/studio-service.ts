@@ -469,7 +469,17 @@ export async function runStudioGeneration(
       seed,
       mode,
       backend: 'studio',
-      parents: [],
+      // Lineage travels as *paths*, never as ids (`boards.resolveParents`): the
+      // canvas knows its references only as files this host already wrote, and
+      // the item id is decided inside the board write lock, where the board is
+      // already loaded. Setting `parents` here as well would short-circuit that
+      // resolution — an explicit id list wins over `parentPaths` — which is how
+      // this edge used to be lost on every reload. References without a path
+      // (base64 uploads) are not board items and so contribute no edge, exactly
+      // like the conversation tool path.
+      parentPaths: (input.references ?? []).flatMap((reference) => (
+        typeof reference.path === 'string' && reference.path.length > 0 ? [reference.path] : []
+      )),
       sessionId: null,
     })), { prompt })
     board = recorded.board
