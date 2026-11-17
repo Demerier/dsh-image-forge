@@ -32,17 +32,18 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   comfyOptionsOf as buildComfyOptions,
   discoverComfyUi,
+  effectiveProfile,
   generateViaComfyUi,
   generateViaComfyUiEdit,
   generateViaComfyUiTurbo,
   generateViaComfyUiTurboEdit,
   loadComfyModels,
   parseComfyPorts,
-  turboUnetOf,
   TURBO_STEPS,
   type ComfyModels,
   type ComfyTarget,
 } from './comfyui.ts'
+import { presetSteps, resolveProfile, type ComfyModelId, type ModelProfile, type MossSamplingPreset } from './model-profiles.ts'
 import type { GeneratedImage, ReferenceImagePayload } from './images.ts'
 import { activeBoardId, listBoards, makeItemId, recordItems } from './boards.ts'
 import { writeImages } from './output.ts'
@@ -73,8 +74,22 @@ export interface StudioSettings {
   readonly defaultSteps: number
   /** Per-backend override, when configured. */
   readonly comfyuiSteps: number | undefined
-  /** Which checkpoint family to ask for; a turbo unet must be installed to matter. */
-  readonly comfyModel: 'base' | 'turbo'
+  /**
+   * Which model profile to ask for, as the **canonical** id.
+   *
+   * `resolveConfig` normalises a legacy `base` / `turbo` into `qwen21-base` /
+   * `qwen21-turbo` before anything here sees it, so this field is a profile id and
+   * never one of the old two spellings. Nothing below may compare it against a
+   * literal (`'turbo'` is not a value this field ever holds): the decision is
+   * `resolveProfile(...)`/`effectiveProfile(...)` and then `.variant`.
+   */
+  readonly comfyModel: ComfyModelId
+  /**
+   * Sampling register for a family that publishes more than one (MOSS-Image).
+   *
+   * Ignored by both Qwen profiles; absent means the family's own default.
+   */
+  readonly mossSampling?: MossSamplingPreset
   /** Turbo step override; `undefined` means the distilled default (8). */
   readonly turboSteps: number | undefined
 }
@@ -103,6 +118,7 @@ export function studioSettingsOf(config: Config): StudioSettings {
     defaultSteps: config.defaultSteps,
     comfyuiSteps: config.comfyuiSteps,
     comfyModel: config.comfyModel,
+    mossSampling: config.mossSampling,
     turboSteps: config.turboSteps,
   }
 }
@@ -113,13 +129,39 @@ export function studioSettingsOf(config: Config): StudioSettings {
  * The family decides which fallback applies: turbo never borrows the base
  * checkpoint's 25 (handing 25 steps to a checkpoint distilled for 8 makes the
  * picture worse), so an explicit `turboSteps` — else the distilled 8 — is what
- * an omitted step count means when `comfyModel` is `turbo`. The clamp is shared.
+ * an omitted step count means for a turbo profile. The clamp is shared.
+ *
+ * The family is read off the **profile**, via its `variant`, exactly like
+ * `tools.ts` (`resolveTurboSteps` vs `resolveSteps`) does. Comparing
+ * `settings.comfyModel` against the literal `'turbo'` used to be the only test
+ * here and it could never be true: `resolveConfig` stores the canonical
+ * `qwen21-turbo`, so the turbo branch was dead and `turboSteps` never applied.
+ *
+ * A family that publishes more than one sampling register (MOSS-Image) supplies
+ * its own working point when a non-default register is selected — that is what
+ * {@link presetSteps} answers, and it is `undefined` for the default register and
+ * for both Qwen profiles, so the shared `comfyuiSteps` → `defaultSteps` chain is
+ * untouched everywhere else. An explicit `comfyuiSteps` still wins over the
+ * register, in either one.
+ *
+ * @param settings - resolved Studio settings.
+ * @param requested - the request's own step count, when it supplied one.
+ * @param profile - the profile that will **actually** run. Callers that have
+ *   already loaded `/object_info` pass `effectiveProfile(...)` so the step
+ *   fallback matches the graph that runs (a turbo request with no turbo weights
+ *   runs the base graph at the base default, not at 8). Omitted, it is the
+ *   requested profile — the right answer for a snapshot taken before any probe.
+ * @returns the step count to send, clamped to `1..200`.
  */
-export function resolveStudioSteps(settings: StudioSettings, requested: number | undefined): number {
-  const turbo = settings.comfyModel === 'turbo'
+export function resolveStudioSteps(
+  settings: StudioSettings,
+  requested: number | undefined,
+  profile: ModelProfile = resolveProfile(settings.comfyModel),
+): number {
+  const turbo = profile.variant === 'turbo'
   const fallback = turbo
     ? (settings.turboSteps ?? TURBO_STEPS)
-    : (settings.comfyuiSteps ?? settings.defaultSteps)
+    : (settings.comfyuiSteps ?? presetSteps(profile, settings.mossSampling) ?? settings.defaultSteps)
   if (requested === undefined) return fallback
   if (!Number.isFinite(requested)) return fallback
   // 1 is legal (a single-step draft); 200 is well past anything Qwen-Image
@@ -214,7 +256,16 @@ export async function describeStudio(
     ...(endpoint === undefined ? {} : { endpoint }),
     ...(models === undefined ? {} : { models: { unet: models.unet, clip: models.clip, vae: models.vae } }),
     ...(reason === undefined ? {} : { reason }),
-    defaultSteps: resolveStudioSteps(settings, undefined),
+    // The step count the panel should show is the one a run would really use, so
+    // it is resolved against the *effective* profile once the probe has told us
+    // which weights exist (turbo requested but only base installed → the base
+    // default). Before the probe there is nothing to check against, so the
+    // requested profile answers.
+    defaultSteps: resolveStudioSteps(
+      settings,
+      undefined,
+      models === undefined ? resolveProfile(settings.comfyModel) : effectiveProfile(settings.comfyModel, models),
+    ),
     outputDir: settings.outputDir,
     sizes,
     optimizeAvailable,
@@ -305,7 +356,10 @@ export async function runStudioGeneration(
   }
   const size = studioSize(input.ratio)
   if (size === undefined) throw new Error(`不支持的画幅比例：${String(input.ratio)}`)
-  const steps = resolveStudioSteps(settings, input.steps)
+  // Resolved here so a bogus request never costs a ComfyUI round trip, then
+  // re-resolved below against the profile that really runs — that is the value
+  // that goes on the wire and into the response.
+  let steps = resolveStudioSteps(settings, input.steps)
   const count = input.count === undefined ? 1 : Math.trunc(input.count)
   if (!Number.isFinite(count) || count < 1 || count > STUDIO_MAX_COUNT) {
     throw new Error(`出图张数只能是 1 到 ${String(STUDIO_MAX_COUNT)}`)
@@ -321,13 +375,35 @@ export async function runStudioGeneration(
   let target: ComfyTarget
   let models: ComfyModels
   let images: GeneratedImage[]
+  // "You asked for turbo and got base" — reported, never silent. Resolved inside
+  // the try (it needs `/object_info`) and defaulted here so the response shape
+  // does not depend on the happy path.
+  let turboFallback = false
   try {
     target = await discoverComfyUi(options, signal)
     models = await loadComfyModels(target, options, signal)
-    // `turbo` is a preference: it needs a turbo unet installed, and with only
-    // the base weights present the run falls back rather than failing — the
-    // same rule the Agent tools apply.
-    const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
+    // Which graph runs is a profile question, and `effectiveProfile` is the rule
+    // the Agent tools already apply (`tools.ts`, both call sites): a turbo request
+    // is a *preference* that needs a turbo checkpoint, so with only the base
+    // weights installed the run degrades to the base graph rather than failing —
+    // a config typo must not mean "no images at all". Reading the profile's
+    // `variant` here also replaces the old `settings.comfyModel === 'turbo'`,
+    // which could never be true after `resolveConfig` normalises the value.
+    //
+    // The step count follows the graph that actually runs, which is why it is
+    // re-resolved from the effective profile: handing the base checkpoint the
+    // turbofied 8 steps would be the mirror image of the bug this fixes.
+    //
+    // The degrade is reported the same way the Agent tools report it
+    // (`comfyui.turbo_fallback`): requested turbo, and the profile that runs is
+    // not turbo. `requestedProfile` is the ask; `profile` is what the installed
+    // weights allow. Non-turbo requests can never be "fallbacks", so a moss or
+    // base run reports false.
+    const requestedProfile = resolveProfile(settings.comfyModel)
+    const profile = effectiveProfile(settings.comfyModel, models)
+    const turbo = profile.variant === 'turbo'
+    turboFallback = requestedProfile.variant === 'turbo' && !turbo
+    steps = resolveStudioSteps(settings, input.steps, profile)
     // Built inline at each call site, mirroring `tools.ts`: the resolved `steps`
     // goes on the wire as a literal field, so no dispatch site can forward a
     // request whose step count was never resolved. `test/settings.test.mjs`
@@ -425,6 +501,7 @@ export async function runStudioGeneration(
     elapsedMs: Date.now() - startedAt,
     endpoint: target.endpoint,
     mode,
+    turboFallback,
     ...(board === undefined ? {} : { board }),
     ...(boardNote === undefined ? {} : { boardNote }),
   }

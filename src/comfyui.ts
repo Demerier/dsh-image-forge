@@ -11,12 +11,31 @@
  *    three loaders' option lists are read from `/object_info` and matched by
  *    name; a name this module does not find is reported as a missing file with
  *    the directory it belongs in. Nothing is hard-coded as a *requirement* —
- *    the names in {@link MODEL_KINDS} are only examples used in error text.
+ *    the example names in the profile table are only used in error text.
  * 3. **Upstream errors are quoted, not swallowed.** `/prompt` answers with
  *    `node_errors` and `/history` carries an execution traceback; both reach the
  *    caller as readable text instead of a bare 400.
  *
- * The graph is the official Qwen-Image 2.1 text-to-image template that ships
+ * ## Which model family runs
+ *
+ * The weight matching, the `CLIPLoader.type`, the latent node, the sampler, the
+ * default step count, the negated prompt and the graphs themselves are **not**
+ * decided here: they belong to a {@link ModelProfile} in `model-profiles.ts`, and
+ * this module is the one code path that executes any of them. `comfyModel` picks
+ * the profile by id (`qwen21-base`, `qwen21-turbo`, `moss-sft`) — the pre-profile
+ * values `base` / `turbo` still resolve, see `resolveProfile`.
+ *
+ * Two rules keep that honest:
+ *
+ * - **The profile never decides the canvas.** `ratio.ts` does, at 32 alignment,
+ *   which every profile accepts (32 is a multiple of MOSS's 16) — so the pixel
+ *   policy cannot fork between families.
+ * - **The graph follows the weights, not only the config.** A turbo request on a
+ *   base-only install degrades to the base graph (and says so); see
+ *   {@link effectiveProfile}. Otherwise a config value could pair the turbo
+ *   sigma schedule with a checkpoint that was never distilled for it.
+ *
+ * The Qwen graph is the official Qwen-Image 2.1 text-to-image template that ships
  * with ComfyUI (`comfyui_workflow_templates_json/templates/
  * image_qwen_image_2_1_t2i.json`), reduced to the nodes needed without the
  * optional prompt-enhancer branch: `UNETLoader` → `KSampler.model`,
@@ -25,20 +44,74 @@
  * `VAEDecode` → `SaveImage`. The template's `QwenImage21Cache`,
  * `ResolutionSelector` and prompt-enhancer nodes are dropped: the first two only
  * trade speed for VRAM (we size the canvas ourselves in `ratio.ts`), and the
- * enhancer needs weights this plugin does not require.
+ * enhancer needs weights this plugin does not require. The MOSS graph is the
+ * same kind of reduction of ComfyUI's `image_moss_image_t2i.json`, documented in
+ * `model-profiles.ts`.
  *
- * The edit (image-to-image) graph is the same skeleton plus the reference slots,
- * taken from the official `image_qwen_image_2_1_image_edit.json` template: its
- * `TextEncodeQwenImage21` node takes a `vae`, an autogrow `images.image_N` input
- * per reference (up to ten) and a `resolution` pixel budget, and the reference
- * pixels enter ComfyUI through `POST /upload/image` as `LoadImage` inputs. The
- * template's `ComfySwitchNode` (its "custom size" switch) has no counterpart
- * here because the plugin always supplies an explicit canvas, exactly as the
- * text-to-image path does; the template builds its default canvas from the first
- * reference at a 32-aligned ~1.5 MP budget, which is what `ratio_follow` resolves to.
+ * The Qwen edit (image-to-image) graph is the same skeleton plus the reference
+ * slots, taken from the official `image_qwen_image_2_1_image_edit.json`
+ * template: its `TextEncodeQwenImage21` node takes a `vae`, an autogrow
+ * `images.image_N` input per reference (up to ten) and a `resolution` pixel
+ * budget, and the reference pixels enter ComfyUI through `POST /upload/image` as
+ * `LoadImage` inputs. The template's `ComfySwitchNode` (its "custom size" switch)
+ * has no counterpart here because the plugin always supplies an explicit canvas,
+ * exactly as the text-to-image path does; the template builds its default canvas
+ * from the first reference at a 32-aligned ~1.5 MP budget, which is what
+ * `ratio_follow` resolves to. MOSS has **no** edit graph yet — its profile
+ * carries a `todo` naming the nodes the follow-up needs.
  */
 import { createHash } from 'node:crypto'
 import { sniffImageMime, type GeneratedImage, type GenerateRequest, type ReferenceImagePayload } from './images.ts'
+import {
+  MODEL_PROFILES,
+  assertLatentAligned,
+  resolveProfile,
+  resolveSampling,
+  type ApiGraph,
+  type ComfyModelChoice,
+  type ModelProfile,
+  type WeightRule,
+} from './model-profiles.ts'
+
+// The graphs, the sigma schedule and the reference-slot builders live with the
+// profiles now. They are re-exported from here because this module is the
+// adapter's published face (and the `testlib/comfyui.js` entry the test suite
+// reads them from), so moving a constant must not move its import path.
+export {
+  EDIT_IMAGE_NODE_BASE,
+  EDIT_MAX_REFERENCES,
+  MOSS_IMAGE_WORKFLOW,
+  MOSS_LATENT_MULTIPLE,
+  MOSS_NEGATIVE_PROMPT,
+  QWEN_IMAGE_EDIT_WORKFLOW,
+  QWEN_IMAGE_TURBO_EDIT_WORKFLOW,
+  QWEN_IMAGE_TURBO_WORKFLOW,
+  QWEN_IMAGE_WORKFLOW,
+  TURBO_EDIT_IMAGE_NODE_BASE,
+  TURBO_SIGMAS,
+  TURBO_STEPS,
+  editTurboWorkflow,
+  editWorkflow,
+} from './model-profiles.ts'
+export {
+  COMFY_MODEL_IDS,
+  DEFAULT_COMFY_MODEL,
+  DEFAULT_MOSS_SAMPLING,
+  LEGACY_COMFY_MODEL_IDS,
+  MODEL_PROFILES,
+  MOSS_SAMPLING_PRESETS,
+  assertLatentAligned,
+  isComfyModelId,
+  presetSteps,
+  resolveProfile,
+  resolveSampling,
+  type ComfyModelChoice,
+  type ComfyModelId,
+  type ModelProfile,
+  type MossSamplingPreset,
+  type SamplingPreset,
+  type WeightRule,
+} from './model-profiles.ts'
 
 /** Ports probed when `comfyEndpoint` is empty, in order. */
 export const DEFAULT_COMFY_PORTS = [8000, 8188, 8189, 8190, 8191, 8192] as const
@@ -52,17 +125,23 @@ export interface ComfyOptions {
   /** Where this machine keeps ComfyUI's models; used in error text only. */
   readonly modelsDir: string
   /**
-   * Which checkpoint family the caller asked for.
+   * Which model profile the caller asked for.
    *
-   * Load-bearing at *selection* time, not just at graph time: when both the base
-   * and the turbo DiT are installed — which is the documented setup — the plain
-   * name scoring ties and keeps the server's order, i.e. always base, and the
-   * turbo graph could never run even with `comfyModel: 'turbo'` configured.
-   * `'turbo'` therefore promotes a `/turbo/i` unet above the rest; if no such
-   * file exists the pick falls back to base, which is what the caller reports as
-   * "turbo skipped".
+   * Load-bearing at *selection* time, not just at graph time: when both a base
+   * and a distilled checkpoint are installed, the plain name scoring ties and
+   * keeps the server's order, so `qwen21-turbo` promotes its `/turbo/i` unet and
+   * `qwen21-base` demotes it; `moss-sft` matches an entirely different set of
+   * file names. Legacy `base` / `turbo` still resolve (see `resolveProfile`).
    */
-  readonly comfyModel?: 'base' | 'turbo'
+  readonly comfyModel?: ComfyModelChoice
+  /**
+   * Which sampling register a family that publishes more than one should run.
+   *
+   * Only the profiles that declare `samplingPresets` read it (MOSS-Image today):
+   * both Qwen profiles ignore it, so their graphs cannot move. Absent means the
+   * family default, which is the verified one.
+   */
+  readonly mossSampling?: MossSamplingPreset
   /** Budget for one whole generation, from `/prompt` to the last image byte. */
   readonly timeoutMs: number
   /** Per-port reachability budget during discovery. */
@@ -79,8 +158,10 @@ export interface ComfySettingsFields {
   readonly comfyPorts: readonly number[]
   /** `comfyModelsDir` as resolved. */
   readonly comfyModelsDir: string
-  /** Checkpoint family the caller configured; `'turbo'` promotes a turbo DiT. */
-  readonly comfyModel?: 'base' | 'turbo'
+  /** Model profile the caller configured; legacy `base`/`turbo` still resolve. */
+  readonly comfyModel?: ComfyModelChoice
+  /** Sampling register for a family that publishes more than one (MOSS only). */
+  readonly mossSampling?: MossSamplingPreset
   /** The configured per-call budget. */
   readonly timeoutMs: number
 }
@@ -122,6 +203,7 @@ export function comfyOptionsOf(settings: ComfySettingsFields, timeoutMs = settin
     ports: settings.comfyPorts,
     modelsDir: settings.comfyModelsDir,
     comfyModel: settings.comfyModel,
+    mossSampling: settings.mossSampling,
     timeoutMs,
   }
 }
@@ -146,7 +228,7 @@ export interface ComfyTarget {
   readonly probed: readonly ComfyProbeAttempt[]
 }
 
-/** The three weight files one Qwen-Image generation needs, as the server named them. */
+/** The three weight files one generation needs, as the server named them. */
 export interface ComfyModels {
   /** `UNETLoader.unet_name` — the DiT. */
   readonly unet: string
@@ -158,36 +240,23 @@ export interface ComfyModels {
   readonly clipType: string
 }
 
-/** Loader field, folder, and (error-text only) example file for one weight. */
-const MODEL_KINDS = {
-  unet: {
-    loader: 'UNETLoader',
-    field: 'unet_name',
-    folder: 'unet',
-    what: 'Qwen-Image 2.1 的 DiT（去噪主干）',
-    example: 'qwen_image_2.1_int8_convrot.safetensors',
-    bonus: [/image/i, /2[._-]?1/, /int8/i],
-  },
-  clip: {
-    loader: 'CLIPLoader',
-    field: 'clip_name',
-    folder: 'clip',
-    what: 'Qwen-Image 2.1 的文本编码器（Qwen3-VL 8B）',
-    example: 'qwen3vl_8b_int8_convrot.safetensors',
-    bonus: [/vl/i, /8b/i, /int8/i],
-  },
-  vae: {
-    loader: 'VAELoader',
-    field: 'vae_name',
-    folder: 'vae',
-    what: 'Qwen-Image 2.1 的 VAE',
-    example: 'qwen_image_2.1_vae_bf16.safetensors',
-    bonus: [/vae/i, /2[._-]?1/, /bf16/i],
-  },
-} as const
+/**
+ * The loader inputs one profile's weights are read from, in error-text order.
+ *
+ * Derived from the profile rather than restated here: the folder a file belongs
+ * in, the wording that names it and the example it ships under are all profile
+ * data, so a new family cannot inherit the old family's error text.
+ */
+function weightKindsOf(profile: ModelProfile): { kind: 'unet' | 'clip' | 'vae'; rule: WeightRule }[] {
+  return [
+    { kind: 'unet', rule: profile.weights.unet },
+    { kind: 'clip', rule: profile.weights.clip },
+    { kind: 'vae', rule: profile.weights.vae },
+  ]
+}
 
-/** One weight kind key. */
-type ModelKind = keyof typeof MODEL_KINDS
+/** One weight slot of a profile. */
+type ModelKind = 'unet' | 'clip' | 'vae'
 
 /**
  * True when a URL points at this machine's loopback interface.
@@ -448,21 +517,28 @@ function loaderField(payload: unknown, loader: string, field: string): string[] 
 }
 
 /**
- * Pick the file whose name best matches an ordered pattern list.
+ * Pick the file whose name best matches a profile's weight rule.
  *
  * A candidate must match `required`; each additional pattern it matches adds
- * weight (earlier patterns weigh more). Ties keep the server's own order, so the
- * choice is deterministic for a given `/object_info`. Matching the whole name
- * rather than the basename means a file in a subfolder still matches.
- * This is what keeps the PE (prompt-enhancer) text encoders from being picked as
- * the text encoder: they carry neither `vl` nor `8b`.
+ * weight (earlier patterns weigh more). A candidate matching an `avoid` pattern
+ * is pushed below every non-matching one, which is how `qwen21-base` refuses to
+ * run a turbo checkpoint that happens to be listed first. Ties keep the server's
+ * own order, so the choice is deterministic for a given `/object_info`. Matching
+ * the whole name rather than the basename means a file in a subfolder still
+ * matches. This is what keeps the PE (prompt-enhancer) text encoders from being
+ * picked as the Qwen text encoder: they carry neither `vl` nor `8b`.
+ *
+ * @param options - the file names `/object_info` reported for that loader field.
+ * @param rule - the profile's matcher for that weight.
+ * @returns the chosen name, or undefined when nothing matched.
  */
-function pickModelFile(options: readonly string[], required: RegExp, bonuses: readonly RegExp[]): string | undefined {
+function pickModelFile(options: readonly string[], rule: WeightRule): string | undefined {
   let best: { name: string; score: number } | undefined
   for (const name of options) {
-    if (!required.test(name)) continue
+    if (!rule.required.test(name)) continue
     let score = 0
-    for (const [index, pattern] of bonuses.entries()) if (pattern.test(name)) score += bonuses.length - index
+    for (const [index, pattern] of rule.bonus.entries()) if (pattern.test(name)) score += rule.bonus.length - index
+    for (const pattern of rule.avoid ?? []) if (pattern.test(name)) score -= 1000
     if (best === undefined || score > best.score) best = { name, score }
   }
   return best?.name
@@ -502,62 +578,86 @@ function folderHint(modelsDir: string, folder: string): string {
 }
 
 /**
- * Read the three Qwen-Image weight file names off the running server.
+ * Read the weight file names one profile needs off the running server.
+ *
+ * The profile — not this function — decides which file names count, which
+ * `CLIPLoader.type` value the graph needs and what to call each weight in error
+ * text. That is what makes a second family possible without a second selector:
+ * MOSS's DiT is `moss_image_sft_*` and its VAE is `flux2-vae_small`, neither of
+ * which the old hard `/qwen/i` gate could ever accept.
  *
  * @param target - the endpoint that answered.
- * @param options - used for the model-directory hint and the timeout.
+ * @param options - used for the profile id, the model-directory hint and the timeout.
  * @param signal - caller cancellation.
  * @returns the names ComfyUI itself listed, plus the resolved `CLIPLoader.type`.
- * @throws When a loader, its option list, a Qwen-named file, or a usable
- *   `CLIPLoader.type` is missing. The message names the loader, the field, the
- *   file it wants, and the directory to put it in — this is checked before
- *   `/prompt`, so a missing weight never becomes a pile of node errors.
+ * @throws When a loader, its option list, a matching file, or a usable
+ *   `CLIPLoader.type` is missing. The message names the profile, every file it
+ *   needs, the field and folder each one goes in, and the candidates the server
+ *   currently reports — this is checked before `/prompt`, so a missing weight
+ *   never becomes a pile of node errors.
  */
 export async function loadComfyModels(target: ComfyTarget, options: ComfyOptions, signal?: AbortSignal): Promise<ComfyModels> {
   const timeout = options.portProbeTimeoutMs ?? 800
-  const kinds = Object.keys(MODEL_KINDS) as ModelKind[]
+  const profile = resolveProfile(options.comfyModel)
+  const kinds = weightKindsOf(profile)
   const loaded = new Map<ModelKind, ComfyResponse>()
   const clipInfo = requestJson(`${target.endpoint}/object_info/CLIPLoader`, { method: 'GET' }, timeout, signal)
-  for (const kind of kinds.filter((kind) => kind !== 'clip')) {
-    const node = MODEL_KINDS[kind].loader
-    loaded.set(kind, await requestJson(`${target.endpoint}/object_info/${node}`, { method: 'GET' }, timeout, signal))
+  for (const { kind, rule } of kinds.filter(({ kind }) => kind !== 'clip')) {
+    loaded.set(kind, await requestJson(`${target.endpoint}/object_info/${rule.loader}`, { method: 'GET' }, timeout, signal))
   }
   loaded.set('clip', await clipInfo)
 
   const chosen = new Map<ModelKind, string>()
-  for (const kind of kinds) {
-    const spec = MODEL_KINDS[kind]
+  /** One line per weight that could not be resolved, all reported together. */
+  const missing: string[] = []
+  for (const { kind, rule } of kinds) {
     const response = loaded.get(kind)
-    const optionsList = response === undefined ? undefined : loaderField(response.payload, spec.loader, spec.field)
+    const optionsList = response === undefined ? undefined : loaderField(response.payload, rule.loader, rule.field)
     if (optionsList === undefined) {
       throw new Error(
-        `comfyui backend: 读不到 ${spec.loader}.${spec.field} — 这个 ComfyUI 没有该加载器节点，` +
-          `或 /object_info 的返回不是预期形状。缺的是「${spec.what}」，` +
-          `请在 ComfyUI 里确认 ${spec.loader} 节点可用后重试。`,
+        `comfyui backend: 读不到 ${rule.loader}.${rule.field} — 这个 ComfyUI 没有该加载器节点，` +
+          `或 /object_info 的返回不是预期形状。缺的是「${rule.what}」，` +
+          `请在 ComfyUI 里确认 ${rule.loader} 节点可用后重试。`,
       )
     }
-    const bonuses = kind === 'unet' && options.comfyModel === 'turbo' ? [/turbo/i, ...spec.bonus] : spec.bonus
-    const name = pickModelFile(optionsList, /qwen/i, bonuses)
+    const name = pickModelFile(optionsList, rule)
     if (name === undefined) {
       const seen = optionsList.length === 0 ? '（空）' : optionsList.join(', ')
-      throw new Error(
-        `comfyui backend: 缺模型文件 — ${spec.loader}.${spec.field} 里没有任何带 "qwen" 的文件。\n` +
-          `  需要：${spec.what}\n` +
-          `  例如：${spec.example}\n` +
-          `  放到：${folderHint(options.modelsDir, spec.folder)}\n` +
-          `  ${spec.loader} 当前能看到 ${optionsList.length} 个文件：${seen}\n` +
-          '  （文件名里带 qwen 的才会被识别；本插件不下载、不转换权重。）',
+      missing.push(
+        `  • ${rule.loader}.${rule.field} — 没有匹配 ${rule.required} 的文件\n` +
+          `    需要：${rule.what}\n` +
+          `    例如：${rule.example}\n` +
+          `    放到：${folderHint(options.modelsDir, rule.folder)}\n` +
+          `    当前能看到 ${optionsList.length} 个：${seen}`,
       )
+      continue
     }
     chosen.set(kind, name)
   }
+  if (missing.length > 0) {
+    throw new Error(
+      `comfyui backend: 缺模型文件 — 这个 ComfyUI 里选不出 ${profile.label}（comfyModel=${profile.id}）要的权重。\n` +
+        `这个 profile 需要 ${kinds.length} 个文件：\n` +
+        kinds
+          .map(({ rule }) => `  - ${rule.loader}.${rule.field}：${rule.what}（文件名需匹配 ${rule.required}，例如 ${rule.example}）`)
+          .join('\n') +
+        `\n缺的这几项：\n${missing.join('\n')}\n` +
+        '  （本插件不下载、不转换权重；换目标模型改 comfyModel，或把上面的文件放进对应的 models 子目录。）',
+    )
+  }
 
-  const clipTypes = loaderField(loaded.get('clip')?.payload, MODEL_KINDS.clip.loader, 'type')
-  const clipType = clipTypes?.includes('qwen_image') === true ? 'qwen_image' : clipTypes?.find((type) => /qwen/i.test(type))
+  const clipTypes = loaderField(loaded.get('clip')?.payload, profile.weights.clip.loader, 'type')
+  const preferred = profile.clipType.prefer.find((type) => clipTypes?.includes(type) === true)
+  const clipType = preferred ?? (profile.clipType.fallback === undefined
+    ? undefined
+    : clipTypes?.find((type) => profile.clipType.fallback!.test(type)))
   if (clipType === undefined) {
     throw new Error(
-      `comfyui backend: CLIPLoader.type 里没有 qwen 相关选项，无法确定文本编码器类型（${MODEL_KINDS.clip.what}）。` +
-        `当前可选：${clipTypes === undefined ? '（读不到）' : clipTypes.join(', ')}`,
+      `comfyui backend: CLIPLoader.type 里没有 ${profile.label} 要的选项（${profile.clipType.prefer.join(' / ')}），` +
+        `无法确定文本编码器类型（${profile.weights.clip.what}）。\n` +
+        `  这个 profile 的 CLIPLoader 需要 type="${profile.clipType.prefer[0]}"，` +
+        '老版本 ComfyUI 可能还没有这个选项（升级 ComfyUI 即可）。\n' +
+        `  当前可选：${clipTypes === undefined ? '（读不到）' : clipTypes.join(', ')}`,
     )
   }
 
@@ -567,40 +667,6 @@ export async function loadComfyModels(target: ComfyTarget, options: ComfyOptions
     vae: chosen.get('vae') as string,
     clipType,
   }
-}
-
-/**
- * The Qwen-Image 2.1 text-to-image graph, in ComfyUI's API format.
- *
- * `{{name}}` placeholders are filled by {@link renderWorkflow}; the three model
- * file names are placeholders on purpose — they come from `/object_info`.
- */
-export const QWEN_IMAGE_WORKFLOW: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
-  '1': { class_type: 'UNETLoader', inputs: { unet_name: '{{unet_name}}', weight_dtype: '{{weight_dtype}}' } },
-  '2': { class_type: 'CLIPLoader', inputs: { clip_name: '{{clip_name}}', type: '{{clip_type}}' } },
-  '3': { class_type: 'VAELoader', inputs: { vae_name: '{{vae_name}}' } },
-  '4': {
-    class_type: 'TextEncodeQwenImage21',
-    inputs: { clip: ['2', 0], prompt: '{{prompt}}', negative_prompt: '{{negative_prompt}}', resolution: 1024 },
-  },
-  '5': { class_type: 'EmptyLatentImage', inputs: { width: '{{width}}', height: '{{height}}', batch_size: '{{batch_size}}' } },
-  '6': {
-    class_type: 'KSampler',
-    inputs: {
-      model: ['1', 0],
-      positive: ['4', 0],
-      negative: ['4', 1],
-      latent_image: ['5', 0],
-      seed: '{{seed}}',
-      steps: '{{steps}}',
-      cfg: '{{cfg}}',
-      sampler_name: '{{sampler_name}}',
-      scheduler: '{{scheduler}}',
-      denoise: 1,
-    },
-  },
-  '7': { class_type: 'VAEDecode', inputs: { samples: ['6', 0], vae: ['3', 0] } },
-  '8': { class_type: 'SaveImage', inputs: { images: ['7', 0], filename_prefix: '{{filename_prefix}}' } },
 }
 
 /** A whole-string placeholder. */
@@ -639,201 +705,6 @@ export function renderWorkflow(template: unknown, values: Record<string, unknown
     return out
   }
   return template
-}
-
-/** How many reference images the edit graph wires up (the contract's `<image1>`…`<image10>`). */
-export const EDIT_MAX_REFERENCES = 10
-
-/** First node id used for the edit graph's `LoadImage` nodes (ids 1–8 are the graph itself). */
-export const EDIT_IMAGE_NODE_BASE = 11
-/**
- * The edit graph, which is the text-to-image graph with a different encode node:
- * `TextEncodeQwenImage21` additionally receives the VAE (it VAE-encodes each
- * reference into the condition) and a `resolution` pixel budget. The reference
- * slots themselves are added per call by {@link editWorkflow}.
- */
-export const QWEN_IMAGE_EDIT_WORKFLOW: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
-  ...QWEN_IMAGE_WORKFLOW,
-  '4': {
-    class_type: 'TextEncodeQwenImage21',
-    inputs: {
-      clip: ['2', 0],
-      vae: ['3', 0],
-      prompt: '{{prompt}}',
-      negative_prompt: '{{negative_prompt}}',
-      resolution: '{{resolution}}',
-    },
-  },
-}
-
-/**
- * Wire one `LoadImage` per reference into the edit graph's autogrow inputs.
- *
- * ComfyUI's schema DSL expands the autogrow `images` input into
- * `images.image_1` … `images.image_16`, all optional, and validates by those
- * dotted names — which is also how the official edit template refers to them.
- *
- * @param imageNames - file names inside ComfyUI's `input` folder, in prompt
- *   order, as `/upload/image` reported them.
- * @returns a fresh API-format graph with one loader per reference.
- * @throws When the list is empty or longer than {@link EDIT_MAX_REFERENCES}.
- */
-export function editWorkflow(
-  imageNames: readonly string[],
-): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
-  if (imageNames.length === 0) throw new Error('comfyui backend: the edit graph needs at least one reference image')
-  if (imageNames.length > EDIT_MAX_REFERENCES) {
-    throw new Error(
-      `comfyui backend: the edit graph wires ${EDIT_MAX_REFERENCES} reference slots, got ${imageNames.length}`,
-    )
-  }
-  const graph: Record<string, { class_type: string; inputs: Record<string, unknown> }> = { ...QWEN_IMAGE_EDIT_WORKFLOW }
-  const encode = { class_type: 'TextEncodeQwenImage21', inputs: { ...(QWEN_IMAGE_EDIT_WORKFLOW['4'] as { inputs: Record<string, unknown> }).inputs } }
-  graph['4'] = encode
-  for (const [position, name] of imageNames.entries()) {
-    const id = String(EDIT_IMAGE_NODE_BASE + position)
-    graph[id] = { class_type: 'LoadImage', inputs: { image: name } }
-    encode.inputs[`images.image_${position + 1}`] = [id, 0]
-  }
-  return graph
-}
-
-// ---------------------------------------------------------------------------
-// Turbo: the distilled checkpoint and its fixed 8-step sigma schedule
-// ---------------------------------------------------------------------------
-
-/**
- * The sigma schedule the Turbo checkpoint was distilled for.
- *
- * This is copied verbatim from the official `image_qwen_image_2_1_turbo_t2i.json`
- * template's `ManualSigmas` node, and it is what makes 8 steps enough. Raising
- * the step count **without** swapping this schedule in makes the result worse,
- * not better: the template's own note says so, and that is why the turbo path
- * passes the schedule rather than only a smaller `steps`.
- */
-export const TURBO_SIGMAS = '1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0'
-
-/** Steps the schedule above describes: one per remaining sigma. */
-export const TURBO_STEPS = 8
-
-/**
- * The Turbo text-to-image graph, in ComfyUI's API format.
- *
- * The Turbo templates do **not** use `KSampler`. They drive
- * `SamplerCustomAdvanced`, which takes the noise, guider, sampler and sigmas as
- * separate inputs — that separation is the only way to hand it a `ManualSigmas`
- * node, and the manual schedule is the whole point of the turbo checkpoint. So
- * this graph has a different shape from {@link QWEN_IMAGE_WORKFLOW}, not just
- * different numbers:
- *
- * ```
- * RandomNoise ─┐
- * CFGGuider ───┼→ SamplerCustomAdvanced → VAEDecode → SaveImage
- * KSamplerSelect┤
- * ManualSigmas ─┤
- * EmptyLatentImage ─┘
- * ```
- *
- * Note also what is *absent*: the non-turbo graph's `QwenImage21Cache` is not
- * used here either, matching the official template, which leaves it out for the
- * turbo path.
- */
-export const QWEN_IMAGE_TURBO_WORKFLOW: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
-  '1': { class_type: 'UNETLoader', inputs: { unet_name: '{{unet_name}}', weight_dtype: '{{weight_dtype}}' } },
-  '2': { class_type: 'CLIPLoader', inputs: { clip_name: '{{clip_name}}', type: '{{clip_type}}' } },
-  '3': { class_type: 'VAELoader', inputs: { vae_name: '{{vae_name}}' } },
-  '4': {
-    class_type: 'TextEncodeQwenImage21',
-    inputs: { clip: ['2', 0], prompt: '{{prompt}}', negative_prompt: '{{negative_prompt}}', resolution: 1024 },
-  },
-  '5': { class_type: 'EmptyLatentImage', inputs: { width: '{{width}}', height: '{{height}}', batch_size: '{{batch_size}}' } },
-  // The four ingredients SamplerCustomAdvanced consumes, one node each.
-  '6': { class_type: 'RandomNoise', inputs: { noise_seed: '{{seed}}' } },
-  '7': {
-    class_type: 'CFGGuider',
-    inputs: {
-      model: ['1', 0],
-      positive: ['4', 0],
-      negative: ['4', 1],
-      cfg: '{{cfg}}',
-    },
-  },
-  '8': { class_type: 'KSamplerSelect', inputs: { sampler_name: '{{sampler_name}}' } },
-  '9': { class_type: 'ManualSigmas', inputs: { sigmas: '{{sigmas}}' } },
-  '10': {
-    class_type: 'SamplerCustomAdvanced',
-    inputs: {
-      noise: ['6', 0],
-      guider: ['7', 0],
-      sampler: ['8', 0],
-      sigmas: ['9', 0],
-      latent_image: ['5', 0],
-    },
-  },
-  '11': { class_type: 'VAEDecode', inputs: { samples: ['10', 0], vae: ['3', 0] } },
-  '12': { class_type: 'SaveImage', inputs: { images: ['11', 0], filename_prefix: '{{filename_prefix}}' } },
-}
-
-/**
- * The Turbo edit graph: the turbo skeleton plus the edit encode node plus the
- * reference slots that {@link editTurboWorkflow} wires per call.
- *
- * `cfg` is **1**, the same as the turbo t2i graph. The official turbo edit
- * template's JSON shows a stale `[8]` widget on `CFGGuider`, but that value is
- * dead: the node's cfg is wired to the template's outer input, and the outer
- * default — per docs.comfy.org, the Comfy-Org model card and the Turbo model
- * card — is 1. At cfg 1 ComfyUI skips the negative conditioning pass entirely,
- * so an elevated cfg with an empty negative prompt does not sharpen the edit;
- * it degrades it.
- */
-export const QWEN_IMAGE_TURBO_EDIT_WORKFLOW: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
-  ...QWEN_IMAGE_TURBO_WORKFLOW,
-  '4': {
-    class_type: 'TextEncodeQwenImage21',
-    inputs: {
-      clip: ['2', 0],
-      vae: ['3', 0],
-      prompt: '{{prompt}}',
-      negative_prompt: '{{negative_prompt}}',
-      resolution: '{{resolution}}',
-    },
-  },
-}
-
-/** First node id for the turbo edit graph's `LoadImage` nodes (ids 1–12 are the graph). */
-export const TURBO_EDIT_IMAGE_NODE_BASE = 13
-
-/**
- * Wire one `LoadImage` per reference into the turbo edit graph.
- *
- * Same autogrow contract as {@link editWorkflow} — the encode node takes
- * `images.image_1` … `images.image_16` — but against the turbo skeleton.
- *
- * @param imageNames - file names inside ComfyUI's `input` folder, in prompt order.
- * @returns a fresh API-format graph with one loader per reference.
- * @throws When the list is empty or longer than {@link EDIT_MAX_REFERENCES}.
- */
-export function editTurboWorkflow(
-  imageNames: readonly string[],
-): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
-  if (imageNames.length === 0) throw new Error('comfyui backend: the edit graph needs at least one reference image')
-  if (imageNames.length > EDIT_MAX_REFERENCES) {
-    throw new Error(
-      `comfyui backend: the edit graph wires ${EDIT_MAX_REFERENCES} reference slots, got ${imageNames.length}`,
-    )
-  }
-  const graph: Record<string, { class_type: string; inputs: Record<string, unknown> }> = { ...QWEN_IMAGE_TURBO_EDIT_WORKFLOW }
-  const encode = {
-    class_type: 'TextEncodeQwenImage21',
-    inputs: { ...(QWEN_IMAGE_TURBO_EDIT_WORKFLOW['4'] as { inputs: Record<string, unknown> }).inputs },
-  }
-  graph['4'] = encode
-  for (const [position, name] of imageNames.entries()) {
-    const id = String(TURBO_EDIT_IMAGE_NODE_BASE + position)
-    graph[id] = { class_type: 'LoadImage', inputs: { image: name } }
-    encode.inputs[`images.image_${position + 1}`] = [id, 0]
-  }
-  return graph
 }
 
 /**
@@ -1054,16 +925,91 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
+ * Which profile a run will **actually** use, given the weights that were found.
+ *
+ * A turbo request is a *preference*: it needs a distilled checkpoint to exist.
+ * With only the base file installed the run must degrade to the base graph, or
+ * the turbo sigma schedule would be paired with a checkpoint that was never
+ * distilled for it — the classic way to get worse pictures while believing the
+ * config applied. Every other family is taken at its word (a missing MOSS file is
+ * already an error from {@link loadComfyModels}, not a silent fallback to Qwen).
+ *
+ * @param choice - the configured `comfyModel` value.
+ * @param models - the file names `/object_info` yielded.
+ * @returns the profile whose graph and sampler settings match those weights.
+ */
+export function effectiveProfile(choice: ComfyModelChoice | string | undefined, models: ComfyModels): ModelProfile {
+  const profile = resolveProfile(choice)
+  if (profile.variant === 'turbo' && turboUnetOf(models) === undefined) {
+    const base = Object.values(MODEL_PROFILES).find(
+      (candidate) => candidate.family === profile.family && candidate.variant === 'base',
+    )
+    if (base !== undefined) return base
+  }
+  return profile
+}
+
+/**
+ * The placeholder values every profile's text-to-image graph reads.
+ *
+ * A superset on purpose: `renderWorkflow` only touches the placeholders a
+ * template actually declares, so one map serves the `KSampler` graphs (steps,
+ * CFG, sampler, scheduler), the turbo graph (sigmas, no steps) and any future one.
+ * Values the profile owns — CFG, sampler, scheduler, sigmas, the negative prompt,
+ * the filename prefix — come from the profile, never from this function.
+ *
+ * The sampler numbers come through {@link resolveSampling}, so a family that
+ * publishes more than one register (MOSS-Image) runs the chosen one; a profile
+ * without registers returns its own pair, which is why both Qwen profiles are
+ * byte-identical to before the setting existed.
+ *
+ * @param profile - the effective profile of this call.
+ * @param models - the file names the server reported.
+ * @param request - prompt, canvas, count, seed and any explicit step count.
+ * @param preset - the configured sampling register, if any.
+ */
+function textToImageValues(
+  profile: ModelProfile,
+  models: ComfyModels,
+  request: GenerateRequest,
+  preset?: string,
+): Record<string, unknown> {
+  assertLatentAligned(profile, request.width, request.height)
+  const sampling = resolveSampling(profile, preset)
+  return {
+    unet_name: models.unet,
+    weight_dtype: 'default',
+    clip_name: models.clip,
+    clip_type: models.clipType,
+    vae_name: models.vae,
+    prompt: request.prompt,
+    negative_prompt: profile.negativePrompt,
+    width: request.width,
+    height: request.height,
+    batch_size: request.count,
+    seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
+    steps: request.steps ?? sampling.steps.default,
+    cfg: sampling.sampler.cfg,
+    sampler_name: sampling.sampler.name,
+    scheduler: sampling.sampler.scheduler,
+    sigmas: sampling.steps.sigmas,
+    filename_prefix: profile.filenamePrefix,
+  }
+}
+
+/**
  * Run one text-to-image job on ComfyUI and download the resulting images.
  *
- * `/prompt` → poll `/history/<id>` → `/view` for each saved file. The bytes the
- * caller receives are exactly what `/view` served, so what lands on disk equals
- * what ComfyUI produced.
+ * The graph, sampler and step default come from the **effective** profile, so
+ * this one function serves every family: Qwen base, Qwen turbo (which degrades to
+ * base without a turbo checkpoint) and MOSS. `/prompt` → poll `/history/<id>` →
+ * `/view` for each saved file; the bytes the caller receives are exactly what
+ * `/view` served.
  *
  * @param target - the endpoint that answered.
  * @param models - the three file names read from `/object_info`.
  * @param request - prompt plus the already-aligned canvas size.
- * @param options - timeout and poll interval.
+ * @param options - profile choice, timeout and poll interval.
  * @param signal - caller cancellation.
  * @returns one entry per produced image, in ComfyUI's order.
  * @throws On submission errors (with `node_errors` quoted), an execution error
@@ -1077,25 +1023,9 @@ export async function generateViaComfyUi(
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
-  const graph = renderWorkflow(QWEN_IMAGE_WORKFLOW, {
-    unet_name: models.unet,
-    weight_dtype: 'default',
-    clip_name: models.clip,
-    clip_type: models.clipType,
-    vae_name: models.vae,
-    prompt: request.prompt,
-    negative_prompt: '',
-    width: request.width,
-    height: request.height,
-    batch_size: request.count,
-    seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
-    steps: request.steps ?? 25,
-    cfg: 1,
-    sampler_name: 'euler',
-    scheduler: 'simple',
-    filename_prefix: 'dsh-image-forge',
-  }) as Record<string, unknown>
-  return await runGraph(target, graph, '出图', options, signal)
+  const profile = effectiveProfile(options.comfyModel, models)
+  const graph = renderWorkflow(profile.textToImage, textToImageValues(profile, models, request, options.mossSampling)) as Record<string, unknown>
+  return await runGraph(target, graph, profile.family === 'moss-image' ? '出图（MOSS）' : '出图', options, signal)
 }
 
 /**
@@ -1209,20 +1139,85 @@ export function referenceBudget(width: number, height: number): number {
 }
 
 /**
+ * The edit graph a profile offers, or a refusal naming what is missing.
+ *
+ * MOSS has no wired-up edit graph yet, and faking one out of the text-to-image
+ * graph would submit a graph that silently ignores the references. So a family
+ * without `imageToImage` **fails loudly**, quoting the profile's own `todo` so the
+ * follow-up has its entry point in the error text rather than only in a comment.
+ *
+ * TODO(moss-edit): the entry point is `MODEL_PROFILES['moss-sft'].imageToImage` in
+ * `model-profiles.ts` — fill it in and this refusal disappears by itself.
+ *
+ * @param profile - the effective profile of this call.
+ * @returns its edit template and reference-slot builder.
+ * @throws When the family has no edit graph.
+ */
+function requireEditGraph(profile: ModelProfile): { template: ApiGraph; build: (imageNames: readonly string[]) => ApiGraph } {
+  if (profile.imageToImage === undefined) {
+    throw new Error(
+      `comfyui backend: ${profile.label} 的**改图**通路还没接入——本次改动只做它的文生图，` +
+        '所以带参考图的请求在这里被拒绝，而不是递一张忽略参考图的图上去。\n' +
+        (profile.todo === undefined ? '' : `  后续接入点：${profile.todo}\n`) +
+        '  现在就要改图：把 comfyModel 换成 qwen21-base 或 qwen21-turbo（Qwen 的改图通路是通的）。',
+    )
+  }
+  return profile.imageToImage
+}
+
+/**
+ * Upload the references and wire them into a profile's edit graph.
+ *
+ * @param target - the endpoint that answered.
+ * @param profile - the effective profile of this call.
+ * @param models - the three weight file names.
+ * @param request - must carry at least one reference.
+ * @param options - timeout.
+ * @param signal - caller cancellation.
+ * @returns the rendered graph, ready for `/prompt`.
+ */
+async function renderEditGraph(
+  target: ComfyTarget,
+  profile: ModelProfile,
+  models: ComfyModels,
+  request: GenerateRequest,
+  options: ComfyOptions,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const references = request.images ?? []
+  if (references.length === 0) {
+    throw new Error('comfyui backend: the edit path needs reference images, but request.images is empty')
+  }
+  const edit = requireEditGraph(profile)
+  const deadline = Date.now() + options.timeoutMs
+  const names: string[] = []
+  for (const reference of references) {
+    names.push(await uploadReferenceImage(target, reference, Math.max(1, deadline - Date.now()), signal))
+  }
+  return renderWorkflow(edit.build(names), {
+    ...textToImageValues(profile, models, request, options.mossSampling),
+    resolution: referenceBudget(request.width, request.height),
+    filename_prefix: `${profile.filenamePrefix}-edit`,
+  }) as Record<string, unknown>
+}
+
+/**
  * Run one reference-image edit on ComfyUI and download the resulting images.
  *
  * The references are uploaded into ComfyUI's `input` folder first, because
  * `LoadImage` — the only node that feeds image pixels into a graph — reads from
- * there and has no "load this path" input. The graph is then the text-to-image
- * graph with the official edit template's encode node.
+ * there and has no "load this path" input. The graph is then the profile's edit
+ * graph (for Qwen: the text-to-image skeleton with the official edit template's
+ * encode node). A profile without one is refused, not silently degraded.
  *
  * @param target - the endpoint that answered.
  * @param models - the three file names read from `/object_info`.
  * @param request - edit prompt, canvas, and at least one reference image.
- * @param options - timeout and poll interval.
+ * @param options - profile choice, timeout and poll interval.
  * @param signal - caller cancellation.
  * @returns one entry per produced image, in ComfyUI's order.
- * @throws When no reference is present, an upload fails, or the run fails.
+ * @throws When the profile has no edit graph, no reference is present, an upload
+ *   fails, or the run fails.
  */
 export async function generateViaComfyUiEdit(
   target: ComfyTarget,
@@ -1231,54 +1226,29 @@ export async function generateViaComfyUiEdit(
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
-  const references = request.images ?? []
-  if (references.length === 0) {
-    throw new Error('comfyui backend: the edit path needs reference images, but request.images is empty')
-  }
-  const deadline = Date.now() + options.timeoutMs
-  const names: string[] = []
-  for (const reference of references) {
-    names.push(await uploadReferenceImage(target, reference, Math.max(1, deadline - Date.now()), signal))
-  }
-  const graph = renderWorkflow(editWorkflow(names), {
-    unet_name: models.unet,
-    weight_dtype: 'default',
-    clip_name: models.clip,
-    clip_type: models.clipType,
-    vae_name: models.vae,
-    prompt: request.prompt,
-    negative_prompt: '',
-    resolution: referenceBudget(request.width, request.height),
-    width: request.width,
-    height: request.height,
-    batch_size: request.count,
-    seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
-    steps: request.steps ?? 25,
-    cfg: 1,
-    sampler_name: 'euler',
-    scheduler: 'simple',
-    filename_prefix: 'dsh-image-forge-edit',
-  }) as Record<string, unknown>
+  const profile = effectiveProfile(options.comfyModel, models)
+  const graph = await renderEditGraph(target, profile, models, request, options, signal)
   return await runGraph(target, graph, '改图', options, signal)
 }
 
 /**
  * Run one Turbo text-to-image generation.
  *
- * Differs from {@link generateViaComfyUi} in exactly two ways, both of which the
- * official turbo template prescribes: the step count defaults to
- * {@link TURBO_STEPS} (not 25) and the graph is driven by the manual sigma
- * schedule (not `KSampler`). A caller that passes an explicit `steps` gets it —
- * the override exists so the blind test can ask for 4, 8 and 12 and see what
- * actually happens, rather than trusting the "8 is enough" note.
+ * Same engine as {@link generateViaComfyUi}; this entry point additionally
+ * *requires* the effective profile to be the distilled one, because a caller that
+ * asked for turbo explicitly (the blind test asks for 4, 8 and 12 steps) must see
+ * a failure rather than a silently different checkpoint. The turbo graph defaults
+ * its step count to {@link TURBO_STEPS} and drives the manual sigma schedule
+ * instead of `KSampler` — both come from the profile.
  *
  * @param target - the endpoint that answered.
  * @param models - the three file names read from `/object_info`.
  * @param request - prompt, canvas, count, seed, optional step override.
- * @param options - timeout and poll interval.
+ * @param options - profile choice, timeout and poll interval.
  * @param signal - caller cancellation.
  * @returns one entry per produced image, in ComfyUI's order.
- * @throws With the adapter's usual quoted-upstream text when the run fails.
+ * @throws When no distilled checkpoint is installed, or with the adapter's usual
+ *   quoted-upstream text when the run fails.
  */
 export async function generateViaComfyUiTurbo(
   target: ComfyTarget,
@@ -1287,25 +1257,14 @@ export async function generateViaComfyUiTurbo(
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
-  const graph = renderWorkflow(QWEN_IMAGE_TURBO_WORKFLOW, {
-    unet_name: models.unet,
-    weight_dtype: 'default',
-    clip_name: models.clip,
-    clip_type: models.clipType,
-    vae_name: models.vae,
-    prompt: request.prompt,
-    negative_prompt: '',
-    width: request.width,
-    height: request.height,
-    batch_size: request.count,
-    seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
-    steps: request.steps ?? TURBO_STEPS,
-    cfg: 1,
-    sampler_name: 'euler',
-    scheduler: 'simple',
-    sigmas: TURBO_SIGMAS,
-    filename_prefix: 'dsh-image-forge-turbo',
-  }) as Record<string, unknown>
+  const profile = effectiveProfile(options.comfyModel, models)
+  if (profile.variant !== 'turbo') {
+    throw new Error(
+      `comfyui backend: 要跑 turbo 但没有蒸馏版 DiT — /object_info 里只有 ${models.unet}。\n` +
+        '  放一份 turbo 权重进 models/unet（或 models/diffusion_models），或把 comfyModel 改回 qwen21-base。',
+    )
+  }
+  const graph = renderWorkflow(profile.textToImage, textToImageValues(profile, models, request, options.mossSampling)) as Record<string, unknown>
   return await runGraph(target, graph, '出图（turbo）', options, signal)
 }
 
@@ -1313,17 +1272,17 @@ export async function generateViaComfyUiTurbo(
  * Run one Turbo reference-image edit.
  *
  * As with the base edit path, references are uploaded first and wired in as
- * `LoadImage` nodes. The turbo-specific values are the step default
- * ({@link TURBO_STEPS}) and the manual sigma schedule; `cfg` stays 1, as in
- * every official Qwen-Image 2.1 template.
+ * `LoadImage` nodes; the turbo-specific values (step default, sigma schedule,
+ * `cfg` 1) all come from the profile.
  *
  * @param target - the endpoint that answered.
  * @param models - the three file names read from `/object_info`.
  * @param request - edit prompt, canvas, and at least one reference image.
- * @param options - timeout and poll interval.
+ * @param options - profile choice, timeout and poll interval.
  * @param signal - caller cancellation.
  * @returns one entry per produced image, in ComfyUI's order.
- * @throws When no reference is present, an upload fails, or the run fails.
+ * @throws When no distilled checkpoint is installed, the profile has no edit
+ *   graph, no reference is present, an upload fails, or the run fails.
  */
 export async function generateViaComfyUiTurboEdit(
   target: ComfyTarget,
@@ -1332,35 +1291,14 @@ export async function generateViaComfyUiTurboEdit(
   options: ComfyOptions,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
-  const references = request.images ?? []
-  if (references.length === 0) {
-    throw new Error('comfyui backend: the edit path needs reference images, but request.images is empty')
+  const profile = effectiveProfile(options.comfyModel, models)
+  if (profile.variant !== 'turbo') {
+    throw new Error(
+      `comfyui backend: 要跑 turbo 改图但没有蒸馏版 DiT — /object_info 里只有 ${models.unet}。\n` +
+        '  放一份 turbo 权重进 models/unet（或 models/diffusion_models），或把 comfyModel 改回 qwen21-base。',
+    )
   }
-  const deadline = Date.now() + options.timeoutMs
-  const names: string[] = []
-  for (const reference of references) {
-    names.push(await uploadReferenceImage(target, reference, Math.max(1, deadline - Date.now()), signal))
-  }
-  const graph = renderWorkflow(editTurboWorkflow(names), {
-    unet_name: models.unet,
-    weight_dtype: 'default',
-    clip_name: models.clip,
-    clip_type: models.clipType,
-    vae_name: models.vae,
-    prompt: request.prompt,
-    negative_prompt: '',
-    resolution: referenceBudget(request.width, request.height),
-    width: request.width,
-    height: request.height,
-    batch_size: request.count,
-    seed: request.seed ?? Math.floor(Math.random() * 2 ** 31),
-    steps: request.steps ?? TURBO_STEPS,
-    cfg: 1,
-    sampler_name: 'euler',
-    scheduler: 'simple',
-    sigmas: TURBO_SIGMAS,
-    filename_prefix: 'dsh-image-forge-turbo-edit',
-  }) as Record<string, unknown>
+  const graph = await renderEditGraph(target, profile, models, request, options, signal)
   return await runGraph(target, graph, '改图（turbo）', options, signal)
 }
 
@@ -1432,7 +1370,7 @@ export async function comfySystemStats(
  * @param options - endpoint, candidate ports, and probe budget.
  * @param signal - caller cancellation.
  * @returns reachability, the endpoint that answered, the attempt trail, and —
- *   when a server answered — whether the three Qwen-Image weights are visible.
+ *   when a server answered — whether the configured profile's weights are visible.
  */
 export async function probeComfyUi(options: ComfyOptions, signal?: AbortSignal): Promise<Record<string, unknown>> {
   let target: ComfyTarget
@@ -1448,13 +1386,14 @@ export async function probeComfyUi(options: ComfyOptions, signal?: AbortSignal):
   }
   try {
     const models = await loadComfyModels(target, options, signal)
+    const profile = resolveProfile(options.comfyModel)
     return {
       endpoint: target.endpoint,
       port: target.port,
       reachable: true,
       probed: target.probed,
       models: { ...models, ok: true },
-      note: 'ComfyUI 在跑，且三个 Qwen-Image 权重都能被它的加载器枚举到。',
+      note: `ComfyUI 在跑，且 ${profile.label} 要的三个权重都能被它的加载器枚举到。`,
     }
   } catch (error) {
     return {

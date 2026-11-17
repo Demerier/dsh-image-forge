@@ -187,6 +187,9 @@ function batchesFromBoard(items: readonly BoardItem[]): Batch[] {
           elapsedMs: 0,
           endpoint: '',
           mode: first?.mode ?? 'generate',
+          // A stored item predates this field, and a replayed batch is not a live
+          // run: nothing degrades here, so it is never reported as a fallback.
+          turboFallback: false,
         },
       }
     })
@@ -633,7 +636,13 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       const batch: Batch = { id: `${String(result.elapsedMs)}-${String(Date.now())}`, response: result }
       setBatches((current) => [batch, ...current].slice(0, 12))
       setSelectedId(batch.id)
-      setNote(`${String(result.width)}×${String(result.height)} · ${String(result.steps)} 步 · seed ${String(result.seed)} · ${(result.elapsedMs / 1000).toFixed(1)} 秒`)
+      // A turbo request that degraded to the base weights is said out loud, in the
+      // same one-line note as the size/steps/seed: the pictures look fine either
+      // way, so without this the only clue is a slower click-to-image time.
+      setNote(
+        `${String(result.width)}×${String(result.height)} · ${String(result.steps)} 步 · seed ${String(result.seed)} · ${(result.elapsedMs / 1000).toFixed(1)} 秒` +
+          (result.turboFallback === true ? ' · 本次按 base 权重出图，turbo 权重未安装' : ''),
+      )
 
       // A run can create its board (first draw after an empty library), so the
       // header has to follow the host's answer rather than assume the one the

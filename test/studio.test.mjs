@@ -29,7 +29,18 @@ import {
   studioSizeTable,
   studioSettingsOf,
 } from '../testlib/studio-service.js'
-import { TURBO_SIGMAS, TURBO_STEPS, turboUnetOf } from '../testlib/comfyui.js'
+import {
+  DEFAULT_MOSS_SAMPLING,
+  MODEL_PROFILES,
+  MOSS_SAMPLING_PRESETS,
+  TURBO_SIGMAS,
+  TURBO_STEPS,
+  effectiveProfile,
+  presetSteps,
+  resolveProfile,
+  resolveSampling,
+  turboUnetOf,
+} from '../testlib/comfyui.js'
 import {
   FORMULA_SYSTEM_PROMPT,
   PROSE_SYSTEM_PROMPT,
@@ -267,6 +278,7 @@ test('the studio reads the same config fields the Agent tools do', () => {
     defaultSteps: 25,
     comfyuiSteps: 12,
     comfyModel: 'turbo',
+    mossSampling: 'official',
     turboSteps: 6,
   })
   assert.deepEqual(settings, {
@@ -278,6 +290,7 @@ test('the studio reads the same config fields the Agent tools do', () => {
     defaultSteps: 25,
     comfyuiSteps: 12,
     comfyModel: 'turbo',
+    mossSampling: 'official',
     turboSteps: 6,
   })
   // A malformed port list falls back to the defaults rather than yielding `[]`,
@@ -530,6 +543,10 @@ test('the turbo schedule is the official one, and describes exactly its own step
 })
 
 test('turbo steps never borrow the base checkpoint defaults', () => {
+  // NB: this feeds the **legacy** `'turbo'` / `'base'` spellings, i.e. what an
+  // old config document says — not what production hands the Studio, which is
+  // always a canonical profile id (see the regression test at the bottom of this
+  // section). It covers `resolveProfile`'s legacy mapping, nothing more.
   const base = { defaultSteps: 25, comfyuiSteps: 12, turboSteps: undefined, comfyModel: 'turbo' }
   // An omitted count means 8, NOT the 25/12 the base family would resolve to —
   // handing 25 steps to a checkpoint distilled for 8 makes the picture worse.
@@ -578,4 +595,215 @@ test('the turbo graphs use the advanced sampler, and the edit graph is wired for
   assert.equal(graph['10'].class_type, 'SamplerCustomAdvanced')
   // Empty or over-long reference lists are refused before any upload happens.
   assert.throws(() => editTurboWorkflow([]), /至少一张|needs at least one/)
+})
+
+// ---------------------------------------------------------------------------
+// Regression: the Studio used to compare `comfyModel` against the literal
+// `'turbo'`, a value `resolveConfig` never hands it (it normalises to
+// `qwen21-turbo`), so the turbo step branch was dead and `turboSteps` never
+// applied. Everything below therefore starts from the *normalised* config value,
+// exactly like production, instead of the legacy spelling.
+// ---------------------------------------------------------------------------
+
+/** What `resolveConfig` writes into `comfyModel` before anything downstream runs. */
+const asConfigured = (raw) => resolveProfile(raw).id
+
+/** The settled settings a production activation would hand the Studio. */
+function configuredSettings(comfyModel, overrides = {}) {
+  return studioSettingsOf({
+    comfyEndpoint: 'http://127.0.0.1:8188',
+    comfyPorts: '8188',
+    comfyModelsDir: '/models',
+    timeoutMs: 150_000,
+    outputDir: '/out',
+    defaultSteps: 25,
+    comfyuiSteps: 12,
+    comfyModel: asConfigured(comfyModel),
+    mossSampling: 'comfy',
+    turboSteps: undefined,
+    ...overrides,
+  })
+}
+
+const TURBO_MODELS = { unet: 'qwen_image_2.1_turbo_int8_convrot.safetensors', clip: 'qwen3vl_8b.safetensors', vae: 'qwen_image_2.1_vae_bf16.safetensors', clipType: 'qwen_image' }
+const BASE_MODELS = { unet: 'qwen_image_2.1_int8_convrot.safetensors', clip: 'qwen3vl_8b.safetensors', vae: 'qwen_image_2.1_vae_bf16.safetensors', clipType: 'qwen_image' }
+const MOSS_MODELS = { unet: 'moss_image_sft_int8_convrot.safetensors', clip: 'qwen3.5_9b_w4a8_gptq.safetensors', vae: 'flux2-vae_small.safetensors', clipType: 'moss_image' }
+
+test('a canonical turbo id resolves the turbo step default, not the base one', () => {
+  // Pin the normalisation this test depends on: `resolveConfig` stores the
+  // canonical id, so `'turbo'` is a value the Studio never receives in production.
+  assert.equal(asConfigured('turbo'), 'qwen21-turbo')
+  assert.equal(asConfigured('base'), 'qwen21-base')
+
+  const settings = configuredSettings('qwen21-turbo')
+  assert.equal(settings.comfyModel, 'qwen21-turbo')
+  // 8, not `comfyuiSteps` 12 and not `defaultSteps` 25 — the whole point of
+  // `turboSteps` existing. On the pre-fix code this returned 12 (the base
+  // fallback), because the branch compared against the literal `'turbo'`.
+  assert.equal(resolveStudioSteps(settings, undefined), 8)
+  // The configured override still wins over the distilled default.
+  assert.equal(resolveStudioSteps(configuredSettings('qwen21-turbo', { turboSteps: 6 }), undefined), 6)
+  // An explicit request still wins over both, inside the shared clamp.
+  assert.equal(resolveStudioSteps(settings, 5), 5)
+})
+
+test('the turbo step default follows the profile that actually runs, not just the request', () => {
+  const settings = configuredSettings('qwen21-turbo')
+  // Turbo requested *and* a turbo checkpoint installed: the turbo graph runs, so
+  // the turbo step default is right.
+  const onTurbo = effectiveProfile(settings.comfyModel, TURBO_MODELS)
+  assert.equal(onTurbo.variant, 'turbo')
+  assert.equal(resolveStudioSteps(settings, undefined, onTurbo), 8)
+  // Turbo requested but only base weights installed: the run degrades to the base
+  // graph (same rule as `tools.ts`), so it must take the base default — handing a
+  // base checkpoint the turbo 8 would be the mirror image of the bug.
+  const degraded = effectiveProfile(settings.comfyModel, BASE_MODELS)
+  assert.equal(degraded.variant, 'base')
+  assert.equal(resolveStudioSteps(settings, undefined, degraded), 12)
+})
+
+test('a MOSS profile is never mistaken for turbo', () => {
+  // `moss-sft` is a third variant, not a turbo in disguise: it runs a plain
+  // KSampler at 25 steps, has no manual sigma schedule, and must keep the ordinary
+  // `comfyuiSteps` / `defaultSteps` fallback.
+  assert.equal(asConfigured('moss-sft'), 'moss-sft')
+  assert.equal(resolveProfile('moss-sft').variant, 'sft')
+  assert.equal(resolveProfile('moss-sft').steps.sigmas, undefined)
+
+  const settings = configuredSettings('moss-sft')
+  assert.equal(settings.comfyModel, 'moss-sft')
+  assert.notEqual(resolveStudioSteps(settings, undefined), 8)
+  assert.equal(resolveStudioSteps(settings, undefined), 12)
+  assert.equal(resolveStudioSteps(configuredSettings('moss-sft', { comfyuiSteps: undefined }), undefined), 25)
+
+  // And once the weights are known the effective profile is still MOSS, so the
+  // step fallback stays the ordinary one.
+  const effective = effectiveProfile(settings.comfyModel, MOSS_MODELS)
+  assert.equal(effective.id, 'moss-sft')
+  assert.equal(resolveStudioSteps(settings, undefined, effective), 12)
+  // A `turboSteps` sitting in the config must not leak into a MOSS run.
+  assert.equal(resolveStudioSteps(configuredSettings('moss-sft', { turboSteps: 6 }), undefined), 12)
+})
+
+// ---------------------------------------------------------------------------
+// MOSS-Image's two sampling registers: a table, not an `if` in the adapter.
+//
+// Both registers are real and both are documented — the ComfyUI template's
+// faster settings (which the verified sample ran) and OpenMOSS's own card. The
+// tests below pin each pair verbatim, prove the register selects a *whole* pair
+// rather than one field, and prove neither Qwen profile can be moved by it.
+// ---------------------------------------------------------------------------
+
+test('the MOSS sampling registers carry the two published pairs, verbatim', () => {
+  const moss = MODEL_PROFILES['moss-sft']
+  assert.deepEqual([...MOSS_SAMPLING_PRESETS], ['comfy', 'official'])
+  assert.equal(DEFAULT_MOSS_SAMPLING, 'comfy')
+
+  // Register 1 — the ComfyUI template (`image_moss_image_t2i.json`, which notes
+  // it uses kijai's faster settings): 25 steps / CFG 2.5 / er_sde / simple. It is
+  // also the profile's own pair, so the default run cannot drift from it.
+  assert.deepEqual(moss.samplingPresets.comfy.sampler, {
+    node: 'KSampler',
+    name: 'er_sde',
+    scheduler: 'simple',
+    cfg: 2.5,
+  })
+  assert.equal(moss.samplingPresets.comfy.steps.default, 25)
+  assert.equal(moss.sampler, moss.samplingPresets.comfy.sampler, 'the profile pair must be the default register')
+  assert.equal(moss.steps, moss.samplingPresets.comfy.steps)
+  assert.equal(moss.defaultPreset, 'comfy')
+
+  // Register 2 — OpenMOSS's own card: 50 steps / CFG 3 / euler / simple. The
+  // scheduler is `simple` in both registers; that is not part of the difference.
+  assert.deepEqual(moss.samplingPresets.official.sampler, {
+    node: 'KSampler',
+    name: 'euler',
+    scheduler: 'simple',
+    cfg: 3,
+  })
+  assert.equal(moss.samplingPresets.official.steps.default, 50)
+
+  // Neither register carries a manual sigma schedule: MOSS runs the model's own
+  // default shift of 5, which is why there is no `ModelSampling*` node either.
+  assert.equal(moss.steps.sigmas, undefined)
+  assert.equal(moss.samplingPresets.official.steps.sigmas, undefined)
+})
+
+test('the register selects a whole pair, steps and sampler together', () => {
+  const moss = MODEL_PROFILES['moss-sft']
+  const comfy = resolveSampling(moss, 'comfy')
+  assert.equal(comfy.preset, 'comfy')
+  assert.equal(comfy.sampler.cfg, 2.5)
+  assert.equal(comfy.sampler.name, 'er_sde')
+  assert.equal(comfy.steps.default, 25)
+
+  const official = resolveSampling(moss, 'official')
+  assert.equal(official.preset, 'official')
+  assert.equal(official.sampler.name, 'euler')
+  assert.equal(official.sampler.cfg, 3)
+  assert.equal(official.steps.default, 50)
+
+  // An unknown value falls back to the profile's own pair: a stale settings
+  // document must never produce a graph with an undefined sampler.
+  const unknown = resolveSampling(moss, 'karras')
+  assert.equal(unknown.preset, undefined)
+  assert.equal(unknown.sampler, moss.sampler)
+  assert.equal(unknown.steps, moss.steps)
+})
+
+test('the sampling register never moves either Qwen profile', () => {
+  for (const id of ['qwen21-base', 'qwen21-turbo']) {
+    const profile = MODEL_PROFILES[id]
+    assert.equal(profile.samplingPresets, undefined, `${id} must not publish a register table`)
+    for (const preset of ['comfy', 'official', undefined]) {
+      const sampling = resolveSampling(profile, preset)
+      assert.equal(sampling.sampler, profile.sampler, `${id} sampler moved under ${String(preset)}`)
+      assert.equal(sampling.steps, profile.steps, `${id} steps moved under ${String(preset)}`)
+      assert.equal(sampling.preset, undefined)
+    }
+    // ...and no register contributes a step count either, so the shared
+    // `comfyuiSteps` → `defaultSteps` chain is what still decides.
+    assert.equal(presetSteps(profile, 'official'), undefined)
+    assert.equal(presetSteps(profile, 'comfy'), undefined)
+  }
+})
+
+test('only a non-default register contributes a step count', () => {
+  const moss = MODEL_PROFILES['moss-sft']
+  // The register the profile's own `steps` describes keeps deferring to the
+  // shared chain, exactly as it did before this table existed.
+  assert.equal(presetSteps(moss, 'comfy'), undefined)
+  assert.equal(presetSteps(moss, undefined), undefined)
+  // Any other register brings its own working point (MOSS official: 50, not 25).
+  assert.equal(presetSteps(moss, 'official'), 50)
+  assert.equal(presetSteps(moss, 'karras'), undefined)
+})
+
+test('the Studio step chain honours the register and still lets comfyuiSteps win', () => {
+  const official = configuredSettings('moss-sft', { mossSampling: 'official', comfyuiSteps: undefined })
+  // No explicit request and no `comfyuiSteps`: the selected register decides.
+  assert.equal(resolveStudioSteps(official, undefined), 50)
+  // `comfyuiSteps` still overrides the register in the official mode, exactly as
+  // it overrides the shared default in the comfy one.
+  assert.equal(
+    resolveStudioSteps(configuredSettings('moss-sft', { mossSampling: 'official', comfyuiSteps: 30 }), undefined),
+    30,
+  )
+  // An explicit request wins over everything, inside the shared clamp.
+  assert.equal(resolveStudioSteps(official, 12), 12)
+  assert.equal(resolveStudioSteps(official, 10_000), 200)
+  // The default register leaves `defaultSteps` in charge, so a user who raised it
+  // sees no change until they pick the official one.
+  assert.equal(
+    resolveStudioSteps(
+      configuredSettings('moss-sft', { mossSampling: 'comfy', comfyuiSteps: undefined, defaultSteps: 40 }),
+      undefined,
+    ),
+    40,
+  )
+  // And neither Qwen profile is affected by the setting at all.
+  assert.equal(
+    resolveStudioSteps(configuredSettings('qwen21-base', { mossSampling: 'official', comfyuiSteps: undefined }), undefined),
+    25,
+  )
 })

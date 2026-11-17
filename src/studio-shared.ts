@@ -234,6 +234,16 @@ export interface StudioGenerateResponse {
   endpoint: string
   /** `generate` for a fresh draw, `edit` when references were supplied. */
   mode: 'generate' | 'edit'
+  /**
+   * True when the run asked for the **turbo** variant but the base weights ran
+   * instead, because no distilled checkpoint is installed.
+   *
+   * The Agent tools report the same fact as `comfyui.turbo_fallback`; this is the
+   * Studio's field for it, so a degrade is visible in the panel instead of
+   * silently producing base pictures under a "turbo" setting. A request that
+   * never asked for turbo (base, MOSS) reports false — it is not a fallback.
+   */
+  turboFallback: boolean
   /** Board the images were recorded on, when recording succeeded. */
   board?: BoardSummary
   /** Why recording failed, when it did — the images are on disk either way. */

@@ -549,13 +549,18 @@ test('the real schema defaults survive a resolve round trip as plain data', () =
   assert.deepEqual([...kinds].sort(), ['number', 'string'], 'the surviving fields are strings and numbers only')
   assert.equal(resolved.timeoutMs, 180000)
   assert.equal(resolved.defaultSteps, 25)
-  assert.equal(resolved.comfyModel, 'base')
+  // Profiles replaced the `base` / `turbo` pair: the default is now the
+  // canonical id, and the two legacy spellings normalise into it (asserted in
+  // the compatibility test below).
+  assert.equal(resolved.comfyModel, 'qwen21-base')
   // The two overrides are declared-but-unset, which is a real state: the key
   // exists and its value is undefined, so the resolver falls through.
-  assert.equal(Object.keys(resolved).length, 9, 'the documented field count')
+  assert.equal(Object.keys(resolved).length, 10, 'the documented field count')
   assert.ok('comfyuiSteps' in resolved, 'a nullable field must keep its key')
   assert.equal(resolved.comfyuiSteps, undefined)
   assert.equal(resolved.turboSteps, undefined)
+  // MOSS's sampling register is a string select, defaulting to the verified one.
+  assert.equal(resolved.mossSampling, 'comfy')
 })
 
 // ---------------------------------------------------------------------------
@@ -579,13 +584,13 @@ test('every field in the config schema has a control on the settings page', () =
   assert.deepEqual(missing, [], 'these config fields have no control on the settings page')
   assert.deepEqual(stale, [], 'the settings page renders controls for fields the schema does not declare')
   assert.equal(SETTINGS_FIELD_KEYS.length, declared.length)
-  assert.equal(declared.length, 9, 'the documented field count')
+  assert.equal(declared.length, 10, 'the documented field count')
   // Nothing is hidden: the page shows every remaining field, because none of
   // them is plumbing any more.
   assert.deepEqual(HIDDEN_FIELD_KEYS, [], 'no surviving field is hidden')
   // The turbo pair is the newest thing on the page, so name it: a regression that
   // drops one reads as "what is missing" rather than "9 !== 8".
-  for (const key of ['comfyModel', 'turboSteps', 'comfyEndpoint', 'comfyPorts', 'comfyModelsDir']) {
+  for (const key of ['comfyModel', 'mossSampling', 'turboSteps', 'comfyEndpoint', 'comfyPorts', 'comfyModelsDir']) {
     assert.ok(declared.includes(key), `${key} must be a schema field`)
     assert.ok(SETTINGS_FIELD_KEYS.includes(key), `${key} must have a control`)
   }
@@ -610,18 +615,67 @@ test('no backend or API control remains on the page', () => {
   assert.equal(fieldByKey('comfyModel').kind, 'enum')
 })
 
-test('the weight-family control states the trade and the fallback', () => {
+test('the weight-profile control states the trade and the fallback', () => {
   const byKey = Object.fromEntries(SETTINGS_FIELDS.map((field) => [field.key, field]))
   const field = byKey.comfyModel
   console.log('comfyModel control:', JSON.stringify(field))
   assert.equal(field.group, 'steps')
   assert.equal(field.kind, 'enum')
-  assert.deepEqual(field.choices.map((choice) => choice.value), ['base', 'turbo'])
+  // Three model profiles, one control. The two legacy values (`base` / `turbo`)
+  // are still *accepted* by the schema, but they are not offered: a new save
+  // always writes a canonical profile id.
+  assert.deepEqual(field.choices.map((choice) => choice.value), ['qwen21-base', 'qwen21-turbo', 'moss-sft'])
+  for (const choice of field.choices) assert.ok(choice.label.length > 0, `${choice.value} needs a label`)
   assert.match(field.hint, /8 步/)
   assert.match(field.hint, /2\.7/)
   // turbo is a request, not a guarantee — the page has to say what happens when
   // the turbo weights are not installed.
   assert.match(field.hint, /退回 base/)
+  // ...and MOSS is a different family, so a missing weight is an error rather
+  // than a silent fallback to Qwen.
+  assert.match(field.hint, /moss/)
+  assert.match(field.hint, /报错/)
+})
+
+test('comfyModel accepts the three profiles, the two legacy spellings, and nothing else', () => {
+  // The union is what validates a profile patch, so both halves matter: a new
+  // value must be accepted, and the two values every pre-profile config carries
+  // must keep parsing — otherwise an untouched `cordis.yml` starts failing at
+  // load time.
+  for (const value of ['qwen21-base', 'qwen21-turbo', 'moss-sft', 'base', 'turbo']) {
+    assert.equal(plugin.Config({ comfyModel: value }).comfyModel.get(), value)
+  }
+  // ...and a value outside the union is still a load-time error, which is what
+  // keeps a typo visible instead of silently falling back.
+  assert.throws(() => plugin.Config({ comfyModel: 'qwen21-ultra' }), /comfyModel/)
+  assert.equal(plugin.Config({}).comfyModel.get(), 'qwen21-base', 'the default profile')
+  // The page offers the canonical ids; the legacy pair is accepted, not offered.
+  const offered = fieldByKey('comfyModel').choices.map((choice) => choice.value)
+  assert.deepEqual(offered, ['qwen21-base', 'qwen21-turbo', 'moss-sft'])
+})
+
+test('the MOSS sampling register is one select with the two published registers', () => {
+  const field = fieldByKey('mossSampling')
+  console.log('mossSampling control:', JSON.stringify(field))
+  assert.ok(field, 'mossSampling must have a control')
+  assert.equal(field.group, 'steps')
+  assert.equal(field.kind, 'enum')
+  // Two registers, by value: `comfy` is the ComfyUI template's faster settings
+  // (the one the verified sample ran), `official` is OpenMOSS's own card. There
+  // is deliberately no third "custom" entry — mixing halves of a published pair
+  // is the mistake this select exists to prevent.
+  assert.deepEqual(field.choices.map((choice) => choice.value), ['comfy', 'official'])
+  for (const choice of field.choices) assert.ok(choice.label.length > 0, `${choice.value} needs a label`)
+  // The hint has to name the default and the direction the other one moves in.
+  assert.match(field.hint, /默认 comfy/)
+  assert.match(field.hint, /official/)
+  assert.match(field.hint, /50 步/)
+  // The schema accepts exactly the two registers and defaults to the verified one.
+  assert.equal(plugin.Config({}).mossSampling.get(), 'comfy')
+  for (const value of ['comfy', 'official']) {
+    assert.equal(plugin.Config({ mossSampling: value }).mossSampling.get(), value)
+  }
+  assert.throws(() => plugin.Config({ mossSampling: 'karras' }), /mossSampling/)
 })
 
 test('the step controls state the tradeoff and mark the two overrides nullable', () => {
@@ -651,7 +705,7 @@ test('the config keys really are volatile references, and resolve back to plain 
   const refs = Object.entries(resolved).filter(([, value]) => typeof value?.get === 'function')
   console.log('volatile reference count:', refs.length, 'of', Object.keys(resolved).length)
   assert.equal(refs.length, Object.keys(resolved).length, 'every field must be volatile for the Host to serve a form')
-  assert.equal(resolved.comfyModel.get(), 'base')
+  assert.equal(resolved.comfyModel.get(), 'qwen21-base')
   assert.equal(resolved.timeoutMs.get(), 180000)
 })
 
@@ -817,7 +871,7 @@ test('the resolved step count is what reaches each backend, and the result says 
   // Two base sites (generate + edit via ComfyUI) and two turbo sites — the same
   // pair — so four dispatch forwards, plus the two `recordRun` metadata writes
   // that report the same resolved count: six markers in total.
-  const resolved = source.match(/resolveSteps\(steps, settings\)/g) ?? []
+  const resolved = source.match(/resolveSteps\(steps, settings, profile\)/g) ?? []
   const turboResolved = source.match(/resolveTurboSteps\(steps, settings\)/g) ?? []
   const forwarded = source.match(/steps: usedSteps\.steps/g) ?? []
   console.log('resolveSteps call sites:', resolved.length, '/ turbo sites:', turboResolved.length, '/ resolved-count forwards:', forwarded.length)

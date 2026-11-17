@@ -14,10 +14,25 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as plugin from '../lib/index.js'
+import { runStudioGeneration } from '../testlib/studio-service.js'
+import {
+  COMFY_MODEL_IDS,
+  LEGACY_COMFY_MODEL_IDS,
+  MODEL_PROFILES,
+  MOSS_IMAGE_WORKFLOW,
+  MOSS_LATENT_MULTIPLE,
+  MOSS_NEGATIVE_PROMPT,
+  MOSS_SAMPLING_PRESETS,
+  QWEN_IMAGE_WORKFLOW,
+  assertLatentAligned,
+  effectiveProfile,
+  isComfyModelId,
+  resolveProfile,
+} from '../testlib/comfyui.js'
 
 /** A real 1×1 PNG — and it carries bytes ≥ 0x80, so a text-decoded body would corrupt it. */
 const PNG_1X1 =
@@ -547,6 +562,9 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
     const turbo = await run(turboTools, 'qwen_image_generate', args)
     assert.equal(turbo.model, 'qwen_image_2.1_turbo_int8_convrot.safetensors')
     assert.equal(turbo.comfyui.comfyModel, 'turbo')
+    // The legacy config value normalises to the canonical profile id, which is
+    // what the report names.
+    assert.equal(turbo.comfyui.profile, 'qwen21-turbo')
     assert.equal(turbo.steps_used, 8)
     assert.equal(turbo.comfyui.turbo_fallback, undefined)
     assert.equal(turboComfy.state.graph['1'].inputs.unet_name, 'qwen_image_2.1_turbo_int8_convrot.safetensors')
@@ -555,6 +573,7 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
     const base = await run(baseTools, 'qwen_image_generate', args)
     assert.equal(base.model, 'qwen_image_2.1_int8_convrot.safetensors')
     assert.equal(base.comfyui.comfyModel, 'base')
+    assert.equal(base.comfyui.profile, 'qwen21-base')
     assert.equal(base.steps_used, 25)
 
     // Asking for turbo on a base-only install still produces an image, and says why.
@@ -570,3 +589,491 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
     rmSync(outputDir, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// Model profiles: a second family without a second adapter.
+// ---------------------------------------------------------------------------
+
+/** The weights as `/object_info` lists them on a machine with BOTH families installed. */
+const BOTH_FAMILIES_OBJECT_INFO = {
+  UNETLoader: {
+    input: {
+      required: {
+        unet_name: [
+          [
+            'qwen_image_2.1_int8_convrot.safetensors',
+            'qwen_image_2.1_turbo_int8_convrot.safetensors',
+            'moss_image_sft_int8_convrot.safetensors',
+            'moss_image_sft_bf16.safetensors',
+          ],
+          {},
+        ],
+        weight_dtype: [['default', 'fp8_e4m3fn'], {}],
+      },
+    },
+  },
+  CLIPLoader: {
+    input: {
+      required: {
+        clip_name: [
+          [
+            'qwen3vl_8b_int8_convrot.safetensors',
+            'qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors',
+            'qwen3.5_9b_w4a8_gptq.safetensors',
+          ],
+          {},
+        ],
+        type: [['stable_diffusion', 'qwen_image', 'moss_image'], {}],
+      },
+    },
+  },
+  VAELoader: {
+    input: {
+      required: {
+        vae_name: [['qwen_image_2.1_vae_bf16.safetensors', 'flux2-vae_small.safetensors'], {}],
+      },
+    },
+  },
+}
+
+test('the profile registry is total: three ids, the two legacy spellings, one default', () => {
+  assert.deepEqual([...COMFY_MODEL_IDS], ['qwen21-base', 'qwen21-turbo', 'moss-sft'])
+  assert.deepEqual([...LEGACY_COMFY_MODEL_IDS], ['base', 'turbo'])
+
+  // The compatibility contract: an old config value keeps meaning what it meant.
+  assert.equal(resolveProfile('base').id, 'qwen21-base')
+  assert.equal(resolveProfile('turbo').id, 'qwen21-turbo')
+  assert.equal(resolveProfile('qwen21-base').id, 'qwen21-base')
+  assert.equal(resolveProfile('qwen21-turbo').id, 'qwen21-turbo')
+  assert.equal(resolveProfile('moss-sft').id, 'moss-sft')
+  // A typo or a missing field resolves to the default instead of throwing: a bad
+  // config must not make the plugin unusable.
+  assert.equal(resolveProfile(undefined).id, 'qwen21-base')
+  assert.equal(resolveProfile('qwne21-base').id, 'qwen21-base')
+  assert.equal(resolveProfile('').id, 'qwen21-base')
+
+  assert.equal(isComfyModelId('moss-sft'), true)
+  assert.equal(isComfyModelId('base'), false, 'a legacy id is not a canonical profile id')
+  assert.equal(isComfyModelId(undefined), false)
+
+  for (const profile of Object.values(MODEL_PROFILES)) {
+    console.log('profile:', profile.id, '->', profile.weights.unet.required, profile.weights.vae.required)
+    assert.equal(profile.id, profile.id.trim())
+    assert.ok(profile.label.length > 0)
+    assert.ok(profile.sampler.cfg > 0)
+    assert.ok(profile.steps.default >= 1)
+    assert.ok(Object.keys(profile.textToImage).length > 0, `${profile.id} needs a text-to-image graph`)
+    // A legacy id can map to exactly one canonical profile.
+    assert.ok(profile.legacyIds.every((id) => resolveProfile(id).id === profile.id))
+  }
+  // MOSS's matchers must not carry the old hard gate: its DiT and VAE file names
+  // contain no "qwen" at all.
+  const moss = MODEL_PROFILES['moss-sft']
+  assert.equal(moss.weights.unet.required.test('moss_image_sft_int8_convrot.safetensors'), true)
+  assert.equal(moss.weights.vae.required.test('flux2-vae_small.safetensors'), true)
+  assert.ok(!/qwen/i.test('moss_image_sft_int8_convrot.safetensors'))
+  assert.ok(!/qwen/i.test('flux2-vae_small.safetensors'))
+  // ...and the Qwen matchers must not claim MOSS's files.
+  assert.equal(MODEL_PROFILES['qwen21-base'].weights.unet.required.test('moss_image_sft_int8_convrot.safetensors'), false)
+});
+
+test('the latent alignment each profile declares is the one its sizes satisfy', () => {
+  // MOSS's EmptyFlux2LatentImage wants 16-pixel multiples; `ratio.ts` produces
+  // 32-aligned canvases, which is the reason the pixel policy did not have to
+  // fork between families.
+  assert.equal(MOSS_LATENT_MULTIPLE, 16)
+  assert.equal(MODEL_PROFILES['moss-sft'].latent.classType, 'EmptyFlux2LatentImage')
+  assert.equal(MODEL_PROFILES['qwen21-base'].latent.classType, 'EmptyLatentImage')
+  assertLatentAligned(MODEL_PROFILES['moss-sft'], 1024, 1024)
+  assertLatentAligned(MODEL_PROFILES['moss-sft'], 1664, 928)
+  assert.throws(() => assertLatentAligned(MODEL_PROFILES['moss-sft'], 1030, 1024), /16/)
+  assert.throws(() => assertLatentAligned(MODEL_PROFILES['qwen21-base'], 1040, 1024), /32/)
+});
+
+test('a turbo request on a base-only install runs the base graph, never the sigma schedule', () => {
+  const baseOnly = { unet: 'qwen_image_2.1_int8_convrot.safetensors', clip: 'q', vae: 'v', clipType: 'qwen_image' }
+  assert.equal(effectiveProfile('qwen21-turbo', baseOnly).id, 'qwen21-base')
+  assert.equal(effectiveProfile('turbo', baseOnly).id, 'qwen21-base')
+  const withTurbo = { ...baseOnly, unet: 'qwen_image_2.1_turbo_int8_convrot.safetensors' }
+  assert.equal(effectiveProfile('qwen21-turbo', withTurbo).id, 'qwen21-turbo')
+  // MOSS is a different family: it is never silently swapped for Qwen.
+  const moss = { unet: 'moss_image_sft_int8_convrot.safetensors', clip: 'q', vae: 'flux2-vae_small.safetensors', clipType: 'moss_image' }
+  assert.equal(effectiveProfile('moss-sft', moss).id, 'moss-sft')
+});
+
+test('MOSS weights are selected by their own names, not by a "qwen" gate', async () => {
+  const comfy = await startFakeComfy({ objectInfo: BOTH_FAMILIES_OBJECT_INFO })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-select-'))
+  try {
+    const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000 })
+    const result = await run(tools, 'qwen_image_generate', { prompt: 'A brass compass on slate.', wh_ratio: '1:1' })
+    console.log('MOSS models:', JSON.stringify(result.comfyui.models))
+    assert.equal(result.model, 'moss_image_sft_int8_convrot.safetensors')
+    assert.equal(result.comfyui.models.unet, 'moss_image_sft_int8_convrot.safetensors')
+    assert.equal(result.comfyui.models.clip, 'qwen3.5_9b_w4a8_gptq.safetensors')
+    assert.equal(result.comfyui.models.vae, 'flux2-vae_small.safetensors')
+    assert.equal(result.comfyui.models.clipType, 'moss_image')
+    assert.equal(result.comfyui.comfyModel, 'moss')
+    assert.equal(result.comfyui.profile, 'moss-sft')
+    // The key point: neither file name mentions "qwen", so the old hard gate
+    // could never have selected them.
+    assert.ok(!/qwen/i.test(result.comfyui.models.unet))
+    assert.ok(!/qwen/i.test(result.comfyui.models.vae))
+    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 1)
+
+    // Switching back to a Qwen profile over the SAME server picks the Qwen files
+    // again: two profiles, one selector.
+    const qwenTools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'qwen21-base', outputDir, timeoutMs: 30_000 })
+    const qwen = await run(qwenTools, 'qwen_image_generate', { prompt: 'A brass compass on slate.', wh_ratio: '1:1' })
+    assert.equal(qwen.comfyui.models.unet, 'qwen_image_2.1_int8_convrot.safetensors', 'base must not claim the MOSS DiT')
+    assert.equal(qwen.comfyui.models.vae, 'qwen_image_2.1_vae_bf16.safetensors')
+    assert.equal(qwen.comfyui.models.clipType, 'qwen_image')
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+test('the MOSS graph on the wire is the official MOSS template, not the Qwen one', async () => {
+  const comfy = await startFakeComfy({ objectInfo: BOTH_FAMILIES_OBJECT_INFO })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-graph-'))
+  try {
+    const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000 })
+    const args = { prompt: 'A night street with a MOSS marquee.', wh_ratio: '16:9', seed: 42, steps: 12, count: 1 }
+    const result = await run(tools, 'qwen_image_generate', args)
+    const graph = comfy.state.graph
+    console.log('MOSS graph node classes:', JSON.stringify(Object.entries(graph).map(([id, node]) => [id, node.class_type])))
+    assert.deepEqual(Object.keys(graph).sort((a, b) => Number(a) - Number(b)), ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
+
+    const classes = Object.values(graph).map((node) => node.class_type)
+    for (const absent of ['TextEncodeQwenImage21', 'EmptyLatentImage', 'SamplerCustomAdvanced']) {
+      assert.ok(!classes.includes(absent), `the MOSS graph must not carry ${absent}`)
+    }
+    for (const present of ['CLIPTextEncode', 'EmptyFlux2LatentImage', 'SkipLayerGuidanceDiTSimple', 'KSampler']) {
+      assert.ok(classes.includes(present), `the MOSS graph must carry ${present}`)
+    }
+
+    assert.equal(graph['1'].class_type, 'UNETLoader')
+    assert.equal(graph['1'].inputs.unet_name, 'moss_image_sft_int8_convrot.safetensors')
+    assert.equal(graph['1'].inputs.weight_dtype, 'default')
+    assert.equal(graph['2'].class_type, 'CLIPLoader')
+    assert.equal(graph['2'].inputs.clip_name, 'qwen3.5_9b_w4a8_gptq.safetensors')
+    assert.equal(graph['2'].inputs.type, 'moss_image')
+    assert.equal(graph['3'].inputs.vae_name, 'flux2-vae_small.safetensors')
+    // Two separate encodes, unlike Qwen's single dual-output node.
+    assert.equal(graph['4'].class_type, 'CLIPTextEncode')
+    assert.equal(graph['4'].inputs.text, 'A night street with a MOSS marquee.')
+    assert.deepEqual(graph['4'].inputs.clip, ['2', 0])
+    assert.equal(graph['5'].class_type, 'CLIPTextEncode')
+    assert.equal(graph['5'].inputs.text, MOSS_NEGATIVE_PROMPT)
+    assert.deepEqual(graph['5'].inputs.clip, ['2', 0])
+    // 1664x928 from the 16:9 tier: 32-aligned, so also a legal 16-multiple canvas.
+    assert.equal(graph['6'].class_type, 'EmptyFlux2LatentImage')
+    assert.deepEqual([graph['6'].inputs.width, graph['6'].inputs.height, graph['6'].inputs.batch_size], [1664, 928, 1])
+    assert.equal(graph['6'].inputs.width % 16, 0)
+    assert.equal(graph['6'].inputs.height % 16, 0)
+    // Skip-layer guidance sits between the DiT and the sampler, layer 22.
+    assert.equal(graph['7'].class_type, 'SkipLayerGuidanceDiTSimple')
+    assert.deepEqual(graph['7'].inputs.model, ['1', 0])
+    assert.equal(graph['7'].inputs.double_layers, '')
+    assert.equal(graph['7'].inputs.single_layers, '22')
+    assert.equal(graph['7'].inputs.start_percent, 0)
+    assert.equal(graph['7'].inputs.end_percent, 0.5)
+    // Sampler: the profile's numbers, and the explicit step count still wins.
+    assert.equal(graph['8'].class_type, 'KSampler')
+    assert.deepEqual(graph['8'].inputs.model, ['7', 0])
+    assert.deepEqual(graph['8'].inputs.positive, ['4', 0])
+    assert.deepEqual(graph['8'].inputs.negative, ['5', 0])
+    assert.deepEqual(graph['8'].inputs.latent_image, ['6', 0])
+    assert.equal(graph['8'].inputs.steps, 12)
+    assert.equal(graph['8'].inputs.cfg, 2.5)
+    assert.equal(graph['8'].inputs.sampler_name, 'er_sde')
+    assert.equal(graph['8'].inputs.scheduler, 'simple')
+    assert.equal(graph['8'].inputs.denoise, 1)
+    assert.equal(graph['8'].inputs.seed, 42)
+    assert.deepEqual(graph['9'].inputs.samples, ['8', 0])
+    assert.deepEqual(graph['9'].inputs.vae, ['3', 0])
+    assert.equal(graph['10'].class_type, 'SaveImage')
+    assert.equal(graph['10'].inputs.filename_prefix, 'dsh-image-forge-moss')
+    assert.equal(result.steps_used, 12)
+    assert.equal(result.size.width, 1664)
+    assert.equal(result.size.height, 928)
+    // The default step count for MOSS is the template's 25, not a Qwen-derived 8.
+    assert.equal(MODEL_PROFILES['moss-sft'].steps.default, 25)
+    assert.equal(Object.values(MOSS_IMAGE_WORKFLOW).some((node) => node.class_type === 'ManualSigmas'), false)
+    assert.equal(Object.values(QWEN_IMAGE_WORKFLOW).some((node) => node.class_type === 'EmptyFlux2LatentImage'), false)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The Agent tool path carries the same register.
+//
+// `mossSampling` used to reach the Studio only, so a tool call could not select
+// MOSS's second register at all: the sampler numbers moved, but the step count
+// stayed at the shared 25 that a 50-step register never agrees with. Both these
+// tests observe the graph the fake server received, not a helper's return value.
+// ---------------------------------------------------------------------------
+
+test('MOSS sampling: the Agent tool puts the selected register on the wire too', async () => {
+  const comfy = await startFakeComfy({ objectInfo: BOTH_FAMILIES_OBJECT_INFO })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-agent-register-'))
+  try {
+    // A fixed `seed` on every call, so the graphs stay comparable field for field.
+    const args = { prompt: 'A night street with a MOSS marquee.', wh_ratio: '1:1', seed: 42, count: 1 }
+    const mossTools = (overrides) =>
+      register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000, ...overrides })
+    const sampler = () => comfy.state.graph['8'].inputs
+
+    // 1. The default register is the ComfyUI template's: 25 / 2.5 / er_sde / simple.
+    const shipped = await run(mossTools({}), 'qwen_image_generate', args)
+    console.log('Agent MOSS comfy register:', JSON.stringify(sampler()))
+    assert.equal(shipped.steps_used, 25)
+    assert.equal(shipped.steps_source, 'default')
+    assert.equal(comfy.state.graph['8'].class_type, 'KSampler')
+    assert.equal(sampler().steps, 25)
+    assert.equal(sampler().cfg, 2.5)
+    assert.equal(sampler().sampler_name, 'er_sde')
+    assert.equal(sampler().scheduler, 'simple')
+
+    // 2. The official register is OpenMOSS's own card: 50 / 3 / euler / simple.
+    const official = await run(mossTools({ mossSampling: 'official' }), 'qwen_image_generate', args)
+    console.log('Agent MOSS official register:', JSON.stringify(sampler()))
+    assert.equal(official.steps_used, 50)
+    assert.equal(official.steps_source, 'default')
+    assert.equal(sampler().steps, 50)
+    assert.equal(sampler().cfg, 3)
+    assert.equal(sampler().sampler_name, 'euler')
+    assert.equal(sampler().scheduler, 'simple')
+
+    // 3. An explicit `steps` still wins over the register — the count only: the
+    // register keeps owning the sampler numbers.
+    const explicit = await run(mossTools({ mossSampling: 'official' }), 'qwen_image_generate', { ...args, steps: 12 })
+    assert.equal(explicit.steps_used, 12)
+    assert.equal(explicit.steps_source, 'explicit')
+    assert.equal(sampler().steps, 12)
+    assert.equal(sampler().cfg, 3)
+    assert.equal(sampler().sampler_name, 'euler')
+
+    // 4. ...and so does the shared ComfyUI override, which outranks the register.
+    const backend = await run(mossTools({ mossSampling: 'official', comfyuiSteps: 30 }), 'qwen_image_generate', args)
+    assert.equal(backend.steps_used, 30)
+    assert.equal(backend.steps_source, 'backend')
+    assert.equal(sampler().steps, 30)
+    assert.equal(sampler().cfg, 3)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+test('a MOSS register selected while a Qwen profile runs changes nothing on the Agent tool path', async () => {
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-qwen-agent-register-'))
+  try {
+    const args = { prompt: 'A cat.', wh_ratio: '1:1', seed: 42, count: 1 }
+    const qwenTools = (overrides) =>
+      register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'qwen21-base', outputDir, timeoutMs: 30_000, ...overrides })
+
+    const before = await run(qwenTools({}), 'qwen_image_generate', args)
+    const baseline = structuredClone(comfy.state.graph)
+    const after = await run(qwenTools({ mossSampling: 'official' }), 'qwen_image_generate', args)
+    const withRegister = structuredClone(comfy.state.graph)
+
+    // Byte-identical graph: the setting only reaches families that publish
+    // registers, so a Qwen run cannot drift by a single sampler value here either.
+    assert.deepEqual(withRegister, baseline)
+    assert.equal(withRegister['6'].inputs.cfg, 1)
+    assert.equal(withRegister['6'].inputs.sampler_name, 'euler')
+    assert.equal(withRegister['6'].inputs.steps, 25, 'the shared default, not the register 50')
+    assert.equal(before.steps_used, 25)
+    assert.equal(after.steps_used, 25)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+test('MOSS edit is refused loudly instead of submitting a graph that ignores the reference', async () => {
+  const comfy = await startFakeComfy({ objectInfo: BOTH_FAMILIES_OBJECT_INFO })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-edit-'))
+  try {
+    const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000 })
+    const reference = join(outputDir, 'ref.png')
+    writeFileSync(reference, Buffer.from(PNG_1X1, 'base64'))
+    const error = await failure(tools, 'qwen_image_edit', { prompt: '只把标题换成「夏日特惠」。', images: [reference] })
+    console.log('MOSS edit refusal:\n' + error.message)
+    assert.match(error.message, /改图/)
+    assert.match(error.message, /未接入/)
+    // The TODO has to be actionable, i.e. name the nodes the follow-up needs.
+    assert.match(error.message, /moss_image_edit_lora_rank_64_bf16\.safetensors/)
+    assert.match(error.message, /TextEncodeMOSSImageEdit/)
+    assert.match(error.message, /qwen21-base/)
+    // Nothing was submitted: no half-built graph reached ComfyUI.
+    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 0)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+test('a MOSS profile over Qwen-only weights says exactly which files it needs', async () => {
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-missing-'))
+  try {
+    const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir })
+    const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    console.log('missing MOSS weights:\n' + error.message)
+    assert.match(error.message, /缺模型文件/)
+    assert.match(error.message, /moss-sft/)
+    for (const wanted of [
+      'moss_image_sft_int8_convrot.safetensors',
+      'qwen3.5_9b_w4a8_gptq.safetensors',
+      'flux2-vae_small.safetensors',
+      'diffusion_models',
+      'text_encoders',
+    ]) {
+      assert.ok(error.message.includes(wanted), `the error must name ${wanted}`)
+    }
+    // The candidates it did see have to be quoted, or the user cannot tell
+    // whether the file is missing or merely unrecognised.
+    assert.match(error.message, /qwen_image_2\.1_int8_convrot\.safetensors/)
+    assert.match(error.message, /当前能看到/)
+    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 0)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The Studio's generation response, through the same fake ComfyUI.
+//
+// `runStudioGeneration` owns no HTTP, so the only way to see what it reports is
+// to let it run a real one against the fake. That is what makes these assertions
+// worth having: the register and the degrade note are *response* fields, and a
+// pure-helper test would only re-state the expression it was given.
+// ---------------------------------------------------------------------------
+
+/** The fields `studio-settings-of` maps, with a fake server's endpoint. */
+function studioSettingsFor(comfy, outputDir, overrides = {}) {
+  return {
+    comfyEndpoint: comfy.endpoint,
+    comfyPorts: String(comfy.port),
+    comfyModelsDir: 'D:\\models',
+    timeoutMs: 30_000,
+    outputDir,
+    defaultSteps: 25,
+    comfyuiSteps: undefined,
+    comfyModel: 'moss-sft',
+    mossSampling: 'comfy',
+    turboSteps: undefined,
+    ...overrides,
+  }
+}
+
+/** Run one Studio draw against `comfy` and hand back its response. */
+function drawInStudio(comfy, outputDir, overrides, body) {
+  return runStudioGeneration(
+    studioSettingsFor(comfy, outputDir, overrides),
+    { prompt: 'A night street with a MOSS marquee.', ratio: '1:1', seed: 42, count: 1, ...body },
+    new AbortController().signal,
+  )
+}
+
+test('MOSS sampling: the Studio puts the selected register on the wire', async () => {
+  const comfy = await startFakeComfy({ objectInfo: BOTH_FAMILIES_OBJECT_INFO })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-register-'))
+  try {
+    // 1. The default register is the ComfyUI template's: 25 / 2.5 / er_sde / simple.
+    const shipped = await drawInStudio(comfy, outputDir, {}, {})
+    console.log('MOSS comfy register:', JSON.stringify(comfy.state.graph['8'].inputs))
+    assert.equal(shipped.steps, 25)
+    assert.equal(comfy.state.graph['8'].class_type, 'KSampler')
+    assert.equal(comfy.state.graph['8'].inputs.steps, 25)
+    assert.equal(comfy.state.graph['8'].inputs.cfg, 2.5)
+    assert.equal(comfy.state.graph['8'].inputs.sampler_name, 'er_sde')
+    assert.equal(comfy.state.graph['8'].inputs.scheduler, 'simple')
+
+    // 2. The official register is OpenMOSS's card: 50 / 3 / euler / simple.
+    const official = await drawInStudio(comfy, outputDir, { mossSampling: 'official' }, {})
+    console.log('MOSS official register:', JSON.stringify(comfy.state.graph['8'].inputs))
+    assert.equal(official.steps, 50)
+    assert.equal(comfy.state.graph['8'].inputs.steps, 50)
+    assert.equal(comfy.state.graph['8'].inputs.cfg, 3)
+    assert.equal(comfy.state.graph['8'].inputs.sampler_name, 'euler')
+    assert.equal(comfy.state.graph['8'].inputs.scheduler, 'simple')
+
+    // 3. `comfyuiSteps` still overrides the step count in the official mode...
+    const overridden = await drawInStudio(comfy, outputDir, { mossSampling: 'official', comfyuiSteps: 30 }, {})
+    assert.equal(overridden.steps, 30)
+    assert.equal(comfy.state.graph['8'].inputs.steps, 30)
+    // ...while the register still owns the sampler numbers.
+    assert.equal(comfy.state.graph['8'].inputs.cfg, 3)
+    assert.equal(comfy.state.graph['8'].inputs.sampler_name, 'euler')
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+test('a MOSS register selected while a Qwen profile runs changes nothing on the wire', async () => {
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-qwen-register-'))
+  try {
+    const base = { comfyModel: 'qwen21-base' }
+    const before = await drawInStudio(comfy, outputDir, base, { prompt: 'A cat.' })
+    const baseline = structuredClone(comfy.state.graph)
+    const after = await drawInStudio(comfy, outputDir, { ...base, mossSampling: 'official' }, { prompt: 'A cat.' })
+    const withRegister = structuredClone(comfy.state.graph)
+
+    // Byte-identical graph: the setting only reaches families that publish
+    // registers, so a Qwen run cannot drift by a single sampler value.
+    assert.deepEqual(withRegister, baseline)
+    assert.equal(withRegister['6'].inputs.cfg, 1)
+    assert.equal(withRegister['6'].inputs.sampler_name, 'euler')
+    assert.equal(withRegister['6'].inputs.steps, 25, 'the shared default, not the register 50')
+    assert.equal(before.steps, 25)
+    assert.equal(after.steps, 25)
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});
+
+test('the Studio reports a turbo request that ran on the base weights', async () => {
+  const withTurbo = structuredClone(OBJECT_INFO)
+  withTurbo.UNETLoader.input.required.unet_name[0].push('qwen_image_2.1_turbo_int8_convrot.safetensors')
+  const turboComfy = await startFakeComfy({ objectInfo: withTurbo })
+  const baseOnlyComfy = await startFakeComfy()
+  const mossComfy = await startFakeComfy({ objectInfo: BOTH_FAMILIES_OBJECT_INFO })
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-studio-turbo-'))
+  try {
+    // Turbo installed and asked for: the turbo graph runs, nothing degraded.
+    const turbo = await drawInStudio(turboComfy, outputDir, { comfyModel: 'qwen21-turbo' }, { prompt: 'A ceramic mug.' })
+    assert.equal(turbo.turboFallback, false)
+    assert.equal(turbo.steps, 8)
+
+    // Installed but base was asked for: that is not a fallback, it is the request.
+    const base = await drawInStudio(turboComfy, outputDir, { comfyModel: 'qwen21-base' }, { prompt: 'A ceramic mug.' })
+    assert.equal(base.turboFallback, false)
+    assert.equal(base.steps, 25)
+
+    // Turbo asked for on a base-only install: the run degrades, and says so.
+    const degraded = await drawInStudio(baseOnlyComfy, outputDir, { comfyModel: 'qwen21-turbo' }, { prompt: 'A ceramic mug.' })
+    console.log('degraded response:', JSON.stringify({ steps: degraded.steps, turboFallback: degraded.turboFallback }))
+    assert.equal(degraded.turboFallback, true)
+    assert.equal(degraded.steps, 25, 'the base graph runs at the base default')
+
+    // A MOSS request is a third family, never a turbo in disguise.
+    const moss = await drawInStudio(mossComfy, outputDir, { comfyModel: 'moss-sft' }, {})
+    assert.equal(moss.turboFallback, false)
+  } finally {
+    await turboComfy.close()
+    await baseOnlyComfy.close()
+    await mossComfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+});

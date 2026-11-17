@@ -19,6 +19,13 @@ test/client-preview.html
 # Local working plans / status archive: read locally, never committed. Not in `files`, so never packed.
 docs/plans/
 
+# Local working documents (a direction-alignment note and a competitive-positioning
+# research file): read locally, never committed, and not in `files`, so never packed.
+# The shipped prose keeps the conclusions these two feed; keep the files themselves
+# out of the repository and its history.
+docs/DIRECTION-ALIGNMENT.md
+DEEP_RESEARCH_dsh-image-forge竞争定位.md
+
 # Playwright CLI scratch (local QA only).
 .playwright-cli/
 

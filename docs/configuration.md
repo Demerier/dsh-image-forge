@@ -2,7 +2,7 @@
 
 ## 配置
 
-在 profile 的插件配置里给出（全部有默认值，`Config` schema 见 `src/index.ts`）。**一共 9 个字段**，
+在 profile 的插件配置里给出（全部有默认值，`Config` schema 见 `src/index.ts`）。**一共 10 个字段**，
 没有一个是「本地运行时」相关的——插件不拥有任何运行时；云端 API 字段（`backend` / `apiBaseUrl` /
 `apiKey` / `apiModel` / `apiStyle`）已随该后端一起删除，出图与改图只跑本机 ComfyUI。
 旧 profile 里残留的这几个键会被忽略，不会报错。
@@ -12,7 +12,8 @@
 | `comfyEndpoint` | 空 | ComfyUI 地址，如 `http://127.0.0.1:8188`；**空 = 自动探测 `comfyPorts`**。非回环地址会被拒绝（本后端只与本机通信） |
 | `comfyPorts` | `8000,8188,8189,8190,8191,8192` | `comfyEndpoint` 为空时依次尝试的端口（桌面版常见 8000/8188，便携版 8188） |
 | `comfyModelsDir` | **探测**：候选目录里第一个存在的 | ComfyUI 的 `models` 根目录，**只用于报错里写清「文件该放到哪」**；探测不到就留空，错误只说相对路径 |
-| `comfyModel` | `base` | `base`（25 步，官方全量）/ `turbo`（8 步，蒸馏版）。turbo 缺失时自动回落 base |
+| `comfyModel` | `qwen21-base` | 三个规范值：`qwen21-base`（Qwen 25 步，官方全量）/ `qwen21-turbo`（8 步蒸馏，缺权重自动回落 base）/ `moss-sft`（MOSS-Image 文生图，缺权重**报错**，不回落）。旧值 `base` / `turbo` 仍被接受并映射到前两个 |
+| `mossSampling` | `comfy` | MOSS 的采样档位：`comfy`（ComfyUI 模板口径，25 步 / CFG 2.5 / `er_sde`）/ `official`（OpenMOSS 卡片，50 步 / CFG 3 / `euler`）。**只对 `moss-sft` 生效**——Qwen 两个 profile 没有档位，读到它也不改变任何采样数值 |
 | `turboSteps` | 空 | turbo 专用步数；**空 = 8**。它**不**继承 `defaultSteps`（把 25 递给蒸馏版会让画面变差） |
 | `defaultSteps` | `25` | **默认采样步数**。没有单独指定时用它。25 = 官方 ComfyUI 2.1 模板口径 |
 | `comfyuiSteps` | 空 | ComfyUI 专用步数（只对 base 那一支生效）；**空 = 用 `defaultSteps`** |
@@ -22,13 +23,19 @@
 **步数解析优先级**（两套，互不越界）：
 
 ```text
-base :  调用方显式 steps  >  comfyuiSteps  >  defaultSteps
+base :  调用方显式 steps  >  comfyuiSteps  >  档位自带步数（`mossSampling` = official 时 50）  >  defaultSteps
 turbo:  调用方显式 steps  >  turboSteps    >  8
 ```
 
+第三级只在「该 profile 发布了档位、且选中的不是它自己的默认档」时出现：MOSS 的默认档 `comfy`
+仍由 `defaultSteps` 决定（25 与模板一致），`official` 档自带 50；Qwen 两个 profile 没有档位表，
+这一级永不参与，所以它们的采样数值逐字不变。Agent 工具与 Studio 走的是**同一条**链
+（`resolveSteps` / `resolveStudioSteps`），两条通路不会给出不同的步数。
+
 结果里恒带 `steps_used`（实际步数）与 `steps_source`（`explicit` / `backend` / `default`），
-所以「为什么这张不一样」可以直接从返回值回答。解析发生在**每次派发时**，
-设置页改完步数、权重档、端口，下一次调用立即生效（工具在每次调用时重新读取配置）。
+所以「为什么这张不一样」可以直接从返回值回答。档位自带的值报 `default`（它是模型家族自己的
+工作点，不是你覆盖的、也不是共享的 ComfyUI 覆盖）。解析发生在**每次派发时**，
+设置页改完步数、权重档、档位、端口，下一次调用立即生效（工具在每次调用时重新读取配置）。
 turbo 之所以不落回 `defaultSteps`：蒸馏按 8 步调，25 步在它身上是「更贵且更差」，不是「更精细」。
 
 **「更大不等于更好」的实测**：同提示词、同 seed 下 25 → 50 步，客观指标反而**变差**——
@@ -37,7 +44,7 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
 
 ## 设置页（DSH Web GUI）
 
-**9 个字段全部可写，也全部在页面上**——没有隐藏项。云端 API 标签页随该后端一起删除了。
+**10 个字段全部可写，也全部在页面上**——没有隐藏项。云端 API 标签页随该后端一起删除了。
 
 - 菜单位置：**设置 → 「Qwen 出图」**——和「通用设置 / 模式 / 插件 / Agent 预设」同级的**一级菜单项**
   （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。第一个页签是**图像工作台**（可直接出图）。
@@ -45,14 +52,14 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
 
   | 标签 | 内容 |
   |---|---|
-  | 出图 | `defaultSteps` / `comfyuiSteps` / `comfyModel` / `turboSteps`、`outputDir` / `timeoutMs`，以及 turbo/base 说明 |
+  | 出图 | `defaultSteps` / `comfyuiSteps` / `comfyModel` / `mossSampling` / `turboSteps`、`outputDir` / `timeoutMs`，以及 turbo/base 说明 |
   | ComfyUI | `comfyEndpoint`、`comfyPorts`、`comfyModelsDir`（+ 部署文档入口） |
 
 - **页面可见字段**（三块，每块都有标题与一行说明）：
 
   | 分区 | 字段 |
   |---|---|
-  | 步数（画质与耗时） | `defaultSteps`、`comfyuiSteps`、`comfyModel`、`turboSteps` |
+  | 步数（画质与耗时） | `defaultSteps`、`comfyuiSteps`、`comfyModel`、`mossSampling`、`turboSteps` |
   | ComfyUI | `comfyEndpoint`、`comfyPorts`、`comfyModelsDir` |
   | 输出与超时 | `outputDir`、`timeoutMs` |
 

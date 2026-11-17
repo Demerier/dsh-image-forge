@@ -181,11 +181,23 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: 'comfyModel',
     group: 'steps',
     label: 'ComfyUI 权重',
-    hint: 'turbo：8 步，快 2.7×；没装 turbo 权重自动退回 base。',
+    hint: 'turbo 8 步 2.7×；缺权重退回 base；moss 缺报错。',
     kind: 'enum',
     choices: [
-      { value: 'base', label: 'base（25 步，官方全量）' },
-      { value: 'turbo', label: 'turbo（8 步，蒸馏版）' },
+      { value: 'qwen21-base', label: 'qwen21-base（Qwen 25 步）' },
+      { value: 'qwen21-turbo', label: 'qwen21-turbo（8 步蒸馏）' },
+      { value: 'moss-sft', label: 'moss-sft（MOSS-Image 文生图）' },
+    ],
+  },
+  {
+    key: 'mossSampling',
+    group: 'steps',
+    label: 'MOSS 采样',
+    hint: '默认 comfy：25 步/2.5；official：50 步/3，更慢。',
+    kind: 'enum',
+    choices: [
+      { value: 'comfy', label: 'comfy（模板口径，25 步）' },
+      { value: 'official', label: 'official（OpenMOSS，50 步）' },
     ],
   },
   {

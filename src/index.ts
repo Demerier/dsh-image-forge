@@ -11,6 +11,16 @@ import { registerImageForgeSkill } from './skill.ts'
 import { registerStudioRoutes } from './studio-routes.ts'
 import { studioSettingsOf } from './studio-service.ts'
 import { registerImageForgeTools } from './tools.ts'
+import {
+  COMFY_MODEL_IDS,
+  DEFAULT_COMFY_MODEL,
+  DEFAULT_MOSS_SAMPLING,
+  LEGACY_COMFY_MODEL_IDS,
+  MOSS_SAMPLING_PRESETS,
+  resolveProfile,
+  type ComfyModelId,
+  type MossSamplingPreset,
+} from './model-profiles.ts'
 
 /** Registration name inside the cordis context. */
 export const name = 'dsh-image-forge'
@@ -56,15 +66,31 @@ export interface Config {
    */
   comfyuiSteps: number | undefined
   /**
-   * Which checkpoint family the ComfyUI path asks for.
+   * Which model profile the ComfyUI path asks for.
    *
-   * `base` (the default) is the 25-step Qwen-Image 2.1 checkpoint. `turbo` is
-   * the distilled one: 8 steps on its own fixed sigma schedule, which is the
-   * whole reason it exists — a local card that cannot do 25 steps comfortably
-   * can do 8. It is only usable when a turbo unet is actually installed;
-   * otherwise the pipeline falls back to `base` and says so in its result.
+   * `qwen21-base` (the default) is the 25-step Qwen-Image 2.1 checkpoint.
+   * `qwen21-turbo` is the distilled one: 8 steps on its own fixed sigma
+   * schedule, which is the whole reason it exists — a local card that cannot do
+   * 25 steps comfortably can do 8. `moss-sft` swaps the whole family for
+   * MOSS-Image (its own weights, text encoder and VAE), text-to-image only for
+   * now.
+   *
+   * The two pre-profile values `base` / `turbo` are still **accepted** and are
+   * normalised to `qwen21-base` / `qwen21-turbo` on resolve, so an existing
+   * `cordis.yml` or saved settings document keeps doing what it did.
    */
-  comfyModel: 'base' | 'turbo'
+  comfyModel: ComfyModelId
+  /**
+   * Sampling register for MOSS-Image only; both Qwen profiles ignore it.
+   *
+   * `comfy` (the default) is the ComfyUI template's faster settings — 25 steps /
+   * CFG 2.5 / `er_sde` / `simple` — and is what this machine's verified sample
+   * ran. `official` is OpenMOSS's own card: 50 steps / CFG 3 / `euler` /
+   * `simple`. One select rather than three loose numbers, because the two
+   * registers are published as pairs and taking half from each is the mistake
+   * this setting exists to make impossible.
+   */
+  mossSampling: MossSamplingPreset
   /**
    * Steps for the turbo checkpoint; `undefined` means {@link TURBO_STEPS} (8).
    *
@@ -115,7 +141,14 @@ export const Config = Schema.object({
   // the settings page's field-coverage guard sees them.
   defaultSteps: Schema.number().default(25).volatile(),
   comfyuiSteps: Schema.number().volatile(),
-  comfyModel: Schema.union(['base', 'turbo']).default('base').volatile(),
+  // The accepted set is the canonical profile ids **plus** the two legacy
+  // values: the union is what validates a profile patch, so dropping `base` /
+  // `turbo` here would break every config written before profiles existed.
+  comfyModel: Schema.union([...COMFY_MODEL_IDS, ...LEGACY_COMFY_MODEL_IDS]).default(DEFAULT_COMFY_MODEL).volatile(),
+  // MOSS-Image's sampling register. Declared as a union like `comfyModel`, so a
+  // typo is a load-time error rather than a silent fall back to the verified one;
+  // profiles without a register table (both Qwen ones) ignore the value.
+  mossSampling: Schema.union([...MOSS_SAMPLING_PRESETS]).default(DEFAULT_MOSS_SAMPLING).volatile(),
   turboSteps: Schema.number().volatile(),
 })
 
@@ -143,7 +176,11 @@ const CONFIG_DEFAULTS: ConfigRecord = schemaDefaults(Config({}) as ConfigRecord)
  * @returns the resolved config, every field present.
  */
 function resolveConfig(config?: ConfigFields): Config {
-  return resolveConfigFields(CONFIG_DEFAULTS, config as ConfigRecord | undefined) as unknown as Config
+  const resolved = resolveConfigFields(CONFIG_DEFAULTS, config as ConfigRecord | undefined) as unknown as Config
+  // One vocabulary downstream: a legacy `base` / `turbo` (a profile patch, an
+  // older saved settings document) is normalised to its canonical profile id
+  // here, so nothing after this point has to know the two spellings exist.
+  return { ...resolved, comfyModel: resolveProfile(resolved.comfyModel).id }
 }
 
 /**

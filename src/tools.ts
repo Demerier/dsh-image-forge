@@ -18,6 +18,7 @@ import {
   comfyOptionsOf as buildComfyOptions,
   comfySystemStats,
   discoverComfyUi,
+  effectiveProfile,
   generateViaComfyUi,
   generateViaComfyUiEdit,
   generateViaComfyUiTurbo,
@@ -25,10 +26,12 @@ import {
   loadComfyModels,
   parseComfyPorts,
   probeComfyUi,
-  turboUnetOf,
+  resolveProfile,
   TURBO_STEPS,
+  type ComfyModelChoice,
   type ComfyModels,
 } from './comfyui.ts'
+import { presetSteps, type ModelProfile, type MossSamplingPreset } from './model-profiles.ts'
 import type { GeneratedImage } from './images.ts'
 import { sanitizePrefix, writeImages, type WrittenImage } from './output.ts'
 import { makeItemId, recordItems } from './boards.ts'
@@ -73,7 +76,8 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   steps: {
     type: 'integer',
     description:
-      '采样步数；省略则按配置解析：`comfyuiSteps` → 默认 `defaultSteps`（默认 25）；`comfyModel: "turbo"` 时是 `turboSteps` → 8。' +
+      '采样步数；省略则按配置解析：`comfyuiSteps` → 档位自带步数（`mossSampling` 为 `official` 时 50，仅 MOSS）→ 默认 `defaultSteps`（默认 25）；' +
+      '`comfyModel` 是 turbo 变体（`qwen21-turbo` / 旧值 `turbo`）时是 `turboSteps` → 8。' +
       '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
   seed: {
@@ -145,7 +149,8 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
   steps: {
     type: 'integer',
     description:
-      '采样步数；省略则按配置解析：`comfyuiSteps` → 默认 `defaultSteps`（默认 25）；`comfyModel: "turbo"` 时是 `turboSteps` → 8。' +
+      '采样步数；省略则按配置解析：`comfyuiSteps` → 档位自带步数（`mossSampling` 为 `official` 时 50，仅 MOSS）→ 默认 `defaultSteps`（默认 25）；' +
+      '`comfyModel` 是 turbo 变体（`qwen21-turbo` / 旧值 `turbo`）时是 `turboSteps` → 8。' +
       '结果里的 `steps_used` 与 `steps_source` 会说明实际用了多少、以及它来自哪一层。仅当你明确知道该模型的建议值时再传。',
   },
   seed: {
@@ -430,8 +435,21 @@ export interface ForgeSettings {
   readonly defaultSteps: number
   /** ComfyUI step override; undefined falls through to `defaultSteps`. */
   readonly comfyuiSteps: number | undefined
-  /** Which checkpoint family to ask for; a turbo unet must be installed to matter. */
-  readonly comfyModel: 'base' | 'turbo'
+  /**
+   * Which model profile to ask for (`qwen21-base` / `qwen21-turbo` / `moss-sft`;
+   * the pre-profile `base` / `turbo` still resolve).
+   */
+  readonly comfyModel: ComfyModelChoice
+  /**
+   * Sampling register for a family that publishes more than one (MOSS-Image).
+   *
+   * Ignored by both Qwen profiles — they declare no registers — so their sampler
+   * numbers cannot move. It takes the same two paths here that it takes in the
+   * Studio: `comfyOptionsOf` → `ComfyOptions` decides sampler / CFG / scheduler,
+   * and {@link resolveSteps} → `presetSteps` decides a non-default register's
+   * step count. Absent means the family's own default (the verified one).
+   */
+  readonly mossSampling?: MossSamplingPreset
   /** Turbo step override; `undefined` means the distilled default (8). */
   readonly turboSteps: number | undefined
 }
@@ -457,6 +475,7 @@ export function resolveSettings(config: Config): ForgeSettings {
     defaultSteps: config.defaultSteps,
     comfyuiSteps: config.comfyuiSteps,
     comfyModel: config.comfyModel,
+    mossSampling: config.mossSampling,
     turboSteps: config.turboSteps,
   }
 }
@@ -489,19 +508,35 @@ export interface StepsResolution {
 /**
  * Resolve the sampler steps one call should use.
  *
- * Priority: the caller's explicit `steps` > the ComfyUI override
- * (`comfyuiSteps`) > `defaultSteps`. Every branch passes through
- * {@link clampSteps}, so even an explicit 10000 arrives at the GPU as 200.
+ * Priority, level for level the same chain `resolveStudioSteps` runs: the
+ * caller's explicit `steps` > the ComfyUI override (`comfyuiSteps`) > a
+ * non-default sampling register's own working point ({@link presetSteps}) >
+ * `defaultSteps`. The register level is `undefined` for both Qwen profiles and
+ * for MOSS's default register, so it is inert everywhere the shipped behaviour
+ * must stay byte-identical; it only fires for a register whose whole point is a
+ * different working point (MOSS official: 50, not 25).
  *
- * @param explicit - the caller's `steps`, when it supplied one.
- * @param settings - the resolved plugin settings.
- * @returns the count and where it came from.
+ * The count has to be resolved **here** and not left to the adapter: every
+ * dispatch site overwrites `request.steps` with the resolved `usedSteps.steps`,
+ * so `request.steps` is always defined by the time `textToImageValues` runs, and
+ * its `request.steps ?? sampling.steps.default` can never supply the register's
+ * 50. That is exactly why the Studio resolves it in `resolveStudioSteps` too.
+ *
+ * A register-sourced count reports `source: 'default'`: it is the family's own
+ * working point, not a user override (`'explicit'`) and not the shared ComfyUI
+ * override (`'backend'`) — the three values `docs/configuration.md` documents.
  */
-export function resolveSteps(explicit: number | undefined, settings: ForgeSettings): StepsResolution {
+export function resolveSteps(
+  explicit: number | undefined,
+  settings: ForgeSettings,
+  profile: ModelProfile = resolveProfile(settings.comfyModel),
+): StepsResolution {
   if (explicit !== undefined) return { steps: clampSteps(explicit), source: 'explicit' }
   if (typeof settings.comfyuiSteps === 'number' && Number.isFinite(settings.comfyuiSteps) && settings.comfyuiSteps >= 1) {
     return { steps: clampSteps(settings.comfyuiSteps), source: 'backend' }
   }
+  const register = presetSteps(profile, settings.mossSampling)
+  if (register !== undefined) return { steps: register, source: 'default' }
   return { steps: settings.defaultSteps, source: 'default' }
 }
 
@@ -547,7 +582,10 @@ interface ComfyRunReport {
   port: number
   probed: unknown
   models: ComfyModels
-  comfyModel: 'turbo' | 'base'
+  /** `base` / `turbo` / `moss`: the family group that actually ran. */
+  comfyModel: 'turbo' | 'base' | 'moss'
+  /** The exact profile id that ran, e.g. `qwen21-turbo`. */
+  profile: string
   turbo_fallback?: string
   references_uploaded?: string[]
   elapsed_ms: number
@@ -569,7 +607,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       `直接接受官方契约的 7 档画幅比（${WH_RATIOS.join(' / ')}），插件自己换算成 ${SIZE_MULTIPLE} 对齐的像素尺寸——` +
       '所以「契约输出 → 插件入参」不需要人工翻译。省略 wh_ratio 用 1:1，给了 width/height 则以它们为准。' +
       '结果落盘到配置的 outputDir 并把绝对路径写进正文 Markdown，同时回传结构化字段。' +
-      '需要本机 ComfyUI 已启动且装好三个 Qwen-Image 权重（部署见 docs/comfyui-deployment.md）。',
+      '需要本机 ComfyUI 已启动，且装好当前 `comfyModel` 那个 profile 的三个权重（默认 Qwen-Image 2.1；`moss-sft` 走 MOSS-Image；部署见 docs/comfyui-deployment.md）。',
     parameters: GENERATE_PARAMETERS,
     output: {
       schema: { type: 'json' },
@@ -602,13 +640,17 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       const target = await discoverComfyUi(options, exec.signal)
       const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
       const comfyStartedAt = Date.now()
-      // Which checkpoint family to run. `turbo` is a *request*, not a
-      // guarantee: it needs a turbo unet to be installed, and when only the
-      // base weights are present the run falls back rather than failing —
-      // the alternative is a config typo turning into "no images at all".
-      const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
-      const turboSkipped = settings.comfyModel === 'turbo' && !turbo
-      const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings)
+      // Which graph to run is a profile question, and a turbo request is a
+      // *preference*, not a guarantee: it needs a turbo unet to be installed, and
+      // when only the base weights are present the run falls back rather than
+      // failing — the alternative is a config typo turning into "no images at
+      // all". `effectiveProfile` applies the same rule to the weights the
+      // adapter really found, so the graph can never disagree with them.
+      const requestedProfile = resolveProfile(settings.comfyModel)
+      const profile = effectiveProfile(settings.comfyModel, models)
+      const turbo = profile.variant === 'turbo'
+      const turboSkipped = requestedProfile.variant === 'turbo' && !turbo
+      const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings, profile)
       const images = turbo
         ? await generateViaComfyUiTurbo(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
         : await generateViaComfyUi(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
@@ -617,11 +659,14 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         port: target.port,
         probed: target.probed,
         models,
-        comfyModel: turbo ? 'turbo' : 'base',
+        comfyModel: profile.legacyLabel,
+        profile: profile.id,
         ...(turboSkipped ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' } : {}),
         elapsed_ms: Date.now() - comfyStartedAt,
       }
-      const backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
+      const backendLabel =
+        `后端 comfyui / ${target.endpoint} / ${models.unet}` +
+        (turbo ? '（turbo）' : profile.legacyLabel === 'moss' ? '（MOSS）' : '')
 
       const prefix = sanitizePrefix(args.preset)
       const written = await writeImages(settings.outputDir, prefix, size.width, size.height, images)
@@ -685,6 +730,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       '`ratio_follow` 让画布**跟随某张参考图的宽高比**（写 `image1`…`image10`，或直接把 `images` 里的那一项再写一遍）；' +
       '它与 `wh_ratio` **互斥**（官方契约里一个非空另一个必须为空），两个都不给时**默认跟随第一张参考图**。' +
       '参考图先上传进 ComfyUI 的 input/ 目录。' +
+      '改图只有 Qwen 通路：`comfyModel` 是 `moss-sft` 时会**明确报未接入**，不会递一张忽略参考图的图上去。' +
       '部署（ComfyUI 桌面版 + 三个权重）见 docs/comfyui-deployment.md。' +
       '结果落盘到 outputDir 并把绝对路径写进正文 Markdown。',
     parameters: EDIT_PARAMETERS,
@@ -726,9 +772,11 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       const target = await discoverComfyUi(options, exec.signal)
       const models: ComfyModels = await loadComfyModels(target, options, exec.signal)
       const comfyStartedAt = Date.now()
-      const turbo = settings.comfyModel === 'turbo' && turboUnetOf(models) !== undefined
-      const turboSkipped = settings.comfyModel === 'turbo' && !turbo
-      const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings)
+      const requestedProfile = resolveProfile(settings.comfyModel)
+      const profile = effectiveProfile(settings.comfyModel, models)
+      const turbo = profile.variant === 'turbo'
+      const turboSkipped = requestedProfile.variant === 'turbo' && !turbo
+      const usedSteps = turbo ? resolveTurboSteps(steps, settings) : resolveSteps(steps, settings, profile)
       const images = turbo
         ? await generateViaComfyUiTurboEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
         : await generateViaComfyUiEdit(target, models, { ...request, steps: usedSteps.steps }, options, exec.signal)
@@ -737,12 +785,15 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
         port: target.port,
         probed: target.probed,
         models,
-        comfyModel: turbo ? 'turbo' : 'base',
+        comfyModel: profile.legacyLabel,
+        profile: profile.id,
         ...(turboSkipped ? { turbo_fallback: '已选 turbo，但 /object_info 里没有 turbo 权重，本次用 base 跑' } : {}),
         references_uploaded: references.map((reference) => reference.label),
         elapsed_ms: Date.now() - comfyStartedAt,
       }
-      const backendLabel = `后端 comfyui / ${target.endpoint} / ${models.unet}${turbo ? '（turbo）' : ''}`
+      const backendLabel =
+        `后端 comfyui / ${target.endpoint} / ${models.unet}` +
+        (turbo ? '（turbo）' : profile.legacyLabel === 'moss' ? '（MOSS）' : '')
 
       const prefix = sanitizePrefix(args.preset, 'edit')
       const written = await writeImages(settings.outputDir, prefix, size.width, size.height, images)
@@ -826,7 +877,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
   ctx.tools.register(defineTool({
     name: 'qwen_image_status',
     description:
-      '后端健康探测：**本机 ComfyUI 是否在跑**（含探测过哪几个端口、三个 Qwen-Image 权重能不能被它的加载器枚举到、' +
+      '后端健康探测：**本机 ComfyUI 是否在跑**（含探测过哪几个端口、当前 `comfyModel` 那个 profile 的三个权重能不能被它的加载器枚举到、' +
       '显卡型号与显存余量），以及输出目录能不能写。不产生任何图片、不写盘、不改配置。排障时先跑它。',
     parameters: {
       timeoutMs: {
