@@ -57,12 +57,38 @@ export const MAX_BOARDS = 200
 /** Most items one board may hold. */
 export const MAX_BOARD_ITEMS = 1000
 
-/** Shape version of one board file; a mismatched file is ignored, not migrated. */
-const BOARD_VERSION = 1
+/**
+ * Shape version of one board file.
+ *
+ * v2 added `kind` to items (`image` / `task` / `layout`); v1 files have no
+ * `kind` and are migrated **in memory on read** (see {@link migrateBoardFile}),
+ * so an upgrade never makes an existing board disappear from the panel. A file
+ * from a **newer** version is still ignored whole: an old plugin must not write
+ * a board it cannot understand.
+ */
+export const BOARD_VERSION = 2
 
-/** Columns, pitch and origin of the grid an unplaced item lands on. */
+/**
+ * The one older shape this module can still read: v1, whose items are all
+ * images and carry no `kind`.
+ */
+const BOARD_VERSION_V1 = 1
+
+/**
+ * Columns, pitch and origin of the grid an unplaced item lands on.
+ *
+ * `GRID_PITCH_X` is `MAX_NODE_WIDTH (480) + 36` (DD16, CANVAS-DESIGN §3.4): the
+ * grid is the fallback arrangement for items with no saved position, and a node
+ * is now as wide as its picture's aspect ratio allows, so the pitch has to clear
+ * the widest node instead of the 208 default box. Density on a first drop is
+ * worth less than never overlapping; the user's own arrangement takes over from
+ * the moment they drag a node.
+ *
+ * Mirrored in `src/studio-view.ts` (`fallbackSpot`), which keeps the same grid
+ * for a node whose stored position is missing — change both together.
+ */
 const GRID_COLUMNS = 3
-const GRID_PITCH_X = 244
+const GRID_PITCH_X = 516
 const GRID_PITCH_Y = 276
 const GRID_ORIGIN = 40
 
@@ -266,6 +292,65 @@ export function makeItemId(): string {
 // Reading
 // ---------------------------------------------------------------------------
 
+/**
+ * Bring any board file this plugin understands up to {@link BOARD_VERSION}.
+ *
+ * **Pure**: no IO, no clock, and `raw` is never mutated — `readBoardFile` hands
+ * it the parsed JSON and the caller gets a board it can render. That purity is
+ * also what makes the lazy migration safe: reading a v1 board (listing the
+ * library, opening the panel) never writes to disk, so a read-only output
+ * directory stays usable and merely listing boards cannot rewrite a user's
+ * library. The upgraded shape reaches disk with the **next** write the user
+ * causes (record / save-layout / remove / rename), because every writer saves
+ * the board it just read.
+ *
+ * v1 → v2 is additive by construction: each item keeps every field it had
+ * (`id`, `x`/`y`, `parents`, `batchId`, …) and gains `kind:'image'`; the board
+ * keeps its name/camera/timestamps and gains `version:2`. Items that were
+ * invalid in v1 are still dropped one by one — a single bad entry must never
+ * hide the rest of the board (the loose-validation rule this module has always
+ * had).
+ *
+ * v2 is validated **by kind**: an image needs its three file strings (as
+ * before), a task needs a terminal status plus its params, a layout needs its
+ * draft. An unknown kind (a node type from a future version) drops that item
+ * only — forward compatible without storing data we cannot render.
+ *
+ * @param raw - parsed JSON of unknown shape.
+ * @returns the board at v2, or `undefined` when the file is unusable or written
+ *   by a version this module does not know (0, 3, missing — ignored whole, so a
+ *   downgrade can never rewrite a newer file with older semantics).
+ */
+export function migrateBoardFile(raw: unknown): BoardFile | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const record = raw as Partial<BoardFile>
+  if (record.version !== BOARD_VERSION_V1 && record.version !== BOARD_VERSION) return undefined
+  if (typeof record.id !== 'string' || typeof record.name !== 'string') return undefined
+  if (!Array.isArray(record.items)) return undefined
+  const items = record.version === BOARD_VERSION_V1
+    // v1 had one node type; every surviving entry becomes an image node.
+    ? record.items.filter(isBoardItem).map(toImageItem)
+    // v2 is already discriminated by kind; keep the valid entries verbatim so a
+    // second pass is a no-op (idempotency is what lets the lazy write happen
+    // at any later moment without a second shape change).
+    : record.items.filter(isBoardItemV2)
+  return {
+    version: BOARD_VERSION,
+    id: record.id,
+    name: record.name,
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date(0).toISOString(),
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString(),
+    sessionId: typeof record.sessionId === 'string' ? record.sessionId : null,
+    camera: isCamera(record.camera) ? record.camera : null,
+    items,
+  }
+}
+
+/** v1 item → v2 image node: the one field v1 did not have, everything else kept. */
+function toImageItem(item: BoardItem): BoardItem {
+  return { ...item, kind: 'image' }
+}
+
 /** Parse one board file, returning `undefined` for anything malformed. */
 async function readBoardFile(outputDir: string, id: string): Promise<BoardFile | undefined> {
   let raw: string
@@ -280,21 +365,9 @@ async function readBoardFile(outputDir: string, id: string): Promise<BoardFile |
   } catch {
     return undefined
   }
-  if (typeof parsed !== 'object' || parsed === null) return undefined
-  const record = parsed as Partial<BoardFile>
-  if (record.version !== BOARD_VERSION) return undefined
-  if (typeof record.id !== 'string' || typeof record.name !== 'string') return undefined
-  if (!Array.isArray(record.items)) return undefined
-  return {
-    version: BOARD_VERSION,
-    id: record.id,
-    name: record.name,
-    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date(0).toISOString(),
-    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString(),
-    sessionId: typeof record.sessionId === 'string' ? record.sessionId : null,
-    camera: isCamera(record.camera) ? record.camera : null,
-    items: record.items.filter(isBoardItem),
-  }
+  // Read-only on purpose: a v1 board is upgraded in memory and only saved by the
+  // next write. See migrateBoardFile.
+  return migrateBoardFile(parsed)
 }
 
 function isCamera(value: unknown): value is { x: number; y: number; zoom: number } {
@@ -303,11 +376,56 @@ function isCamera(value: unknown): value is { x: number; y: number; zoom: number
   return ['x', 'y', 'zoom'].every((key) => typeof camera[key] === 'number' && Number.isFinite(camera[key] as number))
 }
 
-/** Loose validation on read: one bad item must not hide the rest of the board. */
+/**
+ * v1 item validation: loose, and only about the fields the store itself needs.
+ *
+ * Kept verbatim as the v1 rule (id + two path strings): the migration must
+ * accept exactly what the previous release accepted, or an upgrade would
+ * silently drop entries the user could still see yesterday.
+ */
 function isBoardItem(value: unknown): value is BoardItem {
   if (typeof value !== 'object' || value === null) return false
   const item = value as Record<string, unknown>
   return typeof item.id === 'string' && typeof item.path === 'string' && typeof item.markdownPath === 'string'
+}
+
+/**
+ * v2 item validation: branch on `kind`.
+ *
+ * Every kind needs an `id` (it is the node's identity and the layout-save key).
+ * `path`/`markdownPath` are required for images only — a task node has no file
+ * (the run failed) and a layout node has a draft instead — so the old
+ * "three strings" rule would reject both. An absent `kind` counts as `image`,
+ * which keeps a hand-edited or tool-written v2 file readable.
+ */
+function isBoardItemV2(value: unknown): value is BoardItem {
+  if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  if (typeof item.id !== 'string') return false
+  const kind = item.kind ?? 'image'
+  if (kind === 'image') return typeof item.path === 'string' && typeof item.markdownPath === 'string'
+  if (kind === 'task') return isTaskItem(item)
+  if (kind === 'layout') return isLayoutItem(item)
+  // Unknown kind: a node type from a future version. Drop the entry, keep the board.
+  return false
+}
+
+/** A task node is storable only once terminal, with the request it came from. */
+function isTaskItem(item: Record<string, unknown>): boolean {
+  const task = item.task
+  if (typeof task !== 'object' || task === null) return false
+  const record = task as Record<string, unknown>
+  if (record.status !== 'failed' && record.status !== 'interrupted') return false
+  return typeof record.params === 'object' && record.params !== null
+}
+
+/** A layout node is its draft: without one there is nothing to show or edit. */
+function isLayoutItem(item: Record<string, unknown>): boolean {
+  const draft = item.draft
+  if (typeof draft !== 'object' || draft === null) return false
+  const record = draft as Record<string, unknown>
+  if (!Number.isFinite(record.width) || !Number.isFinite(record.height)) return false
+  return Array.isArray(record.items)
 }
 
 /** Summary projection, so a list request never carries every prompt. */
@@ -521,6 +639,10 @@ export async function recordItems(
       const existingIndex = board.items.findIndex((item) => item.path === incoming.path)
       const next: BoardItem = {
         id: existingIndex >= 0 ? board.items[existingIndex].id : (incoming.id ?? makeItemId()),
+        // Recorded images are image nodes by definition; spelling `kind` out (rather
+        // than relying on the absent-means-image default) keeps a v2 file
+        // self-describing for anything that reads it without this module.
+        kind: 'image',
         path: incoming.path,
         markdownPath: incoming.markdownPath,
         width: incoming.width,

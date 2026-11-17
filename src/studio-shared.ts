@@ -279,6 +279,85 @@ export interface BoardSummary {
   sessionId: string | null
 }
 
+/**
+ * Which node a board item is (v2).
+ *
+ * `image` is a finished picture (a v1 item, and what a v1 file migrates to);
+ * `task` is a generation that ended without producing one (kept so the canvas
+ * can offer a retry); `layout` is a MOSS layout draft with no picture yet.
+ * Absent on a v2 item means `image` — that keeps hand-written and future files
+ * readable without inventing a default at every call site.
+ */
+export type BoardItemKind = 'image' | 'task' | 'layout'
+
+/**
+ * One box of a layout draft, structurally equal to `LayoutDraftItem`
+ * in `layout-editor.ts`.
+ *
+ * Restated here instead of imported: `layout-editor.ts` is a **client** module,
+ * and pulling it into `studio-shared.ts` (which the host half also bundles)
+ * would drag the editor's DOM mount into the server entry. The shapes are kept
+ * identical on purpose — a draft written here compiles there without a cast.
+ */
+export interface BoardLayoutItem {
+  /** `object` / `character` / `text`, the labels the compiler accepts. */
+  label: 'object' | 'character' | 'text'
+  caption: string
+  /** Draft pixels, `[x1, y1, x2, y2]`, origin top-left. */
+  bbox: readonly [number, number, number, number]
+  text?: string
+  tags?: string[]
+  palette?: string[]
+}
+
+/**
+ * A layout draft as a board stores it, structurally equal to `LayoutDraft`.
+ *
+ * Same reason as {@link BoardLayoutItem} for restating it: shared code cannot
+ * import the client editor module. Pixel coordinates are independent of the
+ * node's display size ({@link BoardItem.w}), which is the point of keeping the
+ * draft verbatim rather than a rendered image.
+ */
+export interface BoardLayoutDraft {
+  /** Canvas width in draft pixels (a positive multiple of 16). */
+  width: number
+  /** Canvas height in draft pixels (a positive multiple of 16). */
+  height: number
+  bbox_coord_space: 'abs'
+  bbox_format: 'xyxy'
+  summary: {
+    caption: string
+    meta?: string[]
+    canvas?: 'single' | 'multi_panel' | 'collage'
+    palette?: string[]
+  }
+  items: BoardLayoutItem[]
+}
+
+/**
+ * The generation request a task node was started from, so a failure can be
+ * retried (or the form reopened) without asking the user to retype it.
+ *
+ * A snapshot, not a live request: references are reduced to what the retry
+ * needs (a path or a name plus its media type), never image bytes.
+ */
+export interface BoardTaskParams {
+  prompt: string
+  ratio?: string
+  steps?: number
+  count?: number
+  seed?: number
+  references?: Array<{ path?: string; name?: string; mediaType?: string }>
+}
+
+/** A task node that reached a terminal state; only terminal states are stored. */
+export interface BoardTaskInfo {
+  status: 'failed' | 'interrupted'
+  params: BoardTaskParams
+  /** First line of whatever went wrong, for the node's caption. */
+  error?: string
+}
+
 /** One image as a board stores it: the file, its provenance and its position. */
 export interface BoardItem {
   id: string
@@ -307,6 +386,17 @@ export interface BoardItem {
   /** Canvas position in world units; `null` for an item never placed. */
   x: number | null
   y: number | null
+
+  // ---- v2 additions; absent means `'image'` (the v1 shape) -------------------
+  /** What this node is. Absent means `'image'`, which is what v1 files migrate to. */
+  kind?: BoardItemKind
+  /** `kind:'layout'` only: the editable draft. Missing means the item is unreadable. */
+  draft?: BoardLayoutDraft
+  /** `kind:'layout'` only: display size in world units (`draft` has its own pixels). */
+  w?: number
+  h?: number
+  /** `kind:'task'` only: the terminal state and the request to retry. */
+  task?: BoardTaskInfo
 }
 
 /** One board with its items and camera. */

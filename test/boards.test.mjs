@@ -152,12 +152,17 @@ test('unplaced items land on a three-column grid, in write order', async () => {
     const created = await recordItems(dir, undefined, [
       item(dir, 'g1'), item(dir, 'g2'), item(dir, 'g3'), item(dir, 'g4'),
     ])
+    // Pitch X is 516 = MAX_NODE_WIDTH(480) + 36 (DD16): a node is as wide as its
+    // picture's aspect ratio allows, so the grid has to clear the widest one.
+    // Pitch Y (276) and the origin (40) are unchanged; so is the 3-column rule.
     assert.deepEqual(created.items.map((entry) => [entry.x, entry.y]), [
       [40, 40],
-      [284, 40],
-      [528, 40],
+      [556, 40],
+      [1072, 40],
       [40, 316],
     ])
+    const xs = created.items.slice(0, 3).map((entry) => entry.x)
+    assert.ok(xs[1] - xs[0] >= 480 + 36, 'the pitch must clear the widest node, not just the default box')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -153,9 +153,16 @@ interface Batch {
   readonly response: StudioGenerateResponse
 }
 
-/** Grid a board item lands on when it was never placed. Mirrors the host store. */
+/**
+ * Grid a board item lands on when it was never placed. Mirrors the host store:
+ * `GRID_PITCH_X`/`GRID_PITCH_Y`/`GRID_ORIGIN` in `src/boards.ts`, which is the
+ * authority — the numbers are restated here only because the canvas computes the
+ * same fallback for an item whose stored position is missing. The X pitch is
+ * `MAX_NODE_WIDTH (480) + 36` (DD16): a node is as wide as its picture allows,
+ * so the pitch must clear the widest one or unplaced items overlap.
+ */
 function fallbackSpot(index: number): Point {
-  return { x: 40 + (index % 3) * 244, y: 40 + Math.floor(index / 3) * 276 }
+  return { x: 40 + (index % 3) * 516, y: 40 + Math.floor(index / 3) * 276 }
 }
 
 /** Turn stored board items into canvas nodes, keeping the saved arrangement. */
