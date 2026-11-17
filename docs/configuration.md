@@ -53,7 +53,12 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
 **10 个字段全部可写，也全部在页面上**——没有隐藏项。云端 API 标签页随该后端一起删除了。
 
 - 菜单位置：**设置 → 「Qwen 出图」**——和「通用设置 / 模式 / 插件 / Agent 预设」同级的**一级菜单项**
-  （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。第一个页签是**图像工作台**（可直接出图）。
+  （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。这里**只剩配置**：第一个页签是「出图」。
+- **工作台不在这里**：它是 web 客户端的**全局面板**（T17 迁出设置页），两处注册都由 `registerStudioPanel`
+  发出——`main` **keyed 槽**（`{ name: 'main', key: 'dsh-image-forge' }`）放面板本体，`sidebar.panellist`
+  **list 槽**（`{ name: 'sidebar.panellist', id: 'dsh-image-forge', order, label: '图像工作台' }`）放左侧栏那一行；
+  同一个 `id` 让侧栏那行把主列切到工作台。席位细节与宿主契约证据见 [client-bundle.md](client-bundle.md)。
+  宿主 shell 没有这两个槽时注册不会发生（面板不出现），**工具与设置页照常可用**（座位失败不拖累出图）。
 - **两个配置标签页**，字段在宽栏下两列铺开：
 
   | 标签 | 内容 |

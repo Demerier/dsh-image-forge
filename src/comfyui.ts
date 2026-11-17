@@ -1257,13 +1257,13 @@ export function referenceBudget(width: number, height: number): number {
 /**
  * The edit graph a profile offers, or a refusal naming what is missing.
  *
- * MOSS has no wired-up edit graph yet, and faking one out of the text-to-image
- * graph would submit a graph that silently ignores the references. So a family
- * without `imageToImage` **fails loudly**, quoting the profile's own `todo` so the
- * follow-up has its entry point in the error text rather than only in a comment.
- *
- * TODO(moss-edit): the entry point is `MODEL_PROFILES['moss-sft'].imageToImage` in
- * `model-profiles.ts` — fill it in and this refusal disappears by itself.
+ * MOSS's edit graph is wired (T19: `MODEL_PROFILES['moss-sft'].imageToImage` in
+ * `model-profiles.ts`), so every shipped profile carries one and this guard is a
+ * latent one. It stays because a profile without `imageToImage` must **fail
+ * loudly** rather than fake an edit out of the text-to-image graph — that would
+ * submit a graph that silently ignores the references. The refusal quotes the
+ * profile's own `todo` so a follow-up has its entry point in the error text
+ * rather than only in a comment.
  *
  * @param profile - the effective profile of this call.
  * @returns its edit template and reference-slot builder.
