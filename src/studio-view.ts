@@ -97,6 +97,7 @@ import {
   toggleSelection,
   type AlignMode,
   type Command,
+  hasReference,
   type ContextMenuItem,
   type DistributeAxis,
   type NodeRect,
@@ -1575,7 +1576,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const referenceNode = useCallback((node: CanvasNode) => {
     setReferences((current) => {
       if (current.length >= STUDIO_MAX_REFERENCES) return current
-      if (current.some((entry) => entry.nodeId === node.id)) return current
+      if (hasReference(current, { nodeId: node.id })) return current
       const name = node.image.path.split('/').pop() ?? '参考图'
       return [...current, {
         id: `${node.id}-ref`,
@@ -1606,7 +1607,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   const referenceAsset = useCallback((asset: StudioAsset) => {
     setReferences((current) => {
       if (current.length >= STUDIO_MAX_REFERENCES) return current
-      if (current.some((entry) => entry.path === asset.path)) return current
+      if (hasReference(current, { path: asset.path })) return current
       const name = asset.path.split('/').pop() ?? '参考图'
       return [...current, {
         id: `${asset.id}-ref`,

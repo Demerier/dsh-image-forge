@@ -742,4 +742,45 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
     { id: 'delete-file', label: '删除文件…', danger: true, hint: '二次确认后删除磁盘上的 PNG' },
   ]
 }
+// ---------------------------------------------------------------------------
+// Reference de-duplication (C02)
+// ---------------------------------------------------------------------------
+
+/** What a held reference points at: an image path and/or a canvas node id. */
+export interface ReferenceKey {
+  /** Absolute image path (asset-library references always carry one). */
+  readonly path?: string
+  /** Canvas node id (canvas references carry one so the form can draw the edge). */
+  readonly nodeId?: string
+}
+
+/** The minimum shape {@link hasReference} reads from a held reference. */
+export interface ReferenceLike {
+  /** Wire payload — the path lives here, not on the entry itself (C02). */
+  readonly payload?: { readonly path?: string }
+  /** Set when the reference came from the canvas. */
+  readonly nodeId?: string
+}
+
+/**
+ * Whether a held reference already points at the given key.
+ *
+ * The path lives in `payload.path`; the entry itself has no `path` field. The
+ * de-dupe used to compare the entry's own `path` field (always `undefined`), so the same library
+ * asset could be added to the reference row over and over. Both channels are
+ * checked because a canvas reference carries a path *and* a node id, while an
+ * asset reference only has a path.
+ *
+ * @param references - the form's currently held references.
+ * @param key - the path and/or node id about to be added.
+ * @returns true when one of the held references already points there.
+ */
+export function hasReference(references: readonly ReferenceLike[], key: ReferenceKey): boolean {
+  if (references.length === 0) return false
+  return references.some((entry) => {
+    if (key.nodeId !== undefined && entry.nodeId !== undefined && entry.nodeId === key.nodeId) return true
+    if (key.path !== undefined && entry.payload?.path === key.path) return true
+    return false
+  })
+}
 

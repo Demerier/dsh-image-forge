@@ -21,6 +21,7 @@ import {
   alignNodes,
   contextMenuItems,
   distributeNodes,
+  hasReference,
   marqueeSelection,
   marqueeWorldRect,
   moveSelection,
@@ -460,3 +461,35 @@ test('contextMenuItems: blank canvas offers select-all and fit now, the rest by 
   // Every menu returns a fresh array, so a caller cannot corrupt the next one.
   assert.notEqual(contextMenuItems({ kind: 'blank' }), contextMenuItems({ kind: 'blank' }))
 })
+/* -------------------------------------------------------------------------- */
+/* Reference de-duplication (C02)                                             */
+/* -------------------------------------------------------------------------- */
+
+/** A library-asset reference: path lives in payload, no node id. */
+const assetRef = (path) => ({ payload: { path } })
+/** A canvas reference: carries both a payload path and a node id. */
+const nodeRef = (nodeId, path) => ({ payload: { path }, nodeId })
+
+test('hasReference reads the path from payload.path, not from the entry (the C02 bug)', () => {
+  // The old de-dupe compared entry.path, which never exists — so the same
+  // asset could be added to the reference row forever. These two assertions
+  // are the regression: true on a payload match, false on a different path.
+  assert.equal(hasReference([assetRef('/a.png')], { path: '/a.png' }), true)
+  assert.equal(hasReference([assetRef('/a.png')], { path: '/b.png' }), false)
+})
+
+test('hasReference rejects a canvas node that is already held, by node id', () => {
+  assert.equal(hasReference([nodeRef('n1', '/a.png')], { nodeId: 'n1' }), true)
+  assert.equal(hasReference([nodeRef('n1', '/a.png')], { nodeId: 'n2' }), false)
+})
+
+test('hasReference is empty-safe and never matches across channels', () => {
+  assert.equal(hasReference([], { path: '/a.png' }), false)
+  // A canvas reference also matches a path query: same file, different entry.
+  assert.equal(hasReference([nodeRef('n1', '/a.png')], { path: '/a.png' }), true)
+  // An asset reference has no node id, so a node-id query must not match it.
+  assert.equal(hasReference([assetRef('/a.png')], { nodeId: 'n1' }), false)
+  // A key with neither channel matches nothing.
+  assert.equal(hasReference([assetRef('/a.png')], {}), false)
+})
+
