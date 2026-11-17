@@ -70,6 +70,34 @@ node scripts/start-comfyui.mjs --dir D:\path\to\ComfyUI   # 手动指定安装�
 
 ---
 
+## 0.6 让 qwen_image_setup 带你装、带你下权重（P1b）
+
+插件里的环境工具 `qwen_image_setup` 是从零到能出图的入口，能力与上面的手工步骤一一对应：
+
+| action | 做什么 |
+|---|---|
+| `status`（默认） | 探活 + 读 Desktop 注册表；未安装时返回安装引导，已就绪时附当前 `comfyModel` 三个权重的在位情况 |
+| `start` / `stop` | 没在跑就按 Desktop 记录的 Python 与启动参数后台拉起（只停自己拉起的实例） |
+| `install` | 安装引导：官方下载页、选盘、CUDA、首次启动。**未获 computer use 授权时只输出图文步骤，绝不执行自动安装** |
+| `download` | 按 T04 方案把当前 `comfyModel` 的三个权重下到 Desktop 模型根；先 dry-run 看计划，`confirm: true` 才真的下载 |
+
+下载与手工命令等价，但替你做了校验：
+
+- 落盘目录按 §3 的同一条链解析（运行实例 argv → Desktop 生成的模型路径 yaml → `settings.json` → 安装树），
+  不吃设置页里那个旧的 `comfyModelsDir` 探测值（它不含 `ComfyUI-Shared`，探不到就留空）。
+- 先写 `<文件名>.part`，校验字节数（Qwen 四个文件另有实测 sha256）再原子改名——半截文件不会出现在 `/object_info` 里冒充成功。
+- 断点续传：中断后重跑会从 `.part` 接着下（镜像支持 `Range` → 206）。
+- **成功唯一判据**：`GET /object_info/<Loader>` 的候选列表包含**精确文件名**。文件在位不是判据，正则匹配也不是。
+- **不需要重启 ComfyUI**：新增/改名文件会改变目录 mtime，下一次 `/object_info` 自动重扫（2026-11-17 本机实测，见下）。
+- 失败时返回目标绝对路径与当时 `/object_info` 的可见列表，照 §9 排障。
+
+`download` 不带 `confirm` 时只返回计划（下哪些文件、落到哪、多大、URL 是否已实测）。
+
+> **本机实测（2026-11-17）**：往 `<base_path>\vae\` 写入一个探针权重文件后**不重启** ComfyUI，
+> `GET /object_info/VAELoader` 立即列出它；删掉后立即消失。这消掉了 T04 文档 §5.3 的“未核实项”。
+
+---
+
 ## 1. 装 ComfyUI 桌面版
 
 1. 打开官方下载页 **<https://www.comfy.org/download>**，下载 Windows 安装包（`.exe`）。

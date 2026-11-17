@@ -7,8 +7,8 @@ pnpm build
 pnpm test
 ```
 
-**11 个文件 / 159 个用例**，全部不需要 GPU、ComfyUI 或任何权重
-（ratio 12 / surface 9 / comfyui-e2e 11 / edit-e2e 8 / settings 53 / studio 29 / studio-canvas 9 / boards 18 / output 3 / package-contents 4 / studio-file-route 3）。
+**14 个文件 / 242 个用例**（T14 时点计数），全部不需要 GPU、ComfyUI 或任何权重
+（ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / settings 59 / studio 38 / studio-canvas 9 / boards 18 / output 3 / package-contents 4 / studio-file-route 3 / model-profiles 7 / progress 7 / environment 28）。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——
@@ -20,7 +20,7 @@ pnpm test
 
 ## 每个文件钉住了什么
 
-### `test/settings.test.mjs`（53）
+### `test/settings.test.mjs`（59）
 
 设置分区的完整契约：
 
@@ -44,11 +44,13 @@ pnpm test
 - **客户端产物断言**：三个工具都进了 `tool.call.toolview`、`qwen_image_env` **已从 bundle 里消失**、
   样式注入与窄栏容器查询在 bundle 里、数字控件带单位后缀、label 绑到控件、tabs 暴露成 `role=tab`。
 - **一键部署卡片已删除**：`dsh-image-forge-deploy` / `一键部署` / `127.0.0.1:8411` 都不许再出现在 bundle 里。
+- **T14 新方向断言**：随包散文面必须写到受管入口 `qwen_image_setup`、下载判据 `/object_info`、Desktop 模型根 `ComfyUI-Shared` 与授权门槛 `computer use`；这是「新能力必须写进散文面」，不是旧口径回魂。
 
-### `test/surface.test.mjs`（9）
+### `test/surface.test.mjs`（13）
 
-`lib/index.js` 的四个导出、**三个**工具名、出图/改图**不带 `backend` 与 `transparent` 参数**、
-`qwen_image_status` 只收 `timeoutMs`、schema 里 9 个字段齐全且 5 个云端字段绝迹、
+`lib/index.js` 的四个导出、**四个**工具名（`generate` / `edit` / `status` / `setup`）、出图/改图**不带 `backend` 与 `transparent` 参数**、
+`qwen_image_status` 只收 `timeoutMs`、`qwen_image_setup` 的 action 是 `status/start/stop/install/download` 且 `confirm` 是布尔（T14）、
+schema 里 **10** 个字段齐全且 5 个云端字段绝迹、
 `wh_ratio` enum 与它在 `skill.md` 里被引用的换算表、参考文件绝对路径、以及**compose 后的技能正文**：
 里面必须只剩本机 ComfyUI 一条路、不许再提 `qwen_image_env` / `localReferenceBudget` / `freeComfyBeforeLocalStart` /
 `minFreeVramMiB` / `local_edit_budget` / `apiKey`，并且必须写到 `comfyModel`、`turbo`、`8 步`、`turbo_fallback`
@@ -96,6 +98,28 @@ Windows 路径出 `…\models\clip\`、POSIX 路径出 `…/models/clip/`，两�
 引号剥离只在最外层成对时发生、**六条路由**确实注册在宿主上（客户端半边带它实际会调的五条）、
 以及画布（平移 / 缩放 / 适应 / 血缘连线）的纯函数。
 
+### `test/model-profiles.test.mjs`（7）
+
+P0（model profile 抽象 + MOSS 文生图）的注册表契约：三 profile 的 id / legacyIds 解析、
+每 profile 自己的 latent classType 与对齐粒度（Qwen 32 / MOSS `EmptyFlux2LatentImage` 16）、clipType、采样器、
+filenamePrefix；MOSS 双采样档（`comfy` 25 / CFG 2.5 / `er_sde`，`official` 50 / CFG 3 / `euler`）与 Qwen 忽略该值；
+MOSS 改图在发请求前显式拒绝；MOSS 假服务端到端（不做 `/qwen/i` 硬门、`EmptyFlux2LatentImage`、16px 对齐）；
+步数解析在 MOSS profile 下的分支。
+
+### `test/progress.test.mjs`（7）
+
+P3a 进度后端的纯函数契约：SSE 帧编解码、事件名与 JSON 载荷、心跳、关闭与错误路径。
+
+### `test/environment.test.mjs`（28）
+
+环境层 P1a/P1b。全部打**假** Comfy Desktop 注册表与 127.0.0.1 上的假 ComfyUI，不读真实注册表、不启动真实渲染器：
+Desktop 注册表 → 启动计划（torch 解释器的选择、argv 顺序、envVars、port）、便携版扫描、
+端口表探活、`start`（detached spawn + 等 `/system_stats`，不重试）、`stop`（Windows taskkill /T，POSIX SIGTERM）、
+启动记录；**P1b**：模型根解析顺序（运行实例 argv → Desktop yaml → settings.json → 安装树）、yaml `base_path` 解析、
+`/object_info` **精确文件名**判据（正则近似名不算）、`.part` + 字节数/sha256 + 原子改名、Range 续传与 200 回退、
+**假闭环「下载 → 改名 → `/object_info` 可见」**、dry-run 不写盘、无运行实例时只报 `unverified` 绝不报 `ready`、
+安装引导的授权门槛（未授权绝不调用自动化，授权后才调用执行器）。
+
 ### `test/boards.test.mjs`（18）
 
 画板存储，全部打在**真实临时目录**上（契约是文件系统，mock 掉 `fs` 等于什么都没测）：
@@ -122,6 +146,19 @@ active 画板的记忆与 `state.json` 的形状。
 `docs/*.md` 这个 glob（而不是某个一次性条目）让部署文档可被发现、`docs/plans/` **不入包**、
 **`resources/` 与 6 个已删除的源文件不许再出现**、以及许可证与第三方声明随包分发。
 
+## T14 断言变更清单（D5 可追溯）
+
+T14 把「零下载 / 一键部署」的旧口径换成了**受管安装 + 按需权重下载**，逐条改动如下：
+
+| 文件 | 改了什么 | 为什么 |
+|---|---|---|
+| `test/surface.test.mjs` | 「三个工具」→ 四个（含 `qwen_image_setup`）；新增 action 枚举与 `confirm` 断言；描述必须点名 `/object_info` 与 `computer use` | 新能力必须可被契约测到；`qwen_image_env` 旧名仍禁 |
+| `test/settings.test.mjs` | 保留旧禁项（`dsh-image-forge-deploy` / `一键部署` / `127.0.0.1:8411` / `qwen_image_env` / `DeployStatusPayload`）；新增「随包散文面必须写到受管安装/下载方向」 | 旧字段与旧一键部署卡片**不回魂**；同时新能力不能只活在代码里 |
+| 本文件 | 11 文件/159 → 14 文件/242；补 3 个测试文件章节；`surface` 的字段数 9 → 10 | 计数与实际一致；`schema` 已是 10 个字段 |
+
+口径边界：`qwen_image_env`（旧本地运行时工具）、`一键部署` 卡片、云端 `backend` 仍然**禁止**出现；
+新增的是 `qwen_image_setup` 的受管安装引导与权重下载（只与本机 ComfyUI 通信、只写 Desktop 模型目录）。
+
 ## 真机端到端（不在 `pnpm test` 里）
 
 - `test/live-generate-e2e.mjs`：一次 1:1 文生图，打印落盘路径与 IHDR。`FORGE_LIVE_MODEL=turbo` 切权重家族，
@@ -130,6 +167,11 @@ active 画板的记忆与 `state.json` 的形状。
   `qwen_image_status`。需要本机 ComfyUI 在跑、三个权重就位。
 
 两者都读插件自己的配置（`comfyEndpoint` / `comfyPorts` / `outputDir`），不额外要求环境变量。
+
+T14 的首单真机验证（2026-11-17，Linux 无关、Windows 本机）：`resolveModelsBase` 经运行实例 argv 解析到
+`D:\Comfy-Desktop\ComfyUI-Shared\models`；`ensureProfileWeights(dry-run/live)` 三个 Qwen 权重全部被 `/object_info` 列出（state=ready）；
+真实下载 MOSS VAE `flux2-vae_small.safetensors`（249 521 340 B，hf-mirror，17 s，sha256 校验通过）；
+并向真实 `vae\` 写入 1 个探针权重后**不重启** ComfyUI 即被 `/object_info/VAELoader` 列出、删掉后立即消失（T04 §5.3 的未核实项已消）。
 
 （用 `node test/xxx.test.mjs` 逐个跑，而不是 `node --test`：后者会 spawn 子进程并通过管道取输出，
 在受限沙箱里会 `EPERM`。）

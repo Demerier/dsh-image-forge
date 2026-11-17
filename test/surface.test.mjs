@@ -316,3 +316,21 @@ test('the composed skill body describes only the two surviving backends', () => 
   // Deployment is delegated to the one document that actually holds the steps.
   assert.match(content, /docs\/comfyui-deployment\.md/)
 })
+
+test('the environment tool is qwen_image_setup with install/download actions; qwen_image_env stays banned', () => {
+  const { ctx, tools } = captureContext()
+  plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-surface-setup-')) }))
+  assert.equal(tools.get('qwen_image_env'), undefined, 'the retired local-runtime tool must not come back')
+  const setup = tools.get('qwen_image_setup')
+  assert.ok(setup, 'the managed environment tool must exist')
+  const parameters = setup.parameters ?? {}
+  const property = (name) => parameters?.properties?.[name] ?? parameters?.[name]
+  assert.deepEqual(property('action').enum, ['status', 'start', 'stop', 'install', 'download'])
+  assert.equal(property('confirm').type, 'boolean', 'download must be opt-in via confirm')
+  // The new capability is a managed one: the description says what success means
+  // and names the authorisation gate, so neither can be silently dropped.
+  const description = String(setup.description ?? '')
+  assert.match(description, /object_info/)
+  assert.match(description, /computer use/)
+  console.log('qwen_image_setup actions:', JSON.stringify(property('action').enum))
+})

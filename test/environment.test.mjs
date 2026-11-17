@@ -11,17 +11,26 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   ENVIRONMENT_TOOL_NAME,
+  checkObjectInfoFile,
+  downloadOneWeight,
   ensureEnvironment,
+  ensureProfileWeights,
   environmentOptionsOf,
   inspectEnvironment,
+  installGuidanceOf,
+  parseModelsBaseYaml,
   registerEnvironmentTools,
+  resolveModelsBase,
+  runInstallAutomation,
   stopEnvironment,
+  weightPlanOf,
 } from '../src/environment.ts'
 import {
   DEFAULT_INSTALL_TIMEOUT_MS,
@@ -393,9 +402,11 @@ test('the environment tool is qwen_image_setup, never the retired qwen_image_env
   const parameters = captured.parameters ?? {}
   const action = parameters.action ?? parameters.properties?.action
   assert.equal(action.type, 'string')
-  assert.deepEqual(action.enum, ['status', 'start', 'stop'])
+  assert.deepEqual(action.enum, ['status', 'start', 'stop', 'install', 'download'], 'P1b adds install/download to the same tool')
   const timeout = parameters.timeoutMs ?? parameters.properties?.timeoutMs
   assert.equal(timeout.type, 'integer')
+  const confirm = parameters.confirm ?? parameters.properties?.confirm
+  assert.equal(confirm.type, 'boolean', 'download needs an explicit confirm')
   assert.equal(typeof captured.execute, 'function')
   assert.equal(captured.isConcurrencySafe(), false)
 })
@@ -408,4 +419,277 @@ test('environmentOptionsOf reuses the ComfyUI port parser and trims the endpoint
   assert.equal(options.probeTimeoutMs, 800)
   // An unparseable list falls back to the documented default port table.
   assert.equal(environmentOptionsOf({ comfyEndpoint: '', comfyPorts: 'x', timeoutMs: 1 }).ports.length, 6)
+})
+
+// ---------------------------------------------------------------------------
+// P1b (T14): model-root resolution, downloads and the /object_info criterion.
+// ---------------------------------------------------------------------------
+
+test('parseModelsBaseYaml reads base_path, with quotes, and returns null otherwise', () => {
+  assert.equal(parseModelsBaseYaml("comfy.desktop_0:\n  base_path: 'D:\\\\models'\n"), 'D:\\\\models')
+  assert.equal(parseModelsBaseYaml('comfyui:\n  base_path: shared\n'), 'shared')
+  assert.equal(parseModelsBaseYaml('  base_path: "C:/x/models"'), 'C:/x/models')
+  assert.equal(parseModelsBaseYaml('is_default: true'), null)
+  assert.equal(parseModelsBaseYaml(''), null)
+})
+
+test('resolveModelsBase uses the running instance argv first, then the Desktop yaml', async () => {
+  const tmp = freshDir()
+  const shared = join(tmp, 'shared-models')
+  const yamlPath = join(tmp, 'inst-argv.yaml')
+  writeFileSync(yamlPath, "comfy.desktop_0:\n  base_path: '" + shared + "'\n")
+  const seen = []
+  const server = createServer((request, response) => {
+    seen.push(request.url)
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ system: { argv: ['-s', 'main.py', '--extra-model-paths-config', yamlPath] }, devices: [] }))
+  })
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  try {
+    const endpoint = 'http://127.0.0.1:' + server.address().port
+    const resolved = await resolveModelsBase({ endpoint }, { env: {}, platform: 'win32', appData: freshDir(), scanRoots: [] })
+    assert.equal(resolved.source, 'instance-argv')
+    assert.equal(resolved.base, shared)
+    assert.ok(seen.includes('/system_stats'))
+  } finally {
+    await new Promise((done) => server.close(done))
+  }
+
+  const machine = makeMachine(freshDir())
+  const fromYaml = await resolveModelsBase({ endpoint: null }, depsOf(machine))
+  assert.equal(fromYaml.source, 'desktop-yaml')
+  assert.equal(fromYaml.base, join(machine.desktop, 'instance-model-paths', 'shared'), 'relative base_path resolves against the yaml')
+})
+
+test('resolveModelsBase falls back to settings.json modelsDirs, then the install tree', async () => {
+  const tmp = freshDir()
+  const desktop = join(tmp, 'Comfy Desktop')
+  mkdirSync(desktop, { recursive: true })
+  const wanted = join(tmp, 'wanted-models')
+  writeFileSync(join(desktop, 'settings.json'), JSON.stringify({ modelsDirs: [wanted] }))
+  const settingsOnly = await resolveModelsBase({ endpoint: null }, { env: {}, platform: 'win32', appData: tmp, scanRoots: [] })
+  assert.equal(settingsOnly.source, 'desktop-settings')
+  assert.equal(settingsOnly.base, wanted)
+
+  const machine = makeMachine(freshDir())
+  rmSync(join(machine.desktop, 'instance-model-paths'), { recursive: true })
+  const tree = join(dirname(machine.mainPy), 'models')
+  mkdirSync(tree, { recursive: true })
+  const fromTree = await resolveModelsBase({ endpoint: null }, depsOf(machine))
+  assert.equal(fromTree.source, 'install-tree')
+  assert.equal(fromTree.base, tree)
+})
+
+test('weightPlanOf maps each profile weight to its folder and exact file name', () => {
+  const base = join('D:', 'models')
+  const qwen = weightPlanOf('qwen21-base', base)
+  assert.deepEqual(qwen.map((item) => item.folder), ['unet', 'clip', 'vae'])
+  assert.deepEqual(qwen.map((item) => item.filename), [
+    'qwen_image_2.1_int8_convrot.safetensors',
+    'qwen3vl_8b_int8_convrot.safetensors',
+    'qwen_image_2.1_vae_bf16.safetensors',
+  ])
+  assert.equal(qwen[0].targetPath, join(base, 'unet', 'qwen_image_2.1_int8_convrot.safetensors'))
+  assert.equal(qwen[0].source?.bytes, 7_256_783_064)
+  assert.equal(qwen[0].source?.sha256?.length, 64)
+  const moss = weightPlanOf('moss-sft', base)
+  assert.deepEqual(moss.map((item) => item.folder), ['diffusion_models', 'text_encoders', 'vae'])
+  assert.equal(weightPlanOf('qwen21-base', null)[0].targetPath, null)
+})
+
+test('downloadOneWeight streams to .part, verifies, and renames atomically', async () => {
+  const dir = freshDir()
+  const body = Buffer.from('fake-weight-bytes-0123456789')
+  const target = join(dir, 'unet', 'w.safetensors')
+  const sha = createHash('sha256').update(body).digest('hex')
+  const fetchImpl = async () => new Response(body, { status: 200 })
+  const outcome = await downloadOneWeight({ url: 'https://fake/w', targetPath: target, expectedBytes: body.length, sha256: sha, fetchImpl })
+  assert.equal(outcome.state, 'downloaded')
+  assert.equal(outcome.sha256Ok, true)
+  assert.equal(readFileSync(target).length, body.length)
+  assert.equal(existsSync(target + '.part'), false, 'the part file is renamed away')
+
+  const again = await downloadOneWeight({ url: 'https://fake/w', targetPath: target, expectedBytes: body.length, sha256: sha, fetchImpl })
+  assert.equal(again.state, 'already-present')
+
+  const bad = await downloadOneWeight({ url: 'https://fake/w', targetPath: join(dir, 'x.safetensors'), expectedBytes: body.length + 1, sha256: null, fetchImpl })
+  assert.equal(bad.state, 'failed')
+  assert.ok(bad.note.includes('字节数不对'))
+  assert.ok(existsSync(join(dir, 'x.safetensors') + '.part'), 'a failed download keeps its .part for resume')
+})
+
+test('downloadOneWeight resumes a .part with Range, and restarts when the server ignores it', async () => {
+  const dir = freshDir()
+  const body = Buffer.from('0123456789abcdefghij')
+  const target = join(dir, 'resume.safetensors')
+  writeFileSync(target + '.part', body.subarray(0, 7))
+  const ranged = []
+  const honouring = async (url, init) => {
+    ranged.push(init.headers?.Range ?? null)
+    return new Response(body.subarray(7), { status: 206 })
+  }
+  const resumed = await downloadOneWeight({ url: 'https://fake/r', targetPath: target, expectedBytes: body.length, sha256: null, fetchImpl: honouring })
+  assert.equal(resumed.state, 'resumed')
+  assert.equal(resumed.partBytesAtStart, 7)
+  assert.deepEqual(ranged, ['bytes=7-'])
+  assert.equal(readFileSync(target).toString(), body.toString())
+
+  const dir2 = freshDir()
+  const target2 = join(dir2, 'restart.safetensors')
+  writeFileSync(target2 + '.part', body.subarray(0, 5))
+  const ignoring = async () => new Response(body, { status: 200 })
+  const restarted = await downloadOneWeight({ url: 'https://fake/r2', targetPath: target2, expectedBytes: body.length, sha256: null, fetchImpl: ignoring })
+  assert.equal(restarted.state, 'downloaded')
+  assert.equal(readFileSync(target2).toString(), body.toString())
+})
+
+test('checkObjectInfoFile requires the exact file name, not a regex hit', async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ UNETLoader: { input: { required: { unet_name: [['another_file.safetensors', 'qwen_image_2.1_int8_convrot.safetensors'], {}] } } } }))
+  })
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  try {
+    const endpoint = 'http://127.0.0.1:' + server.address().port
+    const exact = await checkObjectInfoFile({ endpoint, loader: 'UNETLoader', field: 'unet_name', filename: 'qwen_image_2.1_int8_convrot.safetensors' })
+    assert.equal(exact.listed, true)
+    const nearMiss = await checkObjectInfoFile({ endpoint, loader: 'UNETLoader', field: 'unet_name', filename: 'qwen_image_2.1.safetensors' })
+    assert.equal(nearMiss.listed, false)
+    assert.equal(nearMiss.options.length, 2)
+  } finally {
+    await new Promise((done) => server.close(done))
+  }
+})
+
+test('dry-run never writes: existing files are reported, missing ones are planned', async () => {
+  const base = freshDir()
+  const tiny = Buffer.from('tiny')
+  const sources = {}
+  for (const name of ['qwen_image_2.1_int8_convrot.safetensors', 'qwen3vl_8b_int8_convrot.safetensors', 'qwen_image_2.1_vae_bf16.safetensors']) {
+    sources[name] = { url: 'https://fake/' + name, bytes: tiny.length, sha256: null, repoPath: name, urlVerified: true }
+  }
+  const plan = weightPlanOf('qwen21-base', base, sources)
+  mkdirSync(dirname(plan[0].targetPath), { recursive: true })
+  writeFileSync(plan[0].targetPath, tiny)
+  const outcome = await ensureProfileWeights({ profileId: 'qwen21-base', base, endpoint: null, dryRun: true, sources })
+  assert.equal(outcome.weights[0].state, 'dry-run')
+  assert.equal(outcome.weights[1].state, 'would-download')
+  assert.equal(existsSync(plan[1].targetPath), false)
+})
+
+test('no models root is blocked, and a download without a live endpoint is unverified', async () => {
+  const blocked = await ensureProfileWeights({ profileId: 'qwen21-base', base: null, endpoint: null })
+  assert.equal(blocked.state, 'blocked')
+  assert.ok(blocked.weights.every((item) => item.state === 'no-base'))
+
+  const base = freshDir()
+  const tiny = Buffer.from('tiny')
+  const sources = {
+    'qwen_image_2.1_int8_convrot.safetensors': { url: 'https://fake/1', bytes: 4, sha256: createHash('sha256').update(tiny).digest('hex'), repoPath: 'x', urlVerified: true },
+    'qwen3vl_8b_int8_convrot.safetensors': { url: 'https://fake/2', bytes: 4, sha256: null, repoPath: 'x', urlVerified: true },
+    'qwen_image_2.1_vae_bf16.safetensors': { url: 'https://fake/3', bytes: 4, sha256: null, repoPath: 'x', urlVerified: true },
+  }
+  const outcome = await ensureProfileWeights({
+    profileId: 'qwen21-base',
+    base,
+    endpoint: null,
+    sources,
+    deps: { fetchImpl: async () => new Response(tiny, { status: 200 }) },
+  })
+  assert.equal(outcome.state, 'unverified', 'a file on disk is not success without /object_info')
+  assert.ok(outcome.weights.every((item) => item.state === 'unverified'))
+})
+
+test('fake closed loop: download -> rename -> /object_info lists the exact name', async () => {
+  const base = freshDir()
+  const tiny = Buffer.from('fake-weight')
+  const sources = {}
+  for (const item of weightPlanOf('qwen21-base', base)) {
+    sources[item.filename] = { url: 'http://127.0.0.1:0/file/' + encodeURIComponent(item.filename), bytes: tiny.length, sha256: createHash('sha256').update(tiny).digest('hex'), repoPath: item.filename, urlVerified: true }
+  }
+  const kindsByLoader = { UNETLoader: ['unet', 'diffusion_models'], CLIPLoader: ['clip', 'text_encoders'], VAELoader: ['vae'] }
+  const served = []
+  const server = createServer((request, response) => {
+    served.push(request.url)
+    if (request.url === '/system_stats') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ system: { argv: [] }, devices: [] }))
+      return
+    }
+    if (request.url.startsWith('/object_info/')) {
+      const loader = request.url.slice('/object_info/'.length)
+      const field = loader === 'UNETLoader' ? 'unet_name' : loader === 'CLIPLoader' ? 'clip_name' : 'vae_name'
+      const folders = kindsByLoader[loader]
+      const names = []
+      for (const folder of folders) {
+        const dir = join(base, folder)
+        if (!existsSync(dir)) continue
+        for (const name of readdirSync(dir)) if (name.endsWith('.safetensors')) names.push(name)
+      }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ [loader]: { input: { required: { [field]: [names, {}] } } } }))
+      return
+    }
+    if (request.url.startsWith('/file/')) {
+      response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': tiny.length })
+      response.end(tiny)
+      return
+    }
+    response.writeHead(404)
+    response.end()
+  })
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  const port = server.address().port
+  try {
+    for (const key of Object.keys(sources)) sources[key].url = 'http://127.0.0.1:' + port + '/file/' + encodeURIComponent(key)
+    const outcome = await ensureProfileWeights({ profileId: 'qwen21-base', base, endpoint: 'http://127.0.0.1:' + port, sources })
+    console.log('closed-loop outcome:', JSON.stringify(outcome.weights.map((item) => [item.kind, item.state])))
+    assert.equal(outcome.state, 'downloaded')
+    assert.deepEqual(outcome.weights.map((item) => item.state), ['installed', 'installed', 'installed'])
+    for (const item of outcome.weights) {
+      assert.ok(item.targetPath && existsSync(item.targetPath), 'the weight is on disk: ' + item.filename)
+      assert.equal(existsSync(item.targetPath + '.part'), false)
+      assert.equal(item.objectInfo.listed, true)
+    }
+    assert.ok(served.some((url) => url.startsWith('/object_info/UNETLoader')))
+  } finally {
+    await new Promise((done) => server.close(done))
+  }
+})
+
+test('install guidance: the unauthorised path never runs automation, the authorised one does', async () => {
+  const manual = installGuidanceOf({}, false)
+  assert.equal(manual.state, 'not-installed')
+  assert.equal(manual.mode, 'manual')
+  assert.equal(manual.authorized, false)
+  assert.equal(manual.downloadPage, 'https://www.comfy.org/download')
+  assert.ok(manual.steps.length >= 4)
+  assert.match(manual.note, /未获 computer use 授权/)
+
+  const calls = []
+  const unauthorizedGate = { computerUse: { authorized: false, run: async () => { calls.push('ran') } } }
+  const denied = await runInstallAutomation(unauthorizedGate)
+  assert.equal(denied.ran, false)
+  assert.deepEqual(calls, [], 'an unauthorised gate must not be invoked')
+
+  const granted = await runInstallAutomation({ computerUse: { authorized: true, run: async () => { calls.push('ran'); return { ok: true, note: 'fake installer done' } } } })
+  assert.equal(granted.ran, true)
+  assert.deepEqual(calls, ['ran'])
+  assert.equal(installGuidanceOf({ computerUse: { authorized: true } }, false).mode, 'automated')
+})
+
+test('the setup tool exposes install/download and keeps the retired name banned', () => {
+  let captured = null
+  const ctx = { tools: { register: (definition) => { captured = definition } } }
+  registerEnvironmentTools(ctx, () => ({ comfyEndpoint: '', comfyPorts: '8188', timeoutMs: 1000, comfyModel: 'qwen21-base' }))
+  assert.equal(captured.name, 'qwen_image_setup')
+  assert.notEqual(captured.name, 'qwen_image_env')
+  const parameters = captured.parameters ?? {}
+  const action = parameters.action ?? parameters.properties?.action
+  assert.deepEqual(action.enum, ['status', 'start', 'stop', 'install', 'download'])
+  const confirm = parameters.confirm ?? parameters.properties?.confirm
+  assert.equal(confirm.type, 'boolean')
+  const description = String(captured.description ?? '')
+  assert.match(description, /object_info/)
+  assert.match(description, /computer use/)
 })

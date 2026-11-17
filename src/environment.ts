@@ -16,10 +16,25 @@
  *   Desktop registry directory, a spawn stub and a fetch stub; no test may start
  *   a real renderer or read the real registry.
  *
- * This file does **not** install ComfyUI and does **not** download weights. The
- * structured `not-installed` state is the hand-off point P1b (T14) consumes.
+ * P1b adds the hand-off the state alone could not carry: install guidance (never
+ * an unattended GUI install unless the host grants computer use), weight
+ * downloads into the resolved Desktop model tree, and the one success criterion
+ * that counts — the loader's /object_info list containing the exact file name.
  */
 
+import { createHash } from 'node:crypto'
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
+import { open, rename } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { Readable } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
@@ -35,6 +50,7 @@ import {
   stopComfyPlan,
   waitForComfyStats,
 } from '../scripts/comfyui-discovery.mjs'
+import { resolveProfile } from './model-profiles.ts'
 import type { Config } from './index.ts'
 
 /** One reachability attempt, in the shape the environment report exposes. */
@@ -162,6 +178,15 @@ export interface EnvironmentDeps {
   readonly now?: () => number
   /** Sleep, for deterministic waits. */
   readonly sleep?: (ms: number) => Promise<void>
+  /**
+   * Host-granted computer use for the install automation gate (P1b). Production
+   * never injects it, so the tool always returns the manual guide; tests inject
+   * it to prove an unauthorised gate is never invoked and an authorised one is.
+   */
+  readonly computerUse?: {
+    readonly authorized?: boolean
+    readonly run?: () => Promise<{ ok?: boolean; note?: string } | void>
+  }
 }
 
 /** Coerce a payload into lossless JSON (`undefined` becomes `null` at every depth). */
@@ -448,6 +473,529 @@ export function stopEnvironment(deps: EnvironmentDeps = {}): {
   }) as { stopped: boolean; pid: number | null; note: string }
 }
 
+// ---------------------------------------------------------------------------
+// P1b (T14): install guidance, model-root resolution and on-demand downloads.
+// Rules are T04's (docs/desktop-model-dir.md): resolve the models root (running
+// instance argv -> Desktop instance-model-paths yaml -> Desktop settings.json ->
+// install tree); download to '<name>.part', verify bytes/sha256, rename atomically;
+// and count ONLY 'GET /object_info/<Loader> lists the exact file name' as success.
+// The plugin never restarts ComfyUI to make a new file appear.
+// ---------------------------------------------------------------------------
+
+/** Where one weight file comes from, and how to verify it. */
+export interface WeightSource {
+  /** Absolute download URL (hf-mirror; huggingface.co answers 502 on this box). */
+  readonly url: string
+  /** Exact size in bytes; a partial or concatenated file must fail this check. */
+  readonly bytes: number
+  /** sha256 when a measured value exists; null means size-only verification. */
+  readonly sha256: string | null
+  /** Path inside the HF repo, for diagnostics only. */
+  readonly repoPath: string
+  /** False when the URL was written from the repo layout but never HEAD-tested. */
+  readonly urlVerified: boolean
+}
+
+/** Downloadable weights, keyed by the exact file name a profile declares. */
+export const WEIGHT_SOURCES: Readonly<Record<string, WeightSource>> = {
+  'qwen_image_2.1_int8_convrot.safetensors': {
+    url: 'https://hf-mirror.com/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors',
+    bytes: 7_256_783_064,
+    sha256: 'cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d',
+    repoPath: 'diffusion_models/qwen_image_2.1_int8_convrot.safetensors',
+    urlVerified: true,
+  },
+  'qwen_image_2.1_turbo_int8_convrot.safetensors': {
+    url: 'https://hf-mirror.com/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors',
+    bytes: 7_256_787_829,
+    sha256: '8144a0182964aa8403ad6dbc011db837304167d235161b9aabaa8532e967314c',
+    repoPath: 'diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors',
+    urlVerified: true,
+  },
+  'qwen3vl_8b_int8_convrot.safetensors': {
+    url: 'https://hf-mirror.com/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors',
+    bytes: 9_350_798_360,
+    sha256: '8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f',
+    repoPath: 'text_encoders/qwen3vl_8b_int8_convrot.safetensors',
+    urlVerified: true,
+  },
+  'qwen_image_2.1_vae_bf16.safetensors': {
+    url: 'https://hf-mirror.com/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors',
+    bytes: 675_509_688,
+    sha256: 'bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9',
+    repoPath: 'vae/qwen_image_2.1_vae_bf16.safetensors',
+    urlVerified: true,
+  },
+  'moss_image_sft_int8_convrot.safetensors': {
+    url: 'https://hf-mirror.com/Comfy-Org/MOSS-Image/resolve/main/diffusion_models/moss_image_sft_int8_convrot.safetensors',
+    bytes: 5_413_698_958,
+    sha256: null,
+    repoPath: 'diffusion_models/moss_image_sft_int8_convrot.safetensors',
+    urlVerified: true,
+  },
+  'qwen3.5_9b_w4a8_gptq.safetensors': {
+    url: 'https://hf-mirror.com/Comfy-Org/MOSS-Image/resolve/main/text_encoders/qwen3.5_9b_w4a8_gptq.safetensors',
+    bytes: 7_343_591_088,
+    sha256: null,
+    repoPath: 'text_encoders/qwen3.5_9b_w4a8_gptq.safetensors',
+    urlVerified: true,
+  },
+  'flux2-vae_small.safetensors': {
+    url: 'https://hf-mirror.com/Comfy-Org/MOSS-Image/resolve/main/vae/flux2-vae_small.safetensors',
+    bytes: 249_521_340,
+    sha256: 'd8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b',
+    repoPath: 'vae/flux2-vae_small.safetensors',
+    urlVerified: true,
+  },
+}
+
+/** Where the model tree lives, and which rule found it. */
+export interface ModelsBaseResolution {
+  readonly base: string | null
+  readonly source: 'instance-argv' | 'desktop-yaml' | 'desktop-settings' | 'install-tree' | null
+  readonly note: string
+}
+
+function readJsonSafe(filePath: string): any {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function readTextSafe(filePath: string): string | null {
+  try {
+    return readFileSync(filePath, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+/** Pull base_path out of a ComfyUI extra-model-paths yaml. Exported for tests. */
+export function parseModelsBaseYaml(text: string): string | null {
+  const match = /^[ \t]*base_path:[ \t]*(.+)$/m.exec(String(text ?? ''))
+  if (!match) return null
+  const raw = match[1].trim().replace(/^['"]/, '').replace(/['"]$/, '')
+  return raw.length > 0 ? raw : null
+}
+
+/** Resolve base_path from one yaml; relative paths resolve against the yaml. */
+function yamlBaseFrom(filePath: string): string | null {
+  const base = parseModelsBaseYaml(readTextSafe(filePath) ?? '')
+  if (!base) return null
+  return isAbsolute(base) ? base : resolve(dirname(filePath), base)
+}
+
+/** Desktop registry -> instance-model-paths yaml -> base_path. */
+function desktopModelsBase(appData: string): { base: string; file: string } | null {
+  const desktop = join(appData, 'Comfy Desktop')
+  const pathsDir = join(desktop, 'instance-model-paths')
+  const installations = readJsonSafe(join(desktop, 'installations.json'))
+  const records = Array.isArray(installations) ? installations : []
+  for (const install of records) {
+    if (install?.status && install.status !== 'installed') continue
+    if (!install?.id) continue
+    const own = join(pathsDir, String(install.id) + '.yaml')
+    const base = yamlBaseFrom(own)
+    if (base) return { base, file: own }
+  }
+  try {
+    for (const name of readdirSync(pathsDir)) {
+      if (!name.endsWith('.yaml')) continue
+      const file = join(pathsDir, name)
+      const base = yamlBaseFrom(file)
+      if (base) return { base, file }
+    }
+  } catch {
+    // no instance-model-paths directory
+  }
+  return null
+}
+
+/** Resolve the models root (T04 section 4.4, in order). */
+export async function resolveModelsBase(
+  options: { readonly endpoint?: string | null },
+  deps: EnvironmentDeps = {},
+): Promise<ModelsBaseResolution> {
+  const endpoint = (options.endpoint ?? '').replace(/\/+$/, '')
+  if (endpoint) {
+    try {
+      const fetchImpl = deps.fetchImpl ?? fetch
+      const response = await fetchImpl(endpoint + '/system_stats', { signal: AbortSignal.timeout(4000) })
+      const payload: any = await response.json()
+      const argv = Array.isArray(payload?.system?.argv) ? payload.system.argv.map(String) : []
+      const flagAt = argv.indexOf('--extra-model-paths-config')
+      if (flagAt >= 0 && argv[flagAt + 1]) {
+        const file = argv[flagAt + 1]
+        const base = yamlBaseFrom(file)
+        if (base) return { base, source: 'instance-argv', note: '来自运行中实例的 --extra-model-paths-config：' + file }
+      }
+      const baseDirAt = argv.indexOf('--base-directory')
+      if (baseDirAt >= 0 && argv[baseDirAt + 1]) {
+        const base = resolve(String(argv[baseDirAt + 1]))
+        return { base, source: 'instance-argv', note: '来自运行中实例的 --base-directory：' + base }
+      }
+    } catch {
+      // not running / no argv: fall through
+    }
+  }
+  const appData = deps.appData ?? process.env.APPDATA
+  if (appData) {
+    const desktop = desktopModelsBase(appData)
+    if (desktop) return { base: desktop.base, source: 'desktop-yaml', note: '来自 Comfy Desktop 生成的模型路径 yaml：' + desktop.file }
+    const settings = readJsonSafe(join(appData, 'Comfy Desktop', 'settings.json'))
+    const dirs = Array.isArray(settings?.modelsDirs) ? settings.modelsDirs.filter((dir: any) => typeof dir === 'string' && dir.length > 0) : []
+    if (dirs.length > 0) return { base: String(dirs[0]), source: 'desktop-settings', note: '来自 Comfy Desktop settings.json 的 modelsDirs[0]（期望值，可能与运行实例不同）' }
+  }
+  const plan = discoverInstall(deps)
+  if (plan?.mainPy) {
+    const base = join(dirname(String(plan.mainPy)), 'models')
+    if (existsSync(base)) return { base, source: 'install-tree', note: '兜底：ComfyUI 安装树里的 models（Desktop 下通常是空目录）' }
+  }
+  return { base: null, source: null, note: '没解析出模型根：ComfyUI 没在跑且没有 Comfy Desktop 安装记录。' }
+}
+
+/** One weight of a profile, with its download record and target path. */
+export interface WeightPlanItem {
+  readonly kind: 'unet' | 'clip' | 'vae'
+  readonly filename: string
+  readonly loader: string
+  readonly field: string
+  readonly folder: string
+  readonly targetPath: string | null
+  readonly source: WeightSource | null
+}
+
+/** Build the three-item download plan of one profile against a models root. */
+export function weightPlanOf(
+  profileId: string,
+  base: string | null,
+  sources: Readonly<Record<string, WeightSource>> = WEIGHT_SOURCES,
+): WeightPlanItem[] {
+  const profile = resolveProfile(profileId)
+  const kinds: Array<'unet' | 'clip' | 'vae'> = ['unet', 'clip', 'vae']
+  return kinds.map((kind) => {
+    const rule = profile.weights[kind]
+    const filename = rule.example
+    return {
+      kind,
+      filename,
+      loader: rule.loader,
+      field: rule.field,
+      folder: rule.folder,
+      targetPath: base === null ? null : join(base, rule.folder, filename),
+      source: sources[filename] ?? null,
+    }
+  })
+}
+
+/** What /object_info said about one exact file name. */
+export interface ObjectInfoCheck {
+  readonly listed: boolean
+  readonly options: readonly string[]
+  readonly note: string
+}
+
+/** Read one loader field out of /object_info and look for the EXACT file name. */
+export async function checkObjectInfoFile(input: {
+  readonly endpoint: string
+  readonly loader: string
+  readonly field: string
+  readonly filename: string
+  readonly fetchImpl?: typeof fetch
+}): Promise<ObjectInfoCheck> {
+  const fetchImpl = input.fetchImpl ?? fetch
+  const url = input.endpoint.replace(/\/+$/, '') + '/object_info/' + encodeURIComponent(input.loader)
+  try {
+    const response = await fetchImpl(url, { method: 'GET', signal: AbortSignal.timeout(5000) })
+    const payload: any = JSON.parse(await response.text())
+    const node = payload?.[input.loader]?.input
+    const field = node?.required?.[input.field] ?? node?.optional?.[input.field]
+    const options = Array.isArray(field?.[0]) ? field[0].filter((value: any) => typeof value === 'string') : []
+    const listed = options.includes(input.filename)
+    return { listed, options, note: listed ? 'object_info 列出了精确文件名' : 'object_info 没有列出该文件（当前 ' + options.length + ' 个候选）' }
+  } catch (error) {
+    return { listed: false, options: [], note: 'object_info 探测失败：' + (error instanceof Error ? error.message : String(error)) }
+  }
+}
+
+/** sha256 of one file, streamed. Exported for tests. */
+export async function sha256OfFile(filePath: string): Promise<string> {
+  return await new Promise<string>((done, fail) => {
+    const hash = createHash('sha256')
+    const stream = createReadStream(filePath)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('error', fail)
+    stream.on('end', () => done(hash.digest('hex')))
+  })
+}
+
+function fileSizeOrNull(filePath: string): number | null {
+  try {
+    return statSync(filePath).size
+  } catch {
+    return null
+  }
+}
+
+/** One weight file's download result. */
+export interface WeightDownloadOutcome {
+  readonly filename: string
+  readonly targetPath: string
+  readonly state: 'already-present' | 'downloaded' | 'resumed' | 'failed'
+  readonly bytesOnDisk: number
+  readonly expectedBytes: number
+  readonly sha256Ok: boolean | null
+  readonly partBytesAtStart: number
+  readonly note: string
+}
+
+async function streamIntoFile(response: any, partPath: string, append: boolean): Promise<number> {
+  const handle = await open(partPath, append ? 'a' : 'w')
+  let written = 0
+  try {
+    const body = response.body
+    if (!body) throw new Error('下载响应没有 body')
+    const stream = typeof (body as any).getReader === 'function' ? Readable.fromWeb(body as any) : body
+    for await (const chunk of stream as any) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as any)
+      await handle.write(buffer)
+      written += buffer.length
+    }
+  } finally {
+    await handle.close()
+  }
+  return written
+}
+
+/**
+ * Download one weight file: .part first, then byte/sha256 check, then atomic
+ * rename. Resume works against Range-honouring servers (hf-mirror: 206); a 200
+ * answer restarts from 0 instead of corrupting the file.
+ */
+export async function downloadOneWeight(input: {
+  readonly url: string
+  readonly targetPath: string
+  readonly expectedBytes: number
+  readonly sha256?: string | null
+  readonly fetchImpl?: typeof fetch
+}): Promise<WeightDownloadOutcome> {
+  const fetchImpl = input.fetchImpl ?? fetch
+  const filename = basename(input.targetPath)
+  const partPath = input.targetPath + '.part'
+  const note = (extra: string) => '目标：' + input.targetPath + '。' + extra
+  const presentSize = fileSizeOrNull(input.targetPath)
+  if (presentSize === input.expectedBytes) {
+    const sha = input.sha256 ?? null
+    const shaOk = sha === null ? null : (await sha256OfFile(input.targetPath)) === sha
+    if (shaOk !== false) {
+      return { filename, targetPath: input.targetPath, state: 'already-present', bytesOnDisk: presentSize, expectedBytes: input.expectedBytes, sha256Ok: shaOk, partBytesAtStart: 0, note: note('文件已在位且大小/哈希匹配，没有重复下载。') }
+    }
+  }
+  mkdirSync(dirname(input.targetPath), { recursive: true })
+  let offset = fileSizeOrNull(partPath) ?? 0
+  if (offset > input.expectedBytes) {
+    rmSync(partPath, { force: true })
+    offset = 0
+  }
+  const partBytesAtStart = offset
+  try {
+    let resumed = offset > 0
+    if (offset !== input.expectedBytes) {
+      const headers: Record<string, string> = {}
+      if (offset > 0) headers.Range = 'bytes=' + offset + '-'
+      const response = await fetchImpl(input.url, { method: 'GET', headers, signal: AbortSignal.timeout(30 * 60 * 1000) })
+      if (!response.ok && response.status !== 206) throw new Error('HTTP ' + response.status + ' ' + response.statusText)
+      if (offset > 0 && response.status === 200) {
+        resumed = false
+        offset = 0
+      }
+      await streamIntoFile(response, partPath, resumed)
+    }
+    const size = fileSizeOrNull(partPath)
+    if (size !== input.expectedBytes) throw new Error('字节数不对：下载后 ' + String(size) + '，期望 ' + String(input.expectedBytes) + '（.part 保留，可续传）')
+    const sha = input.sha256 ?? null
+    const shaOk = sha === null ? null : (await sha256OfFile(partPath)) === sha
+    if (shaOk === false) throw new Error('sha256 不匹配（.part 保留，请删掉后重下）')
+    rmSync(input.targetPath, { force: true })
+    await rename(partPath, input.targetPath)
+    return { filename, targetPath: input.targetPath, state: resumed ? 'resumed' : 'downloaded', bytesOnDisk: input.expectedBytes, expectedBytes: input.expectedBytes, sha256Ok: shaOk, partBytesAtStart, note: note(resumed ? '从 .part 续传完成并原子改名。' : '下载完成并原子改名。') }
+  } catch (error) {
+    return { filename, targetPath: input.targetPath, state: 'failed', bytesOnDisk: fileSizeOrNull(partPath) ?? 0, expectedBytes: input.expectedBytes, sha256Ok: null, partBytesAtStart, note: note(error instanceof Error ? error.message : String(error)) }
+  }
+}
+
+/** One profile weight after the ensure pass. */
+export interface ProfileWeightReport {
+  readonly kind: 'unet' | 'clip' | 'vae'
+  readonly filename: string
+  readonly targetPath: string | null
+  readonly bytes: number | null
+  readonly state: 'present' | 'installed' | 'would-download' | 'no-source' | 'no-base' | 'dry-run' | 'failed' | 'unverified'
+  readonly objectInfo: ObjectInfoCheck | null
+  readonly note: string
+}
+
+/** The whole ensure pass for one profile. */
+export interface ProfileWeightsOutcome {
+  readonly profile: string
+  readonly base: string | null
+  readonly dryRun: boolean
+  readonly state: 'ready' | 'downloaded' | 'partial' | 'blocked' | 'unverified'
+  readonly weights: readonly ProfileWeightReport[]
+  readonly note: string
+}
+
+/**
+ * Make a profile's three weights present inside a resolved models root.
+ * Success is per T04: /object_info lists the exact file name. A finished download
+ * with no running ComfyUI to verify is 'unverified', never 'ready'.
+ */
+export async function ensureProfileWeights(input: {
+  readonly profileId: string
+  readonly base: string | null
+  readonly endpoint: string | null
+  readonly dryRun?: boolean
+  readonly deps?: EnvironmentDeps
+  /** Test seam: swap the download table (the shipped one is the default). */
+  readonly sources?: Readonly<Record<string, WeightSource>>
+}): Promise<ProfileWeightsOutcome> {
+  const profile = resolveProfile(input.profileId)
+  const dryRun = input.dryRun === true
+  const fetchImpl = input.deps?.fetchImpl ?? fetch
+  const plan = weightPlanOf(profile.id, input.base, input.sources ?? WEIGHT_SOURCES)
+  if (input.base === null) {
+    return {
+      profile: profile.id,
+      base: null,
+      dryRun,
+      state: 'blocked',
+      weights: plan.map((item) => ({ kind: item.kind, filename: item.filename, targetPath: null, bytes: item.source?.bytes ?? null, state: 'no-base' as const, objectInfo: null, note: '没解析出模型根，先让 ComfyUI 跑起来或确认 Desktop 安装。' })),
+      note: '没解析出模型根：下载目标无法确定，未写任何文件。',
+    }
+  }
+  const reports: ProfileWeightReport[] = []
+  let sawFailure = false
+  let sawUnverified = false
+  let changed = false
+  for (const item of plan) {
+    const source = item.source
+    if (source === null) {
+      reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: null, state: 'no-source', objectInfo: null, note: '下载表里没有这个文件的来源，未下载（按部署文档手工放置）。' })
+      sawFailure = true
+      continue
+    }
+    const currentSize = item.targetPath ? fileSizeOrNull(item.targetPath) : null
+    const alreadyPresent = currentSize === source.bytes
+    if (dryRun) {
+      reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: alreadyPresent ? 'dry-run' : 'would-download', objectInfo: null, note: alreadyPresent ? '已在位（大小匹配）。' : '将下载 ' + source.url + '（' + String(source.bytes) + ' 字节' + (source.urlVerified ? '' : '；URL 未实测') + '）。' })
+      continue
+    }
+    let download: WeightDownloadOutcome | null = null
+    if (!alreadyPresent) {
+      download = await downloadOneWeight({ url: source.url, targetPath: String(item.targetPath), expectedBytes: source.bytes, sha256: source.sha256, fetchImpl })
+      if (download.state === 'failed') {
+        reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: 'failed', objectInfo: null, note: download.note })
+        sawFailure = true
+        continue
+      }
+      changed = true
+    }
+    if (!input.endpoint) {
+      sawUnverified = true
+      reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: 'unverified', objectInfo: null, note: (download ? download.note : '文件已在位') + '，但 ComfyUI 没在跑，无法用 /object_info 判定成功。' })
+      continue
+    }
+    const check = await checkObjectInfoFile({ endpoint: input.endpoint, loader: item.loader, field: item.field, filename: item.filename, fetchImpl })
+    if (check.listed) {
+      reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: changed && !alreadyPresent ? 'installed' : 'present', objectInfo: check, note: (download ? download.note : '文件已在位') + ' /object_info 已列出。' })
+    } else {
+      sawFailure = true
+      reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: 'failed', objectInfo: check, note: '下载/落盘后 /object_info 仍没列出：' + check.note + '（目标 ' + String(item.targetPath) + '；可见列表：' + check.options.join(', ') + '）。按部署文档排障顺序查：目录 -> 文件名 -> 扫描缓存。' })
+    }
+  }
+  const ok = reports.filter((report) => report.state === 'present' || report.state === 'installed').length
+  const state = sawFailure ? 'partial' : sawUnverified ? 'unverified' : changed ? 'downloaded' : 'ready'
+  return {
+    profile: profile.id,
+    base: input.base,
+    dryRun,
+    state,
+    weights: reports,
+    note: ok + '/' + String(reports.length) + ' 个权重被 /object_info 列出；' + (sawFailure ? '有失败项，见 weights。' : sawUnverified ? '有文件已落盘但当前没有运行中的 ComfyUI 可验证。' : '全部就绪。'),
+  }
+}
+
+/** One step of the manual install guide. */
+export interface InstallStep {
+  readonly title: string
+  readonly detail: string
+}
+
+/** What install guidance says, and whether automation is authorised. */
+export interface InstallGuidance {
+  readonly state: 'installed' | 'not-installed'
+  readonly mode: 'manual' | 'automated'
+  readonly authorized: boolean
+  readonly downloadPage: string
+  readonly options: readonly string[]
+  readonly steps: readonly InstallStep[]
+  readonly note: string
+}
+
+/**
+ * Build the install guide. Automation is gated on the host granting computer
+ * use: this plugin never drives a GUI installer by itself, and an unauthorised
+ * environment must not even attempt it (T14 acceptance).
+ */
+export function installGuidanceOf(deps: EnvironmentDeps = {}, installed = false): InstallGuidance {
+  const authorized = deps.computerUse?.authorized === true
+  const shared = {
+    state: installed ? ('installed' as const) : ('not-installed' as const),
+    authorized,
+    downloadPage: 'https://www.comfy.org/download',
+    options: ['Windows 安装包（.exe，官方下载页）', '装到有空间的盘（本机 D 盘）', '计算后端选 CUDA（NVIDIA）'],
+  }
+  if (installed) return { ...shared, mode: 'manual', steps: [], note: 'ComfyUI 已安装，不需要安装引导。' }
+  if (authorized) {
+    return {
+      ...shared,
+      mode: 'automated',
+      steps: [
+        { title: '授权门槛', detail: '宿主已授予 computer use；自动流程由宿主的授权执行器完成，插件本身不模拟点击。' },
+        { title: '安装', detail: '下载官方 Windows 安装包 -> 选择安装盘 -> 计算后端 CUDA -> 首次启动建实例。' },
+      ],
+      note: '已授权自动安装；若宿主没有提供安装执行器，则退回手工步骤。',
+    }
+  }
+  return {
+    ...shared,
+    mode: 'manual',
+    steps: [
+      { title: '1. 下载', detail: '打开 https://www.comfy.org/download 下载 Windows 安装包（.exe）。' },
+      { title: '2. 选盘安装', detail: '安装时选择空间足够的盘（本机装在 D:\\Comfy-Desktop）；装完目录里有 ComfyUI-Installs 与 ComfyUI-Shared。' },
+      { title: '3. 选计算后端', detail: 'NVIDIA 卡选 CUDA；AMD / Apple Silicon 按各自分支安装。' },
+      { title: '4. 首次启动', detail: '启动一次让它建实例（会自动拉起 ComfyUI）；实例在 8188/8000 应答即可。' },
+      { title: '5. 回来自检', detail: '回到本工具 action=status；就绪后 action=download 按当前 comfyModel 下载三个权重（先不带 confirm 看计划）。' },
+    ],
+    note: '未获 computer use 授权：只输出图文步骤，不执行任何自动安装。',
+  }
+}
+
+/** Run authorised install automation, if (and only if) the host granted it. */
+export async function runInstallAutomation(deps: EnvironmentDeps = {}): Promise<{ ran: boolean; note: string }> {
+  const gate = deps.computerUse
+  if (!gate || gate.authorized !== true) return { ran: false, note: '未获 computer use 授权：不执行任何自动安装动作（手动步骤见 install.steps）。' }
+  if (typeof gate.run !== 'function') return { ran: false, note: '已授权但宿主没有提供安装执行器：不假装能装，退回手工步骤。' }
+  try {
+    const result = await gate.run()
+    return { ran: true, note: typeof result?.note === 'string' ? result.note : '自动安装执行器已运行。' }
+  } catch (error) {
+    return { ran: false, note: '自动安装执行器失败：' + (error instanceof Error ? error.message : String(error)) }
+  }
+}
+
 /** The tool name the environment layer registers. Never `qwen_image_env`. */
 export const ENVIRONMENT_TOOL_NAME = 'qwen_image_setup'
 
@@ -477,20 +1025,25 @@ export function registerEnvironmentTools(ctx: Context, getConfig: () => Config):
     defineTool({
       name: ENVIRONMENT_TOOL_NAME,
       description:
-        '环境层（P1a）：探测本机 ComfyUI——先按配置的端点/端口表探活，再读 Comfy Desktop 注册表判断装没装；' +
-        '没在跑时 `action="start"` 会按 Desktop 记录的 Python 与启动参数**后台拉起**并等 `/system_stats` 就绪，' +
-        '`action="stop"` 只停由插件/脚本拉起的那个实例（Windows 走 taskkill /F /T 清进程树）。' +
-        '**不安装 ComfyUI、不下载权重**、不产生图片；未安装时返回结构化的 not-installed 状态供后续安装引导使用。',
+        '环境层（P1a/P1b）：探测本机 ComfyUI——先按配置的端点/端口表探活，再读 Comfy Desktop 注册表判断装没装；' +
+        '没在跑时 action="start" 按 Desktop 记录的 Python 与启动参数后台拉起并等 /system_stats 就绪，action="stop" 只停本插件/脚本拉起过的实例。' +
+        'P1b：action="install" 输出安装引导（未获 computer use 授权时绝不执行自动安装）；' +
+        'action="download" 把当前 comfyModel 的三个权重按实测方案下载到 Desktop 模型根（.part + 字节数/sha256 + 原子改名）。' +
+        '下载成功的唯一判据是 /object_info/<Loader> 的候选列表包含精确文件名；本工具不重启 ComfyUI。先不带 confirm 调用可只看计划。',
       parameters: {
         action: {
           type: 'string',
-          enum: ['status', 'start', 'stop'],
+          enum: ['status', 'start', 'stop', 'install', 'download'],
           description:
-            'status（默认）=只看现状、不启动任何东西；start=没在跑就后台拉起并等就绪；stop=停掉本插件/脚本拉起过的实例。',
+            'status（默认）=看现状（含安装引导与权重在位情况）；start=没在跑就拉起；stop=停掉本插件拉起的实例；install=安装引导；download=按当前 comfyModel 下载权重（不带 confirm 只出计划）。',
         },
         timeoutMs: {
           type: 'integer',
-          description: 'start 时等 `/system_stats` 就绪的预算（毫秒，5 秒–15 分钟），默认 180000。',
+          description: 'start 时等 /system_stats 就绪的预算（毫秒，5 秒–15 分钟），默认 180000。',
+        },
+        confirm: {
+          type: 'boolean',
+          description: '仅 download 使用：缺省 false = dry-run 只返回计划；true 才真的下载并落盘（体积可达 16 GiB 以上，支持断点续传）。',
         },
       },
       output: {
@@ -499,23 +1052,64 @@ export function registerEnvironmentTools(ctx: Context, getConfig: () => Config):
       },
       timeoutMs: 900_000,
       isConcurrencySafe: () => false,
-      async execute(args: any, exec: any) {
-        const action = args?.action === 'start' || args?.action === 'stop' ? args.action : 'status'
+      async execute(args: any, _exec: any) {
+        const actions = ['start', 'stop', 'install', 'download']
+        const action = actions.includes(args?.action) ? args.action : 'status'
+        const startedAt = Date.now()
         const config = getConfig()
         let options = environmentOptionsOf(config)
         const requested = args?.timeoutMs
         if (action === 'start' && typeof requested === 'number' && Number.isFinite(requested)) {
           options = { ...options, installTimeoutMs: Math.min(900_000, Math.max(5_000, Math.round(requested))) }
         }
-        const startedAt = Date.now()
         if (action === 'stop') {
           const stop = stopEnvironment()
           return jsonSafe({ action, environment: null, stop, summary: stop.note, elapsed_ms: Date.now() - startedAt })
         }
         const environment = action === 'start' ? await ensureEnvironment(options) : await inspectEnvironment(options)
+        const endpoint = environment.state === 'ready' ? environment.endpoint : null
+        if (action === 'install') {
+          const install = installGuidanceOf({}, environment.state !== 'not-installed')
+          const automation = await runInstallAutomation({})
+          return jsonSafe({ action, environment, install, automation, summary: automation.note, elapsed_ms: Date.now() - startedAt })
+        }
+        if (action === 'download') {
+          if (environment.state !== 'ready') {
+            const install = installGuidanceOf({}, environment.state !== 'not-installed')
+            return jsonSafe({
+              action,
+              environment,
+              install,
+              models_base: { base: null, source: null, note: 'ComfyUI 没在跑，下载与 /object_info 校验都无法进行。' },
+              weights: null,
+              summary: 'ComfyUI 没就绪：先用 action="start" 启动（或装好/启动 ComfyUI），再回来下载。',
+              elapsed_ms: Date.now() - startedAt,
+            })
+          }
+          const base = await resolveModelsBase({ endpoint })
+          const dryRun = args?.confirm !== true
+          const weights = await ensureProfileWeights({ profileId: config.comfyModel, base: base.base, endpoint, dryRun })
+          return jsonSafe({
+            action,
+            environment,
+            models_base: base,
+            weights,
+            dry_run: dryRun,
+            summary: dryRun ? 'dry-run：' + weights.note : weights.note,
+            elapsed_ms: Date.now() - startedAt,
+          })
+        }
+        const base = environment.state === 'ready' || environment.state === 'not-running'
+          ? await resolveModelsBase({ endpoint })
+          : { base: null, source: null, note: '未安装：没有可解析的模型根。' }
+        const install = installGuidanceOf({}, environment.state !== 'not-installed')
+        const weights = environment.state === 'ready' && base.base ? await ensureProfileWeights({ profileId: config.comfyModel, base: base.base, endpoint, dryRun: true }) : null
         return jsonSafe({
           action,
           environment,
+          install,
+          models_base: base,
+          weights,
           summary: summarize(environment),
           elapsed_ms: Date.now() - startedAt,
         })
