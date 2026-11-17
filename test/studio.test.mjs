@@ -1950,12 +1950,12 @@ test('right-click offers the §6.4 menu for blank canvas and for an image node',
     entries = menuEntries(panel)
     assert.deepEqual(
       entries.map((entry) => fakeText(entry)),
-      ['用作参考', '按这张图迭代（预填表单）', '查看原图（新窗）', '复制到画板…', '移动到画板…', '从画布移除（不删文件）', '删除文件…'],
+      ['用作参考', '按这张图迭代（预填表单）', '放大查看', '查看原图（新窗）', '复制到画板…', '移动到画板…', '从画布移除（不删文件）', '删除文件…'],
     )
     // G25: cross-board entries are wired now, so nothing in this menu is grey.
     assert.deepEqual(
       entries.filter((entry) => entry.props.disabled !== true).map((entry) => fakeText(entry)),
-      ['用作参考', '按这张图迭代（预填表单）', '查看原图（新窗）', '复制到画板…', '移动到画板…', '从画布移除（不删文件）', '删除文件…'],
+      ['用作参考', '按这张图迭代（预填表单）', '放大查看', '查看原图（新窗）', '复制到画板…', '移动到画板…', '从画布移除（不删文件）', '删除文件…'],
       'every image menu entry has a handler',
     )
 
@@ -2166,6 +2166,130 @@ test('G25: with no other board the picker says so instead of offering nothing', 
     restoreFrames()
     network.restore()
   }
+})
+
+// ---------------------------------------------------------------------------
+// G22: the in-canvas lightbox.
+// ---------------------------------------------------------------------------
+
+/** The open lightbox's parts, or `undefined` when it is closed. */
+function lightboxView(panel) {
+  const box = fakeElementWithClass(panel.tree, 'dsh-forge-lightbox')
+  if (box === undefined) return undefined
+  const image = fakeElementWithClass(box, 'dsh-forge-lightbox-img')
+  return {
+    title: fakeText(fakeElementWithClass(box, 'dsh-forge-lightbox-title') ?? []),
+    meta: fakeText(fakeElementWithClass(box, 'dsh-forge-lightbox-meta') ?? []),
+    src: image === undefined ? undefined : image.props.src,
+    element: box,
+  }
+}
+
+test('G22: 放大查看 opens the picture in the canvas, and ←/→ walk the board', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    const entries = await openImageMenu(panel)
+    entries.find((entry) => fakeText(entry) === '放大查看').props.onClick()
+    await settle(panel)
+
+    let view = lightboxView(panel)
+    assert.ok(view !== undefined, 'the lightbox opens inside the canvas')
+    // The original file, not the 512-px node thumbnail: this is the "look at it
+    // properly" path. `openImageMenu` right-clicks the second node.
+    assert.ok(view.src.includes('ibbb2.png'), 'it shows the right-clicked picture')
+    assert.ok(!view.src.includes('&w='), 'the lightbox asks for the original, not a thumbnail')
+    assert.equal(view.title, '一只橘猫坐在窗台上', 'the prompt first line is the title')
+    assert.ok(view.meta.includes('1024×1024'), 'the size is stated')
+    assert.ok(view.meta.includes('seed 2'), 'the seed is stated')
+    assert.ok(view.meta.includes('2/3'), 'and where it sits in the board')
+    assert.equal(menuEntries(panel), undefined, 'opening the lightbox closes the menu')
+
+    // → walks to the next picture, ← back, and both wrap.
+    canvasElement(panel).props.onKeyDown(keyEvent('ArrowRight'))
+    await settle(panel)
+    view = lightboxView(panel)
+    assert.ok(view.src.includes('iccc3.png'), '→ shows the next picture')
+    assert.ok(view.meta.includes('3/3'))
+    canvasElement(panel).props.onKeyDown(keyEvent('ArrowLeft'))
+    await settle(panel)
+    assert.ok(lightboxView(panel).src.includes('ibbb2.png'), '← goes back')
+    canvasElement(panel).props.onKeyDown(keyEvent('ArrowLeft'))
+    await settle(panel)
+    assert.ok(lightboxView(panel).src.includes('iaaa1.png'), '← again reaches the first')
+    canvasElement(panel).props.onKeyDown(keyEvent('ArrowLeft'))
+    await settle(panel)
+    assert.ok(lightboxView(panel).src.includes('iccc3.png'), '← at the first picture wraps to the last')
+
+    // Esc closes without touching the selection or the nodes.
+    canvasElement(panel).props.onKeyDown(keyEvent('Escape'))
+    await settle(panel)
+    assert.equal(lightboxView(panel), undefined, 'Esc closes the lightbox')
+    assert.equal(nodeElements(panel).length, 3)
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('G22: a double-click opens it, and a backdrop click closes it', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    nodeElements(panel)[1].props.onDoubleClick()
+    await settle(panel)
+    assert.ok(lightboxView(panel) !== undefined, 'double-clicking a picture opens the lightbox')
+    assert.ok(lightboxView(panel).src.includes('ibbb2.png'))
+
+    // A click on the backdrop closes; the same handler on the card does not.
+    const box = lightboxView(panel).element
+    const card = { notTheBackdrop: true }
+    box.props.onPointerDown({ stopPropagation() {}, target: card, currentTarget: box })
+    await settle(panel)
+    assert.ok(lightboxView(panel) !== undefined, 'clicking the card keeps it open')
+    box.props.onPointerDown({ stopPropagation() {}, target: box, currentTarget: box })
+    await settle(panel)
+    assert.equal(lightboxView(panel), undefined, 'clicking the backdrop closes it')
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('G22: the open lightbox keeps the arrow keys from nudging the selection', async () => {
+  const { network, panel, restoreFrames } = await mountCanvasWorkbench()
+  try {
+    // Select a node, remember where it is, then open the lightbox over it.
+    nodeElements(panel)[0].props.onPointerDown(pointerEvent({ clientX: 10, clientY: 10 }))
+    await settle(panel)
+    canvasElement(panel).props.onPointerUp({})
+    await settle(panel)
+    const before = nodeElements(panel)[0].props.style.left
+    nodeElements(panel)[0].props.onDoubleClick()
+    await settle(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('ArrowRight'))
+    await settle(panel)
+    assert.equal(nodeElements(panel)[0].props.style.left, before, 'the arrow key went to the lightbox, not to the node')
+    assert.equal(selectedIds(panel).length, 1, 'the selection survives')
+  } finally {
+    restoreFrames()
+    network.restore()
+  }
+})
+
+test('G20: the canvas asks for thumbnails and the lightbox asks for the original', () => {
+  // The route half is asserted against a real socket in
+  // studio-file-route.test.mjs; this is the other half — that the panel actually
+  // requests a width where a width helps, and does not where it would hurt.
+  assert.ok(CLIENT_SOURCE.includes('function studioFileUrl(path, width)'), 'the URL helper must be able to carry ?w=')
+  assert.ok(CLIENT_SOURCE.includes('studioFileUrl(node.image.markdownPath, 512)'), 'a canvas node loads a 512-px thumbnail')
+  assert.ok(CLIENT_SOURCE.includes('studioFileUrl(asset.markdownPath, 256)'), 'an asset card loads a 256-px thumbnail')
+  assert.ok(CLIENT_SOURCE.includes('studioFileUrl(image.markdownPath, 512)'), 'the batch grid loads a 512-px thumbnail')
+  assert.ok(
+    CLIENT_SOURCE.includes('studioFileUrl(lightboxNode.image.markdownPath)'),
+    'the lightbox must load the original, not the thumbnail it is meant to enlarge',
+  )
+  // G22's overlay ships with the bundle.
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-lightbox'), 'the lightbox markup must ship')
+  assert.ok(CLIENT_SOURCE.includes('放大查看'), 'and the menu entry that opens it')
 })
 
 // ---------------------------------------------------------------------------

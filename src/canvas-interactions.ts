@@ -747,6 +747,9 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
   return [
     { id: 'reference', label: '用作参考' },
     { id: 'branch', label: '按这张图迭代（预填表单）' },
+    // G22: the in-canvas lightbox is the default viewer; `original` stays as the
+    // escape hatch that opens the raw file in a new tab.
+    { id: 'zoom-view', label: '放大查看', hint: '在画布内看大图：←/→ 换图，Esc 关闭' },
     { id: 'original', label: '查看原图（新窗）' },
     { id: 'copy-item', label: '复制到画板…', hint: '复制到另一个画板（共用同一张 PNG）' },
     { id: 'move-item', label: '移动到画板…', hint: '移出当前画板，换到另一个画板' },

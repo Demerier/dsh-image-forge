@@ -101,8 +101,39 @@ export const STUDIO_IMPORT_MAX_BODY_BYTES = 48 * 1024 * 1024
  * @param path - the absolute on-disk path a tool result or board item carries.
  * @returns a same-origin URL safe to put into `<img src>` and `href`.
  */
-export function studioFileUrl(path: string): string {
-  return `${STUDIO_FILE_ROUTE}?path=${encodeURIComponent(path)}`
+export function studioFileUrl(path: string, width?: number): string {
+  const base = `${STUDIO_FILE_ROUTE}?path=${encodeURIComponent(path)}`
+  return width === undefined ? base : `${base}&w=${String(width)}`
+}
+
+/**
+ * Widths the file route will downscale to (G20).
+ *
+ * A whitelist, not a free number: each entry is a cache file the route may
+ * create, and an unbounded `?w=` is an unbounded cache directory plus an
+ * unbounded per-request CPU cost. 256 is the contact-sheet cell, 512 is the
+ * canvas node, 1024 is a "large but not original" preview.
+ */
+export const STUDIO_THUMB_WIDTHS = [256, 512, 1024] as const
+/** Width the canvas node's `<img>` asks for. */
+export const STUDIO_NODE_THUMB_WIDTH = 512
+/** Directory (under `outputDir`) the generated thumbnails are cached in. */
+export const STUDIO_THUMB_DIR = '.dsh-image-forge'
+
+/**
+ * Validate a `?w=` value against {@link STUDIO_THUMB_WIDTHS}.
+ *
+ * @param raw - the query string value, or `null` when absent.
+ * @returns the width, `undefined` when the parameter was not given at all, or
+ *   `null` when it was given but is not an allowed number. The three cases are
+ *   distinguishable on purpose: "no width" is the original file, "bad width" is
+ *   a 400, and conflating them would silently serve originals to a caller that
+ *   asked for something impossible.
+ */
+export function parseStudioThumbWidth(raw: string | null): number | undefined | null {
+  if (raw === null || raw.length === 0) return undefined
+  const width = Number(raw)
+  return (STUDIO_THUMB_WIDTHS as readonly number[]).includes(width) ? width : null
 }
 
 /** File extensions the file route will serve, and the content types for them. */

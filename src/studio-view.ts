@@ -142,6 +142,7 @@ import {
   STUDIO_GENERATE_ROUTE,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
+  STUDIO_NODE_THUMB_WIDTH,
   STUDIO_LAYOUT_RATIO_TOLERANCE,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_LAYOUT_CHARS,
@@ -1201,6 +1202,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     readonly x: number
     readonly y: number
   } | undefined>(undefined)
+  // G22: the in-canvas lightbox. Opening a picture used to mean a new browser tab
+  // and losing the canvas; this is the node id being looked at, and everything
+  // else (the picture, its title, its neighbours) is derived from the board.
+  const [lightboxId, setLightboxId] = useState<string | undefined>(undefined)
   // Space is a *held* state, so it lives in a ref the pointer handler can read at
   // pointer-down and in state only for the cursor affordance (§6.3, §6.6).
   const panRef = useRef(false)
@@ -3393,7 +3398,66 @@ export function StudioPanel(): ReturnType<typeof createElement> {
    * service-side action (§7.2), so those two actions are deliberately inert here
    * rather than aliased onto something local.
    */
+
+  /* ------------------------------------------------------------------------ */
+  /* G22: the in-canvas lightbox                                              */
+  /* ------------------------------------------------------------------------ */
+  //
+  // Declared *before* the key handler that reads them: a `useCallback` runs its
+  // dependency array immediately, so a `const` declared further down would be in
+  // its temporal dead zone at that moment.
+
+  /** Every picture on the open board, in board order — the ←/→ ring. */
+  const boardPictures = useMemo(() => nodes.filter(isImageNode), [nodes])
+
+  /** Open one picture at full size, in place. */
+  const openLightbox = useCallback((id: string) => {
+    setLightboxId(id)
+    setMenu(undefined)
+    setTransfer(undefined)
+  }, [])
+
+  /**
+   * Move to the neighbouring picture.
+   *
+   * Wraps at both ends: the ring is short (one board) and a dead end at the last
+   * picture reads as "the button is broken". A node that has been removed since
+   * the lightbox opened resolves to nothing and the overlay simply closes.
+   */
+  const stepLightbox = useCallback((delta: number) => {
+    setLightboxId((current) => {
+      if (current === undefined) return undefined
+      const index = boardPictures.findIndex((node) => node.id === current)
+      if (index < 0 || boardPictures.length === 0) return undefined
+      const next = (index + delta + boardPictures.length) % boardPictures.length
+      return boardPictures[next]?.id
+    })
+  }, [boardPictures])
+
+  /** The picture the lightbox is showing, resolved from the current board. */
+  const lightboxNode = lightboxId === undefined
+    ? undefined
+    : boardPictures.find((node) => node.id === lightboxId)
+  const lightboxIndex = lightboxNode === undefined ? -1 : boardPictures.indexOf(lightboxNode)
+  /** Its stored prompt, which is the only human-readable title a result has. */
+  const lightboxItem = lightboxNode === undefined ? undefined : boardItemsRef.current.get(lightboxNode.id)
+
   const onCanvasKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    // G22: while the lightbox is open it owns the three keys that mean something
+    // there. Checked before the shortcut table so ArrowLeft does not nudge a node
+    // the user cannot even see behind the overlay.
+    if (lightboxId !== undefined) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setLightboxId(undefined)
+        return
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault()
+        stepLightbox(event.key === 'ArrowLeft' ? -1 : 1)
+        return
+      }
+    }
     const target = event.target as HTMLElement | null
     const context = shortcutContext({
       tagName: target?.tagName,
@@ -3475,7 +3539,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       default:
         break
     }
-  }, [copySelection, fitView, nudge, pasteClipboard, redoHistory, removeNodes, selection, undoHistory, zoomBy])
+  }, [copySelection, fitView, lightboxId, nudge, pasteClipboard, redoHistory, removeNodes, selection, stepLightbox, undoHistory, zoomBy])
 
   /** Space is a held modifier: releasing it hands the pointer back to selection. */
   const onCanvasKeyUp = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -3571,6 +3635,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         if (node !== undefined && isImageNode(node)) window.open(studioFileUrl(node.image.markdownPath), '_blank', 'noreferrer')
         break
       }
+      case 'zoom-view': {
+        // G22: same picture, in the canvas instead of a new tab.
+        if (target !== undefined) openLightbox(target)
+        break
+      }
       case 'task-retry':
         if (target !== undefined) retryTask(target)
         break
@@ -3624,6 +3693,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     menu?.x,
     menu?.y,
     menuIds,
+    openLightbox,
     pasteClipboard,
     referenceNode,
     removeNodes,
@@ -3790,7 +3860,14 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               title: asset.path,
               draggable: false,
             },
-            createElement('img', { src: studioFileUrl(asset.markdownPath), alt: '素材', loading: 'lazy' }),
+            // G20: the asset grid is the densest image surface in the panel, so
+            // it asks for the smallest thumbnail the route caches.
+            createElement('img', {
+              src: studioFileUrl(asset.markdownPath, 256),
+              alt: '素材',
+              loading: 'lazy',
+              decoding: 'async',
+            }),
           ),
           createElement(
             'div',
@@ -4534,16 +4611,23 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   },
                   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onNodePointerDown(event, node) },
                 }
-                // A picture node: the shipped render, unchanged.
+                // A picture node: the shipped render, plus the two G20/G22
+                // affordances — a 512-px thumbnail instead of a full-size PNG per
+                // node, and a double-click that opens the lightbox in place.
                 if (isImageNode(node)) {
                   return createElement(
                     'div',
-                    frame,
+                    {
+                      ...frame,
+                      title: '双击放大查看',
+                      onDoubleClick: () => { openLightbox(node.id) },
+                    },
                     createElement('img', {
-                      src: studioFileUrl(node.image.markdownPath),
+                      src: studioFileUrl(node.image.markdownPath, STUDIO_NODE_THUMB_WIDTH),
                       alt: '生成结果',
                       draggable: false,
                       loading: 'lazy',
+                      decoding: 'async',
                     }),
                     createElement(
                       'div',
@@ -4785,6 +4869,113 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   '取消',
                 ),
               ),
+            // G22: the lightbox. Screen-space like the menu (it must not scale
+            // with the zoom), inside the canvas element so the canvas keeps the
+            // keyboard and the wheel keeps working under it.
+            lightboxNode === undefined
+              ? null
+              : createElement(
+                'div',
+                {
+                  className: 'dsh-forge-lightbox',
+                  role: 'dialog',
+                  'aria-modal': true,
+                  'aria-label': '放大查看',
+                  // The backdrop is the close target; the card inside stops the
+                  // click so that "click the picture" is not "click the backdrop".
+                  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
+                    event.stopPropagation()
+                    if (event.target === event.currentTarget) setLightboxId(undefined)
+                  },
+                  onContextMenu: (event: ReactPointerEvent<HTMLDivElement>) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                  },
+                },
+                createElement(
+                  'div',
+                  { className: 'dsh-forge-lightbox-card' },
+                  createElement(
+                    'div',
+                    { className: 'dsh-forge-lightbox-head' },
+                    createElement(
+                      'span',
+                      { className: 'dsh-forge-lightbox-title' },
+                      // The prompt's first line is the only title a generated
+                      // picture has; a layout-derived result has none.
+                      (lightboxItem?.prompt ?? '').split('\n')[0] || '未命名结果',
+                    ),
+                    createElement(
+                      'span',
+                      { className: 'dsh-forge-lightbox-meta' },
+                      `${String(lightboxNode.image.width)}×${String(lightboxNode.image.height)}` +
+                        (lightboxItem?.seed == null ? '' : ` · seed ${String(lightboxItem.seed)}`) +
+                        (lightboxItem?.steps == null ? '' : ` · ${String(lightboxItem.steps)} 步`) +
+                        ` · ${String(lightboxIndex + 1)}/${String(boardPictures.length)}`,
+                    ),
+                  ),
+                  createElement(
+                    'div',
+                    { className: 'dsh-forge-lightbox-body' },
+                    createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-forge-lightbox-nav is-prev',
+                        'aria-label': '上一张',
+                        title: '上一张（←）',
+                        onClick: () => { stepLightbox(-1) },
+                      },
+                      '‹',
+                    ),
+                    createElement('img', {
+                      className: 'dsh-forge-lightbox-img',
+                      src: studioFileUrl(lightboxNode.image.markdownPath),
+                      alt: '放大查看',
+                      draggable: false,
+                    }),
+                    createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-forge-lightbox-nav is-next',
+                        'aria-label': '下一张',
+                        title: '下一张（→）',
+                        onClick: () => { stepLightbox(1) },
+                      },
+                      '›',
+                    ),
+                  ),
+                  createElement(
+                    'div',
+                    { className: 'dsh-forge-lightbox-foot' },
+                    createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-forge-btn is-ghost',
+                        onClick: () => { removeNodes([lightboxNode.id]) ; setLightboxId(undefined) },
+                      },
+                      '从画布移除',
+                    ),
+                    createElement(
+                      'a',
+                      {
+                        className: 'dsh-forge-btn is-ghost',
+                        href: studioFileUrl(lightboxNode.image.markdownPath),
+                        target: '_blank',
+                        rel: 'noreferrer',
+                      },
+                      '在新标签打开原图',
+                    ),
+                    createElement(
+                      'button',
+                      { type: 'button', className: 'dsh-forge-btn is-ghost', onClick: () => { setLightboxId(undefined) } },
+                      '关闭（Esc）',
+                    ),
+                  ),
+                ),
+              ),
             createElement(
               'div',
               { className: 'dsh-forge-canvas-foot' },
@@ -4836,7 +5027,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                       rel: 'noreferrer',
                       title: image.path,
                     },
-                    createElement('img', { src: studioFileUrl(image.markdownPath), alt: `结果 ${String(index + 1)}`, loading: 'lazy' }),
+                    createElement('img', {
+                      src: studioFileUrl(image.markdownPath, STUDIO_NODE_THUMB_WIDTH),
+                      alt: `结果 ${String(index + 1)}`,
+                      loading: 'lazy',
+                      decoding: 'async',
+                    }),
                   )),
                 ),
                 createElement('div', { className: 'dsh-forge-batch-prompt' }, batch.response.prompt),

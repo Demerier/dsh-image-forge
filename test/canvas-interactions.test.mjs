@@ -406,7 +406,9 @@ test('nudgeVector is one world unit per arrow key, ten with Shift', () => {
 test('contextMenuItems: the image menu is the full §6.4 list', () => {
   const items = contextMenuItems({ kind: 'node', nodeKind: 'image', selectionSize: 1 })
   const ids = items.map((item) => item.id)
-  assert.deepEqual(ids, ['reference', 'branch', 'original', 'copy-item', 'move-item', 'remove', 'delete-file'])
+  // G22 inserted `zoom-view` (the in-canvas lightbox) next to `original`, which
+  // stays as the open-in-a-new-tab escape hatch.
+  assert.deepEqual(ids, ['reference', 'branch', 'zoom-view', 'original', 'copy-item', 'move-item', 'remove', 'delete-file'])
   // Deleting the file is the one irreversible item, and it is marked so.
   assert.equal(items.find((item) => item.id === 'delete-file').danger, true)
   assert.equal(items.find((item) => item.id === 'remove').danger, undefined, 'unplace is not destructive')
@@ -419,6 +421,12 @@ test('contextMenuItems: the image menu is the full §6.4 list', () => {
     assert.ok(!item.hint.includes('尚未接线'), `${id} must not present itself as unwired`)
   }
   assert.deepEqual(items.filter((item) => item.disabled === true), [], 'the image menu has no grey entries left')
+  // The lightbox entry is only offered where a picture exists, and says which
+  // keys it answers (G22).
+  const zoom = items.find((item) => item.id === 'zoom-view')
+  assert.equal(zoom.label, '放大查看')
+  assert.ok(zoom.hint.includes('Esc'))
+  assert.ok(!contextMenuItems({ kind: 'node', nodeKind: 'image', selectionSize: 3 }).some((item) => item.id === 'zoom-view'), 'a batch has no single picture to enlarge')
   // No label is empty: a menu of blanks would be unusable.
   for (const item of items) assert.ok(item.label.length > 0)
 })

@@ -26,9 +26,11 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createReadStream, type Stats } from 'node:fs'
-import { stat } from 'node:fs/promises'
-import { basename, isAbsolute, resolve as resolvePath } from 'node:path'
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path'
 import { pipeline } from 'node:stream/promises'
+import { deflateSync, inflateSync } from 'node:zlib'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   STUDIO_ASSETS_ROUTE,
@@ -50,6 +52,8 @@ import {
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
+  STUDIO_THUMB_DIR,
+  STUDIO_THUMB_WIDTHS,
   type BoardLayoutDraft,
   type BoardTaskInfo,
   type StudioBoardRequest,
@@ -67,6 +71,7 @@ import {
   type StudioReferencePayload,
   firstLine,
   isStudioClientId,
+  parseStudioThumbWidth,
 } from './studio-shared.ts'
 import { createProgressBridge, type ProgressBridgeTiming } from './progress.ts'
 import { createRunRegistry, type RunRegistry } from './runs.ts'
@@ -589,6 +594,13 @@ export function registerStudioRoutes(
         const requested = url.searchParams.get('path') ?? ''
         if (requested.length === 0) return jsonError(res, 400, '缺少 path 参数')
         if (!isAbsolute(requested)) return jsonError(res, 400, '必须是绝对路径')
+        // G20: `?w=` asks for a cached thumbnail at one of the whitelisted widths.
+        // A width outside the list is a 400 rather than a silent original: the
+        // canvas would otherwise look like the thumbnail failed to appear.
+        const thumbWidth = parseStudioThumbWidth(url.searchParams.get('w'))
+        if (thumbWidth === null) {
+          return jsonError(res, 400, `w 只接受 ${STUDIO_THUMB_WIDTHS.join(' / ')} 这几档`)
+        }
 
         const type = STUDIO_FILE_TYPES[basename(requested).toLowerCase().match(/\.[^.]+$/)?.[0] ?? '']
         if (type === undefined) return jsonError(res, 415, '只支持 PNG / JPEG / WebP')
@@ -607,9 +619,52 @@ export function registerStudioRoutes(
         }
         if (!stats.isFile()) return jsonError(res, 404, '不是文件')
 
+        if (thumbWidth !== undefined) {
+          const thumb = await thumbFor(deps.settings().outputDir, target, stats, thumbWidth)
+          if (thumb !== undefined) {
+            if (thumb.kind === 'cached') {
+              let thumbStats: Stats
+              try {
+                thumbStats = await stat(thumb.path)
+              } catch {
+                // The file vanished between the check and this read (a rebooted
+                // cache): fall through to the original, which is always correct.
+                thumbStats = stats
+                res.writeHead(200, {
+                  'content-type': resolvedType,
+                  'content-length': String(stats.size),
+                  'x-dsh-thumb': 'original',
+                  'cache-control': 'private, max-age=86400, immutable',
+                })
+                await pipeline(createReadStream(target), res)
+                return
+              }
+              res.writeHead(200, {
+                'content-type': 'image/png',
+                'content-length': String(thumbStats.size),
+                'x-dsh-thumb': 'cached',
+                'cache-control': 'private, max-age=86400, immutable',
+              })
+              await pipeline(createReadStream(thumb.path), res)
+              return
+            }
+            res.writeHead(200, {
+              'content-type': 'image/png',
+              'content-length': String(thumb.bytes.length),
+              'x-dsh-thumb': 'generated',
+              'cache-control': 'private, max-age=86400, immutable',
+            })
+            res.end(thumb.bytes)
+            return
+          }
+          // Not a downscalable PNG (JPEG / WebP / 16-bit / already small): the
+          // original is the honest answer, and the header says which happened.
+        }
+
         res.writeHead(200, {
           'content-type': resolvedType,
           'content-length': String(stats.size),
+          ...(thumbWidth === undefined ? {} : { 'x-dsh-thumb': 'original' }),
           // Names carry a self-advancing counter and are never overwritten, so
           // the bytes behind one URL are immutable for the session's lifetime.
           'cache-control': 'private, max-age=86400, immutable',
@@ -1156,4 +1211,318 @@ function writeEvent(res: ServerResponse, event: StudioProgressEvent): void {
   } catch {
     // See above: the reader is gone.
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Thumbnails (G20) — a dependency-free PNG downscaler                        */
+/* -------------------------------------------------------------------------- */
+//
+// The canvas asks for `?w=512`, the route writes a resized copy once into
+// `<outputDir>/.dsh-image-forge/thumbs/` and serves that file forever after. The
+// reason this is hand-rolled instead of `sharp`/`jimp`: this plugin ships with no
+// runtime dependencies at all (see package.json — `dependencies` is absent), and
+// adding a native image library to a Harness plugin for one thumbnail is a
+// supply-chain and install-size decision, not an implementation detail.
+//
+// So: PNG only, 8-bit only, non-interlaced only — that is exactly what ComfyUI's
+// `SaveImage` writes and what this plugin's import path accepts. Anything else
+// (JPEG, WebP, 16-bit, interlaced, palette) falls through to the original bytes
+// with `x-dsh-thumb: original`, which is a correct answer, just a bigger one.
+// `node:zlib` does the compression; the filter/Paeth/CRC work is the ~120 lines
+// of PNG this module has to know about.
+
+/** One decoded PNG, ready to be resized and re-encoded. */
+interface DecodedPng {
+  readonly width: number
+  readonly height: number
+  /** RGBA, four bytes per pixel, row-major. */
+  readonly pixels: Uint8Array
+}
+
+/** A CRC-32 table, built once (`node:zlib` does not expose one). */
+const CRC_TABLE = ((): Uint32Array => {
+  const table = new Uint32Array(256)
+  for (let index = 0; index < 256; index += 1) {
+    let value = index
+    for (let bit = 0; bit < 8; bit += 1) value = (value & 1) === 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
+    table[index] = value >>> 0
+  }
+  return table
+})()
+
+/** CRC-32 of `bytes`, as PNG chunks require. */
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff
+  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff]! ^ (crc >>> 8)
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+/**
+ * Decode a PNG's pixels.
+ *
+ * @param bytes - the file's bytes.
+ * @returns the decoded image, or `undefined` for any PNG this module will not
+ *   re-encode (see the section note). A `undefined` is not an error: the caller
+ *   serves the original file instead.
+ */
+export function decodePng(bytes: Uint8Array): DecodedPng | undefined {
+  const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  if (bytes.length < 8 || SIGNATURE.some((byte, index) => bytes[index] !== byte)) return undefined
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let offset = 8
+  let width = 0
+  let height = 0
+  let bitDepth = 0
+  let colorType = 0
+  const idat: Uint8Array[] = []
+  while (offset + 12 <= bytes.length) {
+    const length = view.getUint32(offset)
+    const type = String.fromCharCode(bytes[offset + 4]!, bytes[offset + 5]!, bytes[offset + 6]!, bytes[offset + 7]!)
+    const dataStart = offset + 8
+    if (dataStart + length + 4 > bytes.length) return undefined
+    if (type === 'IHDR') {
+      if (length < 13) return undefined
+      width = view.getUint32(dataStart)
+      height = view.getUint32(dataStart + 4)
+      bitDepth = bytes[dataStart + 8]!
+      colorType = bytes[dataStart + 9]!
+      const interlace = bytes[dataStart + 12]!
+      // Only the shape ComfyUI writes: 8-bit, no interlace, no palette.
+      if (bitDepth !== 8 || interlace !== 0) return undefined
+      if (colorType !== 0 && colorType !== 2 && colorType !== 4 && colorType !== 6) return undefined
+    } else if (type === 'IDAT') {
+      idat.push(bytes.subarray(dataStart, dataStart + length))
+    } else if (type === 'IEND') {
+      break
+    }
+    offset = dataStart + length + 4
+  }
+  if (width <= 0 || height <= 0 || idat.length === 0) return undefined
+  const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 4 ? 2 : 4
+  const stride = width * channels
+  let raw: Uint8Array
+  try {
+    raw = inflateSync(Buffer.concat(idat.map((chunk) => Buffer.from(chunk))))
+  } catch {
+    return undefined
+  }
+  if (raw.length < (stride + 1) * height) return undefined
+  // Unfilter, scanline by scanline: every filter reads the previous *reconstructed*
+  // row, so this cannot be vectorised into one pass over the buffer.
+  const lines = new Uint8Array(stride * height)
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)]!
+    const from = y * (stride + 1) + 1
+    const to = y * stride
+    const up = to - stride
+    for (let x = 0; x < stride; x += 1) {
+      const value = raw[from + x]!
+      const left = x >= channels ? lines[to + x - channels]! : 0
+      const above = y > 0 ? lines[up + x]! : 0
+      const upLeft = y > 0 && x >= channels ? lines[up + x - channels]! : 0
+      let reconstructed: number
+      switch (filter) {
+        case 0:
+          reconstructed = value
+          break
+        case 1:
+          reconstructed = value + left
+          break
+        case 2:
+          reconstructed = value + above
+          break
+        case 3:
+          reconstructed = value + ((left + above) >> 1)
+          break
+        case 4: {
+          const estimate = left + above - upLeft
+          const toLeft = Math.abs(estimate - left)
+          const toAbove = Math.abs(estimate - above)
+          const toUpLeft = Math.abs(estimate - upLeft)
+          const predictor = toLeft <= toAbove && toLeft <= toUpLeft ? left : toAbove <= toUpLeft ? above : upLeft
+          reconstructed = value + predictor
+          break
+        }
+        default:
+          return undefined
+      }
+      lines[to + x] = reconstructed & 0xff
+    }
+  }
+  // Normalise every supported colour type to RGBA; the resampler only ever sees
+  // one layout.
+  const pixels = new Uint8Array(width * height * 4)
+  for (let index = 0; index < width * height; index += 1) {
+    const source = index * channels
+    const target = index * 4
+    if (channels === 1) {
+      pixels[target] = lines[source]!
+      pixels[target + 1] = lines[source]!
+      pixels[target + 2] = lines[source]!
+      pixels[target + 3] = 255
+    } else if (channels === 2) {
+      pixels[target] = lines[source]!
+      pixels[target + 1] = lines[source]!
+      pixels[target + 2] = lines[source]!
+      pixels[target + 3] = lines[source + 1]!
+    } else if (channels === 3) {
+      pixels[target] = lines[source]!
+      pixels[target + 1] = lines[source + 1]!
+      pixels[target + 2] = lines[source + 2]!
+      pixels[target + 3] = 255
+    } else {
+      pixels[target] = lines[source]!
+      pixels[target + 1] = lines[source + 1]!
+      pixels[target + 2] = lines[source + 2]!
+      pixels[target + 3] = lines[source + 3]!
+    }
+  }
+  return { width, height, pixels }
+}
+
+/** One PNG chunk: length, type, data, CRC. */
+function pngChunk(type: string, data: Uint8Array): Buffer {
+  const out = Buffer.alloc(data.length + 12)
+  out.writeUInt32BE(data.length, 0)
+  out.write(type, 4, 'ascii')
+  Buffer.from(data).copy(out, 8)
+  out.writeUInt32BE(crc32(out.subarray(4, 8 + data.length)), 8 + data.length)
+  return out
+}
+
+/**
+ * Encode RGBA pixels as a PNG.
+ *
+ * Filter 0 on every scanline: these are already-averaged thumbnail pixels, so an
+ * adaptive filter would buy a few percent for a lot more code.
+ */
+export function encodePng(image: DecodedPng): Uint8Array {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(image.width, 0)
+  header.writeUInt32BE(image.height, 4)
+  header[8] = 8 // bit depth
+  header[9] = 6 // truecolour with alpha
+  const stride = image.width * 4
+  const raw = Buffer.alloc((stride + 1) * image.height)
+  for (let y = 0; y < image.height; y += 1) {
+    raw[y * (stride + 1)] = 0
+    Buffer.from(image.pixels.buffer, image.pixels.byteOffset + y * stride, stride).copy(raw, y * (stride + 1) + 1)
+  }
+  return new Uint8Array(Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', header),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', new Uint8Array(0)),
+  ]))
+}
+
+/**
+ * Area-average an RGBA image down to `targetWidth`.
+ *
+ * A box filter, not nearest-neighbour: the point of the thumbnail is that a
+ * 2000-px picture still *looks* like itself at 512, and sampling one pixel in
+ * sixteen turns thin structures (whiskers, text) into confetti.
+ *
+ * @param image - decoded RGBA source.
+ * @param targetWidth - the requested width; a width >= the source is refused
+ *   here so the caller never touches a bigger file than the original.
+ * @returns the resized image, or `undefined` when no downscale is needed.
+ */
+export function downscalePng(image: DecodedPng, targetWidth: number): DecodedPng | undefined {
+  if (targetWidth <= 0 || image.width <= targetWidth) return undefined
+  const targetHeight = Math.max(1, Math.round((image.height * targetWidth) / image.width))
+  const scaleX = image.width / targetWidth
+  const scaleY = image.height / targetHeight
+  const pixels = new Uint8Array(targetWidth * targetHeight * 4)
+  for (let y = 0; y < targetHeight; y += 1) {
+    const yFrom = Math.floor(y * scaleY)
+    const yTo = Math.max(yFrom + 1, Math.min(image.height, Math.ceil((y + 1) * scaleY)))
+    for (let x = 0; x < targetWidth; x += 1) {
+      const xFrom = Math.floor(x * scaleX)
+      const xTo = Math.max(xFrom + 1, Math.min(image.width, Math.ceil((x + 1) * scaleX)))
+      let red = 0
+      let green = 0
+      let blue = 0
+      let alpha = 0
+      let count = 0
+      for (let sy = yFrom; sy < yTo; sy += 1) {
+        for (let sx = xFrom; sx < xTo; sx += 1) {
+          const source = (sy * image.width + sx) * 4
+          red += image.pixels[source]!
+          green += image.pixels[source + 1]!
+          blue += image.pixels[source + 2]!
+          alpha += image.pixels[source + 3]!
+          count += 1
+        }
+      }
+      const target = (y * targetWidth + x) * 4
+      pixels[target] = Math.round(red / count)
+      pixels[target + 1] = Math.round(green / count)
+      pixels[target + 2] = Math.round(blue / count)
+      pixels[target + 3] = Math.round(alpha / count)
+    }
+  }
+  return { width: targetWidth, height: targetHeight, pixels }
+}
+
+/** Where a given source file's thumbnail of `width` lives. */
+function thumbPathOf(outputDir: string, target: string, stats: Stats, width: number): string {
+  // The key covers the path *and* the file's identity: a re-drawn PNG under the
+  // same name (rare, but `writeImages` never does it) can never be served stale.
+  const key = createHash('sha256').update(`${target}|${String(stats.size)}|${String(stats.mtimeMs)}`).digest('hex')
+  return join(outputDir, STUDIO_THUMB_DIR, 'thumbs', `${key.slice(0, 32)}-w${String(width)}.png`)
+}
+
+/**
+ * What {@link thumbFor} hands back: either an already-cached file to stream, or
+ * the bytes it just made (which the route serves without a second disk hop).
+ */
+type ThumbResult =
+  | { readonly kind: 'cached'; readonly path: string }
+  | { readonly kind: 'bytes'; readonly bytes: Uint8Array }
+
+/**
+ * Produce (or find) the thumbnail for one file, falling back to the original.
+ *
+ * The contract the route relies on: **this never throws**. A JPEG, a 16-bit PNG,
+ * an unwritable cache directory or a corrupt IDAT all resolve to `undefined`,
+ * and the route streams the original file instead. A missing thumbnail is a
+ * performance problem; a 500 on an image is a broken canvas.
+ */
+async function thumbFor(
+  outputDir: string,
+  target: string,
+  stats: Stats,
+  width: number,
+): Promise<ThumbResult | undefined> {
+  const cachePath = thumbPathOf(outputDir, target, stats, width)
+  try {
+    const cached = await stat(cachePath)
+    if (cached.isFile()) return { kind: 'cached', path: cachePath }
+  } catch {
+    // Not generated yet: fall through.
+  }
+  let source: Buffer
+  try {
+    source = await readFile(target)
+  } catch {
+    return undefined
+  }
+  const decoded = decodePng(source)
+  if (decoded === undefined) return undefined
+  const resized = downscalePng(decoded, width)
+  if (resized === undefined) return undefined
+  const bytes = encodePng(resized)
+  try {
+    await mkdir(join(outputDir, STUDIO_THUMB_DIR, 'thumbs'), { recursive: true })
+    // Write beside the target and rename: a reader that arrives mid-write must
+    // see either no file or a complete one.
+    const staging = `${cachePath}.${String(process.pid)}.${String(Date.now())}.part`
+    await writeFile(staging, bytes)
+    await rename(staging, cachePath)
+  } catch {
+    // An unwritable cache is not a failed request: serve what we just made.
+    return { kind: 'bytes', bytes }
+  }
+  return { kind: 'bytes', bytes }
 }

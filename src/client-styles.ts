@@ -147,6 +147,19 @@ export const STUDIO_CSS = `
 .dsh-forge-context-head{padding:5px 9px 4px;font-size:10.5px;font-weight:600;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-forge-context-empty{padding:6px 9px;font-size:11px;opacity:.6;white-space:normal;line-height:1.5}
 .dsh-forge-context-item.is-cancel{margin-top:2px;border-top:1px solid rgba(127,127,127,.22);border-radius:0 0 5px 5px;opacity:.72}
+/* G22: the in-canvas lightbox. Screen-space (outside the zoomed layer, like the
+   menu), a dimmed backdrop, and a card whose picture is capped by the viewport
+   height — a 2048-px result must fit on screen without scrolling. */
+.dsh-forge-lightbox{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;padding:14px;background:rgba(0,0,0,.62);cursor:default}
+.dsh-forge-lightbox-card{display:flex;flex-direction:column;gap:8px;max-width:100%;max-height:100%;padding:10px;border-radius:12px;border:1px solid rgba(127,127,127,.4);background:#fff;background:Canvas;color:#111;color:CanvasText;box-shadow:0 18px 48px rgba(0,0,0,.4)}
+.dsh-forge-lightbox-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;min-width:0}
+.dsh-forge-lightbox-title{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.dsh-forge-lightbox-meta{flex:none;font-size:10.5px;opacity:.62;font-variant-numeric:tabular-nums}
+.dsh-forge-lightbox-body{display:flex;align-items:center;gap:8px;min-height:0}
+.dsh-forge-lightbox-img{display:block;max-width:min(72vw,760px);max-height:56vh;width:auto;height:auto;object-fit:contain;border-radius:6px;background:rgba(127,127,127,.12)}
+.dsh-forge-lightbox-nav{appearance:none;flex:none;width:30px;height:54px;font-size:22px;line-height:1;border-radius:8px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;cursor:pointer}
+.dsh-forge-lightbox-nav:hover{background:rgba(127,127,127,.14)}
+.dsh-forge-lightbox-foot{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}
 .dsh-forge-align{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
 .dsh-forge-align-btn{appearance:none;font:inherit;font-size:10.5px;line-height:1.4;padding:3px 6px;border-radius:5px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
 .dsh-forge-align-btn:hover{background:rgba(127,127,127,.13);border-color:rgba(127,127,127,.5)}
