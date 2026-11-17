@@ -42,6 +42,17 @@ export const STUDIO_ASSETS_ROUTE = '/plugins/dsh-image-forge/studio/assets'
  * route, which streams the bytes back same-origin.
  */
 export const STUDIO_FILE_ROUTE = '/plugins/dsh-image-forge/studio/file'
+/**
+ * Same-origin SSE stream that carries one run's live ComfyUI progress.
+ *
+ * The page never opens ComfyUI's own WebSocket: this plugin subscribes to
+ * `/ws` in Node and re-publishes normalized events here (decision 4 in
+ * `docs/DIRECTION-ALIGNMENT.md`). Each SSE message is one
+ * {@link StudioProgressEvent} as JSON in its `data:` field. `state` events say
+ * whether the bridge is connected, so a stopped ComfyUI is visible instead of
+ * leaving a stale step counter on screen.
+ */
+export const STUDIO_EVENTS_ROUTE = '/plugins/dsh-image-forge/studio/events'
 
 /**
  * Build the URL that serves one image through {@link STUDIO_FILE_ROUTE}.
@@ -363,3 +374,38 @@ export function firstLine(error: unknown, fallback = '未知错误'): string {
   const line = text.split(/\r?\n/, 1)[0] ?? text
   return line.length > 0 ? line : fallback
 }
+
+/**
+ * One message on {@link STUDIO_EVENTS_ROUTE}'s stream.
+ *
+ * This union is the whole contract between the backend bridge
+ * (`src/progress.ts`) and the panel: ComfyUI's raw `/ws` envelope never reaches
+ * the page, so the front end cannot accidentally grow a dependency on a
+ * renderer event name. `state` is emitted on subscribe and on every connection
+ * change; the rest follow one run — `queue` for ComfyUI's broadcast queue
+ * depth (the single-user local renderer this is sized for), then
+ * `start`/`node`/`progress` while it executes, then exactly one of
+ * `done`/`error`/`interrupted`.
+ */
+export type StudioProgressEvent =
+  /** The bridge's own connection, not ComfyUI's run. */
+  | { type: 'state'; state: 'connecting' | 'connected' | 'disconnected'; endpoint?: string; reason?: string }
+  /** Tasks ComfyUI still has queued, pushed on every queue change. */
+  | { type: 'queue'; remaining: number }
+  /** A prompt began executing (ComfyUI `execution_start`). */
+  | { type: 'start'; promptId: string }
+  /** Nodes reused from ComfyUI's cache (ComfyUI `execution_cached`). */
+  | { type: 'cached'; promptId: string; nodes: string[] }
+  /** A node started executing; the id the panel can name. */
+  | { type: 'node'; promptId: string; node: string; displayNode?: string }
+  /**
+   * One sampler step: `value` of `max`, with `label` already in the
+   * "17/50" form the panel prints verbatim.
+   */
+  | { type: 'progress'; promptId: string; node?: string; value: number; max: number; percent: number; label: string }
+  /** The run finished successfully, once per prompt. */
+  | { type: 'done'; promptId: string }
+  /** ComfyUI `execution_error`, with the exception headline only. */
+  | { type: 'error'; promptId?: string; node?: string; nodeType?: string; message: string }
+  /** ComfyUI's interrupt fired (ComfyUI `execution_interrupted`). */
+  | { type: 'interrupted'; promptId: string }

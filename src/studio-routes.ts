@@ -35,6 +35,7 @@ import {
   STUDIO_BOARDS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CONFIG_ROUTE,
+  STUDIO_EVENTS_ROUTE,
   STUDIO_FILE_ROUTE,
   STUDIO_FILE_TYPES,
   STUDIO_GENERATE_ROUTE,
@@ -46,9 +47,11 @@ import {
   type StudioGenerateRequest,
   type StudioOptimizeRequest,
   type StudioOptimizeTurn,
+  type StudioProgressEvent,
   type StudioReferencePayload,
   firstLine,
 } from './studio-shared.ts'
+import { createProgressBridge, type ProgressBridgeTiming } from './progress.ts'
 import {
   activeBoardId,
   createBoard,
@@ -77,6 +80,14 @@ export interface StudioRouteDeps {
   settings(): StudioSettings
   /** Host context, for the `llm` lookup the optimiser needs. */
   ctx: Context
+  /**
+   * Timing overrides for the progress bridge.
+   *
+   * Tests shrink the reconnect delay so a dropped ComfyUI socket can be
+   * exercised without waiting a production-sized backoff; production leaves it
+   * out and takes the defaults.
+   */
+  progress?: ProgressBridgeTiming
 }
 
 /** Wrap one handler so a thrown error becomes a JSON 500 instead of a dead socket. */
@@ -93,7 +104,7 @@ function guard(
   }
 }
 
-/** Register all three Studio routes on the host web server. */
+/** Register the Studio's routes (JSON endpoints plus one SSE stream) on the host web server. */
 export function registerStudioRoutes(
   ctx: Context,
   deps: StudioRouteDeps,
@@ -101,7 +112,12 @@ export function registerStudioRoutes(
   const server = (ctx as unknown as { webServer?: { register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void } }).webServer
   if (server === undefined || typeof server.register !== 'function') return []
 
-  return [
+  // One bridge per registration: every SSE response shares the same ComfyUI
+  // socket, and the bridge stays inert (no socket, no timer, no probe) until
+  // the first panel subscribes.
+  const progress = createProgressBridge({ settings: deps.settings, ...(deps.progress ?? {}) })
+
+  const disposers = [
     server.register({
       kind: 'exact',
       path: STUDIO_CONFIG_ROUTE,
@@ -350,7 +366,62 @@ export function registerStudioRoutes(
         await pipeline(createReadStream(target), res)
       }),
     }),
+
+    // ---- progress stream -------------------------------------------------
+    //
+    // One long-lived same-origin SSE response per watching panel. The bridge
+    // owns the ComfyUI socket; this route only frames its events, so two
+    // panels (the workbench and a tool card) share one upstream connection.
+    //
+    // Deliberately no timeout: the stream lives as long as the page is open.
+    // The heartbeat is what keeps a reverse proxy from reaping the idle
+    // connection between two runs, exactly like the POST routes' newline.
+    server.register({
+      kind: 'exact',
+      path: STUDIO_EVENTS_ROUTE,
+      handler: guard(async (req, res) => {
+        if (req.method !== 'GET') return jsonError(res, 405, 'method-not-allowed')
+        if (!sameOrigin(req)) return jsonError(res, 403, 'origin-rejected')
+
+        // Headers first: `EventSource` fires `open` only once the response
+        // head arrived, and the panel wants its "已连接" state at that point.
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          // A cached event stream is not a stream.
+          'cache-control': 'no-store',
+          // Same reason as the JSON routes: bytes must reach the browser
+          // instead of sitting in a proxy buffer.
+          'x-accel-buffering': 'no',
+          connection: 'keep-alive',
+        })
+        res.write(': connected\n\n')
+        // A browser that navigates away errors the response on the next write;
+        // a stream whose reader is gone has nothing left to report.
+        res.on('error', () => {})
+        const unsubscribe = progress.subscribe((event) => writeEvent(res, event))
+        const heartbeat = setInterval(() => {
+          if (res.destroyed || res.writableEnded) return
+          try {
+            res.write(': keep-alive\n\n')
+          } catch {
+            // The client went away between the check and the write.
+          }
+        }, HEARTBEAT_MS)
+        try {
+          await new Promise<void>((resolve) => {
+            res.once('close', () => { resolve() })
+            res.once('finish', () => { resolve() })
+          })
+        } finally {
+          clearInterval(heartbeat)
+          unsubscribe()
+        }
+      }),
+    }),
   ]
+  // The bridge holds the ComfyUI socket; a host unmount must release it.
+  disposers.push(() => progress.stop())
+  return disposers
 }
 
 /** Board a mutation targets: the explicit one, else the active board. */
@@ -578,4 +649,20 @@ function json(res: ServerResponse, status: number, value: unknown): void {
 function jsonError(res: ServerResponse, status: number, message: string): void {
   if (res.headersSent || res.writableEnded || res.destroyed) return
   json(res, status, { error: message })
+}
+
+/**
+ * Write one SSE message.
+ *
+ * A vanished client is normal (the panel navigated away), so a failed write is
+ * swallowed: the response's `close` handler unsubscribes the stream a tick
+ * later, and there is nobody left to report the error to.
+ */
+function writeEvent(res: ServerResponse, event: StudioProgressEvent): void {
+  if (res.destroyed || res.writableEnded) return
+  try {
+    res.write(`data: ${JSON.stringify(event)}\n\n`)
+  } catch {
+    // See above: the reader is gone.
+  }
 }
