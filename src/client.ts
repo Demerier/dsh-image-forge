@@ -33,13 +33,17 @@
  * The workbench is a **global panel**, not a settings tab: the layout shell's
  * root-scoped `main` keyed slot renders it, and a `sidebar.panellist` entry
  * puts it in the left sidebar. Both seats come from `registerStudioPanel` in
- * `./settings-section.ts`; the surface and its glyph live in
- * `./studio-view.ts`. The settings section below is pure configuration.
+ * `./settings-section.ts`; the seated component is the tabbed shell in
+ * `./workbench-view.ts` (whose canvas tabs still mount `StudioPanel` from
+ * `./studio-view.ts` until U04 extracts a pane that takes a `boardId`), and the
+ * sidebar glyph lives in `./studio-view.ts`. The settings section below is pure
+ * configuration.
  */
 import { createElement, useEffect, useState, type ReactNode } from 'react'
 import { injectClientStyles } from './client-styles.ts'
 import { studioFileUrl } from './studio-shared.ts'
-import { StudioPanel, StudioPanelIcon } from './studio-view.ts'
+import { StudioPanelIcon } from './studio-view.ts'
+import { WorkbenchShell } from './workbench-view.ts'
 import {
   SETTINGS_TABS,
   advisoryAfterGroup,
@@ -815,5 +819,11 @@ export function apply(ctx: {
   // `main` keyed slot holds the surface, and the sidebar list entry puts it in
   // the left rail. Both registrations wait for their slot to be declared, so a
   // host whose shell has neither still gets the tools and the settings page.
-  registerStudioPanel(ctx, { panel: StudioPanel, icon: StudioPanelIcon })
+  //
+  // The seated component is the **tabbed shell** (U03), not the studio surface:
+  // the panel now opens on the projects tab, and a project's canvas tab mounts
+  // `StudioPanel` inside it until U04's `CanvasPane` takes over. Seat id, label
+  // and order are untouched, so the sidebar row and the settings section keep
+  // pointing at the same plugin entry (`test/settings.test.mjs` pins that).
+  registerStudioPanel(ctx, { panel: WorkbenchShell, icon: StudioPanelIcon })
 }

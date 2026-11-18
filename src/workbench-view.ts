@@ -1,0 +1,628 @@
+/**
+ * The workbench shell: a browser-style tab strip over the panes it hosts.
+ *
+ * ## Why a shell and not a bigger `studio-view.ts`
+ *
+ * `./studio-view.ts` is one component that carries the generation form, the
+ * canvas, the result list and the board manager, all in one column. That was the
+ * right shape while a project *was* the panel; it stops being right as soon as
+ * the panel has to hold more than one project at a time. The tab state machine
+ * already exists as pure data in `./workbench-tabs.ts` (U01) and the workspace
+ * file already exists on disk (U02) — this module is the seam that makes both
+ * visible: a strip of `role="tab"` entries, one `role="tabpanel"` for the tab
+ * that is active, and a projects pane for the one tab that can never close.
+ *
+ * ## What U03 deliberately leaves for U04
+ *
+ * The canvas tab renders the existing `StudioPanel` unchanged. That component
+ * takes **no props** (`src/studio-view.ts:1210`), so the shell cannot hand it the
+ * `boardId` of the tab that opened it: the pane shows the board the studio picks
+ * for itself. Making the tab own its board is U04's `CanvasPane` + singleton
+ * store work, not something this shell can fake by reaching into the studio.
+ * The shell therefore also mounts **only the active** canvas pane: a hidden
+ * `StudioPanel` per tab would mean one SSE stream and one capability probe per
+ * open project, and §10.2's keep-alive-not-render rule belongs with the store.
+ *
+ * ## Persistence
+ *
+ * Reading the workspace happens once, on mount (`workspace-get`), and it never
+ * writes anything back — a stale or legacy document is normalised in memory
+ * (§4.3 WD5). Writing happens only after a **user** changed the strip, debounced
+ * so a burst of clicks becomes one `workspace-set` instead of one per frame.
+ * The one exception still follows the same rule: a `state.json`-only install is
+ * migrated into an open canvas tab in memory (§4.4), and that migration is
+ * written only when the user's next strip action commits it.
+ *
+ * @module workbench-view
+ */
+import {
+  createElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
+import {
+  STUDIO_BOARD_ROUTE,
+  STUDIO_CONFIG_ROUTE,
+  type BoardSummary,
+  type StudioConfigResponse,
+} from './studio-shared.ts'
+import { StudioPanel } from './studio-view.ts'
+import { ProjectsPane } from './workbench-projects.ts'
+import {
+  MAX_CANVAS_TABS,
+  MAX_TABS,
+  PROJECTS_TAB,
+  activateTab,
+  canvasTabKey,
+  closeTab,
+  emptyState,
+  listTabs,
+  openCanvas,
+  parseTabKey,
+  stateFromWorkspace,
+  toWorkspaceJson,
+  touchRecentProjects,
+  type TabDescriptor,
+  type TabKey,
+  type WorkbenchTabsState,
+} from './workbench-tabs.ts'
+
+/** Label of the one tab that is always present (§3.1). */
+export const WORKBENCH_PROJECTS_LABEL = '项目管理'
+
+/** Accessible name of the strip itself. */
+export const WORKBENCH_TABLIST_LABEL = '工作台页签'
+
+/**
+ * How long a strip change waits before it is written (§4.1).
+ *
+ * A delay, not a frame: opening three projects in a row is three `setState`
+ * calls in under 200 ms and must become one file write. Short enough that a
+ * user who closes the panel right after a click still gets the state saved
+ * (the unmount path flushes whatever is still pending).
+ */
+export const WORKBENCH_WRITE_DELAY_MS = 300
+
+/** Copy for a canvas tab whose board is gone (§3.3 "invalid" state). */
+export const WORKBENCH_DELETED_COPY = '这个项目已经被删除了。'
+
+/** Copy for a node-detail tab, which U06 fills in (§8). */
+export const WORKBENCH_NODE_PENDING_COPY = '节点详情页签将在 U06 落地，这里先留一个占位。'
+
+/* -------------------------------------------------------------------------- */
+/* Wire helpers                                                               */
+/* -------------------------------------------------------------------------- */
+
+/** Read a JSON body defensively: a proxy error page is not JSON. */
+async function readJsonBody(response: Response): Promise<Record<string, unknown> | undefined> {
+  try {
+    const value: unknown = await response.json()
+    return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** One board-route action; resolves to the host's refusal message, if any. */
+async function postBoardRoute(body: Record<string, unknown>): Promise<{
+  error?: string
+  payload?: Record<string, unknown>
+}> {
+  try {
+    const response = await fetch(STUDIO_BOARD_ROUTE, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const payload = await readJsonBody(response)
+    if (response.ok) return payload === undefined ? {} : { payload }
+    return { error: typeof payload?.error === 'string' ? payload.error : `画板操作失败（HTTP ${String(response.status)}）` }
+  } catch (cause) {
+    return { error: cause instanceof Error ? cause.message : String(cause) }
+  }
+}
+
+/**
+ * Read the capability snapshot, which is also where the board library rides
+ * (`StudioConfigResponse.boards`, `activeBoard`).
+ *
+ * The panel deliberately does **not** call `/studio/boards`: that route is
+ * host-only, and the snapshot is the one place the client is given the library
+ * (asserted by `test/studio.test.mjs`, "the panel gets the board list inside the
+ * capability snapshot").
+ */
+async function readConfigSnapshot(signal?: AbortSignal): Promise<StudioConfigResponse | undefined> {
+  try {
+    const response = await fetch(STUDIO_CONFIG_ROUTE, {
+      credentials: 'same-origin',
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const payload = await readJsonBody(response)
+    if (!response.ok || payload === undefined) return undefined
+    return payload as unknown as StudioConfigResponse
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Read the stored workspace, or `null` when the host has no file yet.
+ *
+ * `undefined` means "the read itself failed", which is a different fact from
+ * "there is no document": the first keeps the in-memory state alone, the second
+ * is what triggers §4.4's `state.json` migration.
+ */
+async function readWorkspaceDocument(): Promise<{ workspace?: unknown; ok: boolean }> {
+  const result = await postBoardRoute({ action: 'workspace-get' })
+  if (result.error !== undefined) return { ok: false }
+  const raw = result.payload?.['workspace']
+  if (raw === undefined || raw === null) return { ok: true, workspace: null }
+  return { ok: true, workspace: raw }
+}
+
+/** Write the whole workspace document (§4.5 `workspace-set`). Failures stay quiet. */
+async function writeWorkspaceDocument(state: WorkbenchTabsState): Promise<boolean> {
+  const result = await postBoardRoute({ action: 'workspace-set', workspace: toWorkspaceJson(state) })
+  return result.error === undefined
+}
+
+/* -------------------------------------------------------------------------- */
+/* Rendering helpers                                                          */
+/* -------------------------------------------------------------------------- */
+
+/** DOM id segment for a tab key: keys carry `:`, ids are safer without it. */
+function idSegment(key: TabKey): string {
+  return key.replace(/[^A-Za-z0-9_-]+/g, '-')
+}
+
+/** DOM id of a tab's button, so its panel can point back at it (§12.3). */
+export function tabButtonId(key: TabKey): string {
+  return `dsh-forge-workbench-tab-${idSegment(key)}`
+}
+
+/** DOM id of a tab's panel. */
+export function tabPanelId(key: TabKey): string {
+  return `dsh-forge-workbench-panel-${idSegment(key)}`
+}
+
+/** A board's display name, or a readable stand-in while the library is unknown. */
+function boardNameOf(boardId: string, boards: readonly BoardSummary[]): string | undefined {
+  return boards.find((board) => board.id === boardId)?.name
+}
+
+/** What a tab says on the strip (§3.1: labels come from data, keys never do). */
+export function tabLabelFor(tab: TabDescriptor, boards: readonly BoardSummary[]): string {
+  if (tab.kind === 'projects') return WORKBENCH_PROJECTS_LABEL
+  const name = tab.boardId === undefined ? undefined : boardNameOf(tab.boardId, boards)
+  const label = name === undefined || name.length === 0 ? (tab.boardId ?? '未命名项目') : name
+  return tab.kind === 'canvas' ? label : `详情 · ${label}`
+}
+
+/** Whether a tab may be closed at all: `projects` never may (§3.1, §12.3). */
+export function isClosableTab(tab: TabDescriptor): boolean {
+  return tab.kind !== 'projects'
+}
+
+/* -------------------------------------------------------------------------- */
+/* The shell                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The workbench surface: the tab strip plus the pane of the active tab.
+ *
+ * Mounted by the `main` keyed slot in place of `StudioPanel` (`./client.ts`);
+ * the seat's id, label and order are unchanged, so the sidebar row and the
+ * settings page keep pointing at the same plugin entry.
+ *
+ * @returns the strip and the active pane.
+ */
+export function WorkbenchShell(): ReturnType<typeof createElement> {
+  // Tab state is the pure module's own shape: this component never invents
+  // ordering or activation rules, it only feeds user actions through them.
+  const [state, setState] = useState<WorkbenchTabsState>(emptyState)
+  const [boards, setBoards] = useState<readonly BoardSummary[]>([])
+  const [boardsLoaded, setBoardsLoaded] = useState(false)
+  const [config, setConfig] = useState<StudioConfigResponse | undefined>(undefined)
+  const [loading, setLoading] = useState(true)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [error, setError] = useState<string | undefined>(undefined)
+  // Roving focus for arrow-key navigation (§12.3). An index, not a key, so a
+  // closing tab cannot leave focus pointing at a vanished entry.
+  const [focusIndex, setFocusIndex] = useState(0)
+  const stateRef = useRef(state)
+  const pendingRef = useRef<WorkbenchTabsState | undefined>(undefined)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const tabs = listTabs(state)
+
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
+
+  /** Coalesce strip changes into one write (§4.1). */
+  const queueWrite = useCallback((next: WorkbenchTabsState) => {
+    pendingRef.current = next
+    if (timerRef.current !== undefined) clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => {
+      timerRef.current = undefined
+      const pending = pendingRef.current
+      pendingRef.current = undefined
+      if (pending !== undefined) void writeWorkspaceDocument(pending)
+    }, WORKBENCH_WRITE_DELAY_MS)
+  }, [])
+
+  /** Apply a tab-state change and schedule its write. */
+  const commit = useCallback(
+    (next: WorkbenchTabsState) => {
+      if (next === stateRef.current) return
+      stateRef.current = next
+      setState(next)
+      queueWrite(next)
+    },
+    [queueWrite],
+  )
+
+  /** Reload the capability snapshot, which carries the library with it. */
+  const refreshLibrary = useCallback(async (): Promise<readonly BoardSummary[]> => {
+    const snapshot = await readConfigSnapshot()
+    if (snapshot === undefined) {
+      setError('读取项目列表失败：宿主没有回答。')
+      return []
+    }
+    const library = Array.isArray(snapshot.boards) ? snapshot.boards : []
+    setConfig(snapshot)
+    setBoards(library)
+    setBoardsLoaded(true)
+    return library
+  }, [])
+
+  // Mount: the snapshot and the stored workspace load together, because the
+  // workspace can only be validated against the boards that still exist (§4.3).
+  useEffect(() => {
+    let cancelled = false
+    const controller = typeof AbortController === 'function' ? new AbortController() : undefined
+    void (async () => {
+      const [snapshot, stored] = await Promise.all([readConfigSnapshot(controller?.signal), readWorkspaceDocument()])
+      if (cancelled) return
+      const library = snapshot !== undefined && Array.isArray(snapshot.boards) ? snapshot.boards : []
+      if (snapshot !== undefined) {
+        setConfig(snapshot)
+        setBoards(library)
+        setBoardsLoaded(true)
+      }
+      let restored = emptyState()
+      if (stored.ok && stored.workspace !== null && stored.workspace !== undefined) {
+        // `boardIds` is passed only when the library is known: an empty list
+        // would drop every reference as "deleted" and open an empty workspace.
+        restored = stateFromWorkspace(
+          stored.workspace,
+          snapshot === undefined ? {} : { boardIds: library.map((board) => board.id) },
+        )
+      } else if (stored.ok) {
+        // §4.4's one-shot migration: a `state.json`-only install keeps its old
+        // behaviour by turning the active board into an open canvas tab. It is
+        // memory-only until the user's next strip action writes it.
+        const active = snapshot?.activeBoard
+        if (typeof active === 'string' && active.length > 0 && library.some((board) => board.id === active)) {
+          restored = touchRecentProjects(openCanvas(emptyState(), active).state, active, new Date().toISOString())
+        }
+      }
+      setState(restored)
+      stateRef.current = restored
+      setLoading(false)
+    })()
+    return () => {
+      cancelled = true
+      controller?.abort()
+    }
+  }, [])
+
+  // Unmount: flush whatever the debounce still holds, so a close is not a loss.
+  useEffect(
+    () => () => {
+      if (timerRef.current !== undefined) clearTimeout(timerRef.current)
+      timerRef.current = undefined
+      const pending = pendingRef.current
+      pendingRef.current = undefined
+      if (pending !== undefined) void writeWorkspaceDocument(pending)
+    },
+    [],
+  )
+
+  /** Open (or re-activate) a project's canvas tab (§3.2 rules 2 and 5). */
+  const openProject = useCallback(
+    (boardId: string) => {
+      const result = openCanvas(stateRef.current, boardId)
+      if (result.rejected === 'canvas-limit') {
+        setNotice(`同时最多打开 ${String(MAX_CANVAS_TABS)} 个项目，请先关闭一个页签。`)
+        return
+      }
+      if (result.rejected === 'tab-limit') {
+        setNotice(`同时最多打开 ${String(MAX_TABS)} 个页签，请先关闭一个。`)
+        return
+      }
+      setNotice(undefined)
+      commit(touchRecentProjects(result.state, boardId, new Date().toISOString()))
+    },
+    [commit],
+  )
+
+  /** Select a tab that is already on the strip. */
+  const activate = useCallback(
+    (key: TabKey) => {
+      setNotice(undefined)
+      commit(activateTab(stateRef.current, key))
+    },
+    [commit],
+  )
+
+  /** Close one tab, cascading to a board's node tabs (§3.3, WD2). */
+  const close = useCallback(
+    (key: TabKey) => {
+      const result = closeTab(stateRef.current, key)
+      if (result.rejected !== undefined) return
+      setNotice(undefined)
+      commit(result.state)
+    },
+    [commit],
+  )
+
+  /** Create a project and open it, the primary action of §5.3. */
+  const createProject = useCallback(
+    async (name?: string) => {
+      const trimmed = typeof name === 'string' ? name.trim() : ''
+      const result = await postBoardRoute(trimmed.length === 0 ? { action: 'create' } : { action: 'create', name: trimmed })
+      if (result.error !== undefined) {
+        setError(result.error)
+        return
+      }
+      const created = result.payload?.['board'] as BoardSummary | undefined
+      setError(undefined)
+      await refreshLibrary()
+      if (created !== undefined && typeof created.id === 'string' && created.id.length > 0) openProject(created.id)
+    },
+    [openProject, refreshLibrary],
+  )
+
+  /** Rename a project in place. */
+  const renameProject = useCallback(async (boardId: string, name: string) => {
+    const trimmed = name.trim()
+    if (trimmed.length === 0) return
+    const result = await postBoardRoute({ action: 'rename', board: boardId, name: trimmed })
+    if (result.error !== undefined) {
+      setError(result.error)
+      return
+    }
+    setError(undefined)
+    setBoards((current) => current.map((board) => (board.id === boardId ? { ...board, name: trimmed } : board)))
+  }, [])
+
+  /**
+   * Delete a project, and close its canvas tab with it (§5.4).
+   *
+   * The confirmation itself lives in the pane, because whether to ask at all
+   * depends on the item count the pane is already showing.
+   */
+  const deleteProject = useCallback(
+    async (boardId: string) => {
+      const result = await postBoardRoute({ action: 'delete', board: boardId })
+      if (result.error !== undefined) {
+        setError(result.error)
+        return
+      }
+      setError(undefined)
+      setBoards((current) => current.filter((board) => board.id !== boardId))
+      const closed = closeTab(stateRef.current, canvasTabKey(boardId))
+      if (closed.rejected === undefined) {
+        setState(closed.state)
+        stateRef.current = closed.state
+        queueWrite(closed.state)
+      }
+    },
+    [queueWrite],
+  )
+
+  /**
+   * Strip keyboard handling (§12.2, §12.3).
+   *
+   * Arrow keys move the roving focus, `Enter`/`Space` activate, `Home`/`End`
+   * jump, and `Esc` closes the focused tab when it is closable. Typing inside a
+   * field of the active pane must never be swallowed, so anything aimed at an
+   * input owns its own keys.
+   */
+  const onStripKeyDown = useCallback(
+    (event: {
+      key?: string
+      preventDefault?: () => void
+      target?: { tagName?: string; isContentEditable?: boolean }
+      ctrlKey?: boolean
+      altKey?: boolean
+    }) => {
+      const target = event.target
+      const tag = typeof target?.tagName === 'string' ? target.tagName.toUpperCase() : ''
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable === true) return
+      const order = listTabs(stateRef.current)
+      if (order.length === 0) return
+      const index = Math.min(Math.max(focusIndex, 0), order.length - 1)
+      const focused = order[index]
+      const take = (at: number): void => {
+        event.preventDefault?.()
+        const bounded = ((at % order.length) + order.length) % order.length
+        setFocusIndex(bounded)
+      }
+      switch (event.key) {
+        case 'ArrowRight':
+          take(index + 1)
+          return
+        case 'ArrowLeft':
+          take(index - 1)
+          return
+        case 'Home':
+          take(0)
+          return
+        case 'End':
+          take(order.length - 1)
+          return
+        case 'Enter':
+        case ' ':
+          if (focused !== undefined) {
+            event.preventDefault?.()
+            activate(focused.key)
+          }
+          return
+        case 'Escape':
+          // §12.2 closes a tab on Escape only from the strip itself: inside the
+          // canvas, Escape stays "cancel the selection", because that handler
+          // lives in the pane and never reaches this one. `projects` is not
+          // closable, so it falls through untouched.
+          if (focused !== undefined && isClosableTab(focused)) {
+            event.preventDefault?.()
+            close(focused.key)
+          }
+          return
+        case '1':
+          if (event.ctrlKey === true && event.altKey === true) {
+            event.preventDefault?.()
+            activate(PROJECTS_TAB)
+          }
+          return
+        default:
+          return
+      }
+    },
+    [activate, close, focusIndex],
+  )
+
+  const activeTab = tabs.find((tab) => tab.key === state.activeTab)
+  const activeRef = parseTabKey(state.activeTab)
+  const activeBoardId = activeRef !== null && activeRef.kind !== 'projects' ? activeRef.boardId : undefined
+  // §3.3's "invalid" state: the library loaded and this tab's board is not in
+  // it, so the pane has nothing to draw. Never shown while the library is still
+  // unknown — that would flash "deleted" over every restored tab on a slow read.
+  const missingBoard =
+    boardsLoaded && activeBoardId !== undefined && !boards.some((board) => board.id === activeBoardId)
+
+  const environment = useMemo(
+    () => (config === undefined ? undefined : { ready: config.ready === true, reason: config.reason }),
+    [config],
+  )
+
+  let panel: ReactNode = null
+  if (activeTab === undefined) {
+    panel = createElement('p', { className: 'dsh-forge-workbench-empty-note' }, '没有可显示的页签。')
+  } else if (activeTab.kind === 'projects') {
+    panel = createElement(ProjectsPane, {
+      boards,
+      loading,
+      environment,
+      error,
+      onCreate: createProject,
+      onOpen: openProject,
+      onRename: renameProject,
+      onDelete: deleteProject,
+      onRefresh: () => {
+        void refreshLibrary()
+      },
+    })
+  } else if (activeTab.kind === 'canvas') {
+    panel = missingBoard
+      ? createElement('div', { className: 'dsh-forge-workbench-deleted' }, [
+          createElement('p', { key: 'copy', className: 'dsh-forge-workbench-empty-note' }, WORKBENCH_DELETED_COPY),
+          createElement(
+            'button',
+            {
+              key: 'close',
+              type: 'button',
+              className: 'dsh-forge-workbench-action',
+              onClick: () => close(activeTab.key),
+            },
+            '关闭页签',
+          ),
+        ])
+      : // U03 mounts the existing studio unchanged; U04 replaces it with a
+        // `CanvasPane` that takes the tab's `boardId` as a prop (§14.5).
+        createElement(StudioPanel)
+  } else {
+    panel = createElement('p', { className: 'dsh-forge-workbench-empty-note' }, WORKBENCH_NODE_PENDING_COPY)
+  }
+
+  const stripTabs = tabs.map((tab, index) => {
+    const active = tab.key === state.activeTab
+    const label = tabLabelFor(tab, boards)
+    const entries: ReactNode[] = [
+      createElement('span', { key: 'label', className: 'dsh-forge-workbench-tab-label' }, label),
+    ]
+    if (isClosableTab(tab)) {
+      // §12.3: a real button with its own label — `projects` renders none at
+      // all (not a disabled one), so "why does this not work" never comes up.
+      entries.push(
+        createElement(
+          'button',
+          {
+            key: 'close',
+            type: 'button',
+            className: 'dsh-forge-workbench-tab-close',
+            'aria-label': `关闭 ${label}`,
+            title: `关闭 ${label}`,
+            onClick: (event: { stopPropagation?: () => void }) => {
+              event.stopPropagation?.()
+              close(tab.key)
+            },
+          },
+          '×',
+        ),
+      )
+    }
+    return createElement(
+      'div',
+      {
+        key: tab.key,
+        role: 'tab',
+        id: tabButtonId(tab.key),
+        className: active
+          ? 'dsh-forge-workbench-tab dsh-forge-workbench-tab-active'
+          : 'dsh-forge-workbench-tab',
+        'aria-selected': active,
+        'aria-controls': tabPanelId(tab.key),
+        tabIndex: index === Math.min(Math.max(focusIndex, 0), tabs.length - 1) ? 0 : -1,
+        'data-tab-key': tab.key,
+        'data-tab-kind': tab.kind,
+        onClick: () => activate(tab.key),
+        onKeyDown: onStripKeyDown,
+      },
+      entries,
+    )
+  })
+
+  return createElement('div', { className: 'dsh-forge-workbench', 'data-tabs': tabs.length }, [
+    createElement(
+      'div',
+      {
+        key: 'strip',
+        className: 'dsh-forge-workbench-strip',
+        role: 'tablist',
+        'aria-label': WORKBENCH_TABLIST_LABEL,
+        onKeyDown: onStripKeyDown,
+      },
+      stripTabs,
+    ),
+    notice === undefined
+      ? null
+      : createElement('div', { key: 'notice', className: 'dsh-forge-workbench-notice', role: 'status' }, notice),
+    createElement(
+      'div',
+      {
+        key: 'panel',
+        className: 'dsh-forge-workbench-panel',
+        role: 'tabpanel',
+        id: activeTab === undefined ? undefined : tabPanelId(activeTab.key),
+        'aria-labelledby': activeTab === undefined ? undefined : tabButtonId(activeTab.key),
+      },
+      panel,
+    ),
+  ])
+}

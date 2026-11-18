@@ -271,6 +271,67 @@ export const STUDIO_CSS = `
 .dsh-forge-step-retry{align-self:flex-end;margin-top:4px}
 `
 
+/**
+ * The workbench shell: tab strip, projects toolbar, card grid, empty state.
+ *
+ * Same visual language as `.dsh-image-forge-tabs` (the settings page's strip):
+ * a hairline under the row, unfilled tab bodies, and the active tab lifted by a
+ * tint rather than by color. Kept in its own `dsh-forge-workbench-` namespace
+ * because these rules are the shell's, not the studio's — U04 moves the canvas
+ * out from under them and nothing here should have to move with it.
+ */
+export const WORKBENCH_CSS = `
+.dsh-forge-workbench{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0;height:100%}
+.dsh-forge-workbench-strip{display:flex;align-items:flex-end;gap:3px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:0 2px;border-bottom:1px solid rgba(127,127,127,.26);scrollbar-width:thin}
+.dsh-forge-workbench-tab{appearance:none;display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;background:transparent;color:inherit;font:inherit;font-size:12.5px;line-height:1.5;cursor:pointer;white-space:nowrap;max-width:26ch;opacity:.72;user-select:none}
+.dsh-forge-workbench-tab:hover{opacity:1;background:color-mix(in srgb,currentColor 5%,transparent)}
+.dsh-forge-workbench-tab-active{opacity:1;border-color:rgba(127,127,127,.26);background:color-mix(in srgb,currentColor 7%,transparent);position:relative;top:1px}
+.dsh-forge-workbench-tab-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:20ch}
+.dsh-forge-workbench-tab-close{appearance:none;flex:none;display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;padding:0;border:0;border-radius:4px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1;opacity:.55;cursor:pointer}
+.dsh-forge-workbench-tab-close:hover{opacity:1;background:rgba(220,38,38,.16)}
+.dsh-forge-workbench-panel{display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0;min-width:0}
+.dsh-forge-workbench-notice{padding:5px 9px;border-radius:6px;font-size:11.5px;line-height:1.5;border:1px solid rgba(59,130,246,.4);background:rgba(59,130,246,.1)}
+.dsh-forge-workbench-error{padding:5px 9px;border-radius:6px;font-size:11.5px;line-height:1.5;border:1px solid rgba(220,38,38,.45);background:rgba(220,38,38,.1);color:#dc2626}
+.dsh-forge-workbench-projects{display:flex;flex-direction:column;gap:9px;min-width:0;min-height:0}
+.dsh-forge-workbench-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dsh-forge-workbench-input{font:inherit;font-size:12.5px;line-height:1.5;padding:5px 8px;border-radius:6px;border:1px solid rgba(127,127,127,.32);background:rgba(127,127,127,.05);color:inherit;outline:none;min-width:0}
+.dsh-forge-workbench-input:focus{border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,.16)}
+.dsh-forge-workbench-new-name{flex:0 1 15ch;width:15ch}
+.dsh-forge-workbench-search{flex:1 1 12ch;min-width:10ch}
+.dsh-forge-workbench-select{appearance:none;font:inherit;font-size:12.5px;line-height:1.5;padding:5px 8px;border-radius:6px;border:1px solid rgba(127,127,127,.32);background:transparent;color:inherit;cursor:pointer;max-width:14ch}
+.dsh-forge-workbench-primary{appearance:none;font:inherit;font-size:12.5px;font-weight:600;line-height:1.5;padding:6px 12px;border-radius:6px;border:1px solid rgba(59,130,246,.55);background:rgba(59,130,246,.14);color:inherit;cursor:pointer;white-space:nowrap}
+.dsh-forge-workbench-primary:hover{background:rgba(59,130,246,.24)}
+.dsh-forge-workbench-action{appearance:none;font:inherit;font-size:11px;line-height:1.4;padding:3px 7px;border-radius:5px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
+.dsh-forge-workbench-action:hover{background:rgba(127,127,127,.13);border-color:rgba(127,127,127,.5)}
+.dsh-forge-workbench-action.is-danger{color:#dc2626;border-color:rgba(220,38,38,.42)}
+.dsh-forge-workbench-action.is-danger:hover{background:rgba(220,38,38,.12)}
+.dsh-forge-workbench-assets-entry{margin-left:auto}
+.dsh-forge-workbench-env{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 9px;border-radius:6px;font-size:11.5px;line-height:1.5;border:1px dashed rgba(127,127,127,.4);background:rgba(127,127,127,.04)}
+.dsh-forge-workbench-env-text{flex:1 1 16ch;min-width:0;opacity:.82;overflow-wrap:anywhere}
+.dsh-forge-workbench-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;min-width:0}
+.dsh-forge-workbench-card{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:9px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.03);min-width:0}
+.dsh-forge-workbench-card:hover{border-color:rgba(59,130,246,.45)}
+.dsh-forge-workbench-card-open{appearance:none;display:flex;flex-direction:column;gap:6px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;min-width:0}
+.dsh-forge-workbench-cover{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;border-radius:6px;overflow:hidden;background:rgba(127,127,127,.1);min-width:0}
+.dsh-forge-workbench-cover img{width:100%;height:100%;object-fit:cover;display:block}
+.dsh-forge-workbench-cover-empty{font-size:22px;opacity:.4}
+.dsh-forge-workbench-card-title{font-size:12.5px;font-weight:600;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.dsh-forge-workbench-card-meta{display:flex;align-items:baseline;gap:5px;font-size:10.5px;line-height:1.4;opacity:.6;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.dsh-forge-workbench-card-time{overflow:hidden;text-overflow:ellipsis}
+.dsh-forge-workbench-card-actions{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.dsh-forge-workbench-rename{display:flex;align-items:center;gap:4px}
+.dsh-forge-workbench-rename .dsh-forge-workbench-input{flex:1 1 auto;width:auto}
+.dsh-forge-workbench-confirm{display:flex;flex-direction:column;gap:5px;padding:6px;border-radius:6px;border:1px solid rgba(220,38,38,.4);background:rgba(220,38,38,.07)}
+.dsh-forge-workbench-confirm-copy{margin:0;font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+.dsh-forge-workbench-confirm-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.dsh-forge-workbench-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:28px 16px;border-radius:10px;border:1px dashed rgba(127,127,127,.32);text-align:center}
+.dsh-forge-workbench-empty-title{margin:0;font-size:13.5px;font-weight:600;line-height:1.5}
+.dsh-forge-workbench-empty-body{margin:0;font-size:12px;line-height:1.6;opacity:.66;max-width:44ch}
+.dsh-forge-workbench-empty-note{margin:0;padding:18px 10px;text-align:center;font-size:12px;opacity:.5;border:1px dashed rgba(127,127,127,.3);border-radius:8px}
+.dsh-forge-workbench-deleted{display:flex;flex-direction:column;align-items:center;gap:8px;padding:22px 12px}
+.dsh-forge-workbench-assets{display:flex;flex-direction:column;gap:8px;padding:6px 2px}
+`
+
 /** The stylesheet text, exported so tests can pin the rules without a DOM. */
 export const CLIENT_CSS = `
 .dsh-image-forge-settings {
@@ -657,6 +718,7 @@ export const CLIENT_CSS = `
   }
 }
 ${STUDIO_CSS}
+${WORKBENCH_CSS}
 `
 
 /**
