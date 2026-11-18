@@ -49,13 +49,26 @@ import {
   type ReactNode,
 } from 'react'
 import {
+  STUDIO_ASSETS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CONFIG_ROUTE,
   type BoardSummary,
+  type StudioAsset,
+  type StudioAssetsResponse,
   type StudioConfigResponse,
 } from './studio-shared.ts'
 import { CanvasPane } from './canvas-pane.ts'
 import { ProjectsPane } from './workbench-projects.ts'
+// U08 (§9.2): the global asset library is the projects tab's **second view**,
+// not a tab of its own. The pane is presentational; this module owns the read,
+// the cross-tab destination and every mutation, exactly as it does for cards.
+import {
+  ASSET_NEEDS_PROJECT_COPY,
+  ASSET_PAGE_LIMIT,
+  AssetsPane,
+  canvasTargetBoard,
+  type AssetTransferMode,
+} from './workbench-assets.ts'
 // U06: the node detail tab (§8). Everything it decides — which view a kind has,
 // what the strip calls it, which nodes still have an editor — is a pure function
 // there, so the shell stays the seam it is and not a second implementation.
@@ -274,11 +287,44 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
   // U06 (§8.2): one request from a detail tab for the canvas to execute. Held
   // here because the shell is what swaps the panes; cleared once consumed.
   const [intent, setIntent] = useState<CanvasIntent | undefined>(undefined)
+  /**
+   * U08: which of the projects tab's two views is on screen (§9.2).
+   *
+   * Shell state, not pane state, because the assets view must survive a tab
+   * switch: "在画布中打开" *is* a tab switch, and coming back must not drop the
+   * user in front of the grid again with their search lost.
+   */
+  const [projectsView, setProjectsView] = useState<'grid' | 'assets'>('grid')
+  /** U08: the library as last read through `/studio/assets` (no `board` query). */
+  const [assets, setAssets] = useState<readonly StudioAsset[]>([])
+  const [assetsLoading, setAssetsLoading] = useState(false)
+  const [assetsError, setAssetsError] = useState<string | undefined>(undefined)
+  /**
+   * U08: the last canvas tab this shell activated.
+   *
+   * The global library lives in a tab that is not a canvas, so "在画布中打开"
+   * has to remember where the user came from: while the projects tab is in
+   * front, the active tab names no board at all. A remembered board that is no
+   * longer open is still dropped (`canvasTargetBoard`), so a closed tab can
+   * never be a destination.
+   */
+  const [lastCanvasBoardId, setLastCanvasBoardId] = useState<string | undefined>(undefined)
   const intentSeqRef = useRef(0)
   const stateRef = useRef(state)
   const pendingRef = useRef<WorkbenchTabsState | undefined>(undefined)
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  /** U08: true once a read answered, so reopening the view does not re-ask. */
+  const assetsLoadedRef = useRef(false)
   const tabs = listTabs(state)
+  /**
+   * U08: where the library's 在画布中打开 lands, and what to call it.
+   *
+   * `canvasTargetBoard` is the pure rule (§9.2): the active canvas tab, else the
+   * one the user looked at last, else nothing — and "nothing" is what disables
+   * the action instead of making it a no-op.
+   */
+  const canvasTargetId = canvasTargetBoard(tabs, state.activeTab, lastCanvasBoardId)
+  const canvasTargetName = canvasTargetId === undefined ? undefined : boardNameOf(canvasTargetId, boards)
 
   useEffect(() => {
     stateRef.current = state
@@ -321,6 +367,46 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
     return library
   }, [])
 
+  /**
+   * Read the global asset library (U08, §9.4).
+   *
+   * One request, **without** a `board` parameter — that is what makes it the
+   * cross-project library rather than a canvas tab's own list (§14.9 ②). The
+   * pane filters it in memory, so a scope switch or a keystroke never waits on
+   * the host. `force` is for the paths where the truth changed: after a copy, a
+   * move or a delete, and for the toolbar's 刷新.
+   */
+  const loadAssets = useCallback(async (force = false): Promise<void> => {
+    if (!force && assetsLoadedRef.current) return
+    setAssetsLoading(true)
+    try {
+      const response = await fetch(`${STUDIO_ASSETS_ROUTE}?limit=${String(ASSET_PAGE_LIMIT)}`, {
+        credentials: 'same-origin',
+      })
+      const payload = await readJsonBody(response)
+      if (!response.ok || payload === undefined) {
+        setAssetsError(`读取素材失败（HTTP ${String(response.status)}）`)
+        return
+      }
+      const page = payload as unknown as StudioAssetsResponse
+      setAssets(Array.isArray(page.assets) ? page.assets : [])
+      assetsLoadedRef.current = true
+      setAssetsError(undefined)
+    } catch (cause) {
+      setAssetsError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setAssetsLoading(false)
+    }
+  }, [])
+
+  // The library is read the first time its view is shown, not on mount: the
+  // projects tab is the landing tab and most sessions never open the library.
+  useEffect(() => {
+    if (projectsView !== 'assets') return
+    if (assetsLoadedRef.current) return
+    void loadAssets()
+  }, [loadAssets, projectsView])
+
   // Mount: the snapshot and the stored workspace load together, because the
   // workspace can only be validated against the boards that still exist (§4.3).
   useEffect(() => {
@@ -354,6 +440,12 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
       }
       setState(restored)
       stateRef.current = restored
+      // U08: a restored canvas tab is where "在画布中打开" would go, exactly as
+      // if the user had just activated it.
+      const restoredActive = parseTabKey(restored.activeTab)
+      if (restoredActive !== null && restoredActive.kind === 'canvas' && typeof restoredActive.boardId === 'string') {
+        setLastCanvasBoardId(restoredActive.boardId)
+      }
       setLoading(false)
     })()
     return () => {
@@ -387,6 +479,9 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
         return
       }
       setNotice(undefined)
+      // U08: remember the canvas the user came from, for the library's
+      // 在画布中打开 while the projects tab is in front.
+      setLastCanvasBoardId(boardId)
       commit(touchRecentProjects(result.state, boardId, new Date().toISOString()))
     },
     [commit],
@@ -396,6 +491,8 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
   const activate = useCallback(
     (key: TabKey) => {
       setNotice(undefined)
+      const ref = parseTabKey(key)
+      if (ref !== null && ref.kind === 'canvas' && typeof ref.boardId === 'string') setLastCanvasBoardId(ref.boardId)
       commit(activateTab(stateRef.current, key))
     },
     [commit],
@@ -587,6 +684,111 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
     [forgetSubjects, queueWrite],
   )
 
+  /* ------------------------------------------------------------------ */
+  /* U08 — the global asset library (§9.2, §9.3)                        */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Put one library asset on the canvas the user is working in.
+   *
+   * Two paths, and the difference is the point (§9.3): a picture already on the
+   * destination board is **already there**, so "open it in the canvas" is just
+   * switching to that tab — copying it would silently double the node. Every
+   * other case is the existing cross-board route (`copy-item`, the verb defined
+   * as "the file is not moved", §7.2) with the landing spot left to the host's
+   * grid, because this pane knows no world coordinates.
+   */
+  const openAssetInCanvas = useCallback(
+    async (asset: StudioAsset) => {
+      if (canvasTargetId === undefined) {
+        setNotice(ASSET_NEEDS_PROJECT_COPY)
+        return
+      }
+      const targetName = boardNameOf(canvasTargetId, boards) ?? canvasTargetId
+      if (asset.boardId === canvasTargetId) {
+        activate(canvasTabKey(canvasTargetId))
+        setNotice(`这张素材已经在「${targetName}」的画布里了。`)
+        return
+      }
+      const result = await postBoardRoute({
+        action: 'copy-item',
+        board: asset.boardId,
+        item: asset.id,
+        toBoard: canvasTargetId,
+      })
+      if (result.error !== undefined) {
+        setAssetsError(result.error)
+        return
+      }
+      setAssetsError(undefined)
+      setNotice(`已把这张素材复制到「${targetName}」的画布。`)
+      activate(canvasTabKey(canvasTargetId))
+      await loadAssets(true)
+      await refreshLibrary()
+    },
+    [activate, boards, canvasTargetId, loadAssets, refreshLibrary],
+  )
+
+  /**
+   * 复制 / 移动 one asset onto another project (C12's `copy-item` / `move-item`).
+   *
+   * No `x`/`y`: the destination's grid places it. Passing a coordinate from a
+   * pane that has no canvas would be inventing a viewport this component never
+   * measured.
+   */
+  const transferAsset = useCallback(
+    async (asset: StudioAsset, toBoard: string, mode: AssetTransferMode) => {
+      const toName = boardNameOf(toBoard, boards) ?? toBoard
+      const result = await postBoardRoute({
+        action: mode === 'move' ? 'move-item' : 'copy-item',
+        board: asset.boardId,
+        item: asset.id,
+        toBoard,
+      })
+      if (result.error !== undefined) {
+        setAssetsError(result.error)
+        return
+      }
+      setAssetsError(undefined)
+      setNotice(mode === 'move' ? `已把这张素材移到「${toName}」。` : `已把它复制到「${toName}」，两个项目共用这张图。`)
+      await loadAssets(true)
+      await refreshLibrary()
+    },
+    [boards, loadAssets, refreshLibrary],
+  )
+
+  /**
+   * 删除文件: one entry, and the file behind it.
+   *
+   * `remove-item` + `deleteFile` is the existing verb (`src/boards.ts`
+   * `removeItem`), whose shared-reference guard keeps a PNG another project
+   * still points at. The host says what happened, and the notice repeats it:
+   * a delete that kept the file must never look like a delete that took it.
+   */
+  const deleteAsset = useCallback(
+    async (asset: StudioAsset) => {
+      const result = await postBoardRoute({
+        action: 'remove-item',
+        board: asset.boardId,
+        item: asset.id,
+        deleteFile: true,
+      })
+      if (result.error !== undefined) {
+        setAssetsError(result.error)
+        return
+      }
+      setAssetsError(undefined)
+      setNotice(
+        result.payload?.['fileDeleted'] === true
+          ? '已删除这张素材和它的文件。'
+          : '已把这张素材移出项目；文件还在，别的项目也引用着它。',
+      )
+      await loadAssets(true)
+      await refreshLibrary()
+    },
+    [loadAssets, refreshLibrary],
+  )
+
   /**
    * Strip keyboard handling (§12.2, §12.3).
    *
@@ -688,20 +890,46 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
   if (activeTab === undefined) {
     panel = createElement('p', { className: 'dsh-forge-workbench-empty-note' }, '没有可显示的页签。')
   } else if (activeTab.kind === 'projects') {
-    panel = createElement(ProjectsPane, {
-      boards,
-      loading,
-      environment,
-      error,
-      onCreate: createProject,
-      onOpen: openProject,
-      onRename: renameProject,
-      onDuplicate: duplicateProject,
-      onDelete: deleteProject,
-      onRefresh: () => {
-        void refreshLibrary()
-      },
-    })
+    // §9.2: the projects tab hosts two views. The grid is the file of record;
+    // the library is the console beside it — same tabpanel, same tab, so the
+    // strip never grows a second non-project entry (Q7).
+    panel = projectsView === 'assets'
+      ? createElement(AssetsPane, {
+          assets,
+          boards,
+          loading: assetsLoading,
+          ...(assetsError === undefined ? {} : { error: assetsError }),
+          // Absent `activeBoardId` is the §9.2 degradation: the action is
+          // disabled and the hint says why, instead of copying somewhere.
+          ...(canvasTargetId === undefined ? {} : { activeBoardId: canvasTargetId }),
+          ...(canvasTargetName === undefined ? {} : { activeBoardName: canvasTargetName }),
+          onReload: () => {
+            void loadAssets(true)
+          },
+          onOpenInCanvas: openAssetInCanvas,
+          onTransfer: transferAsset,
+          onDelete: deleteAsset,
+          onBack: () => setProjectsView('grid'),
+          onCreateProject: () => {
+            setProjectsView('grid')
+            void createProject('')
+          },
+        })
+      : createElement(ProjectsPane, {
+          boards,
+          loading,
+          environment,
+          error,
+          onCreate: createProject,
+          onOpen: openProject,
+          onRename: renameProject,
+          onDuplicate: duplicateProject,
+          onDelete: deleteProject,
+          onRefresh: () => {
+            void refreshLibrary()
+          },
+          onOpenAssets: () => setProjectsView('assets'),
+        })
   } else if (activeTab.kind === 'canvas') {
     panel = missingBoard
       ? createElement('div', { className: 'dsh-forge-workbench-deleted' }, [
@@ -721,6 +949,13 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
         // composes them, and since U06 it also carries the two facts the detail
         // tab needs: how to open one (`onOpenNode`), and which nodes already have
         // one open (`detailOpen` — §8.4's read-only thumbnail).
+        //
+        // U08 deliberately adds **no second asset list here**: the canvas tab's
+        // project-scope list is the studio's own 素材 view, which rides along
+        // inside the pane (§9.1, and U05 left it untouched). A shell-level
+        // drawer beside it would be two different lists of the same project on
+        // one screen. The library in the projects tab is the *other* scope, and
+        // its 在画布中打开 is how the two meet.
         createElement(CanvasPane, {
           boardId: activeBoardId,
           boards,

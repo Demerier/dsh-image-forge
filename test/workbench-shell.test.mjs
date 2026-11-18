@@ -39,6 +39,7 @@ const CLIENT_SOURCE = readFileSync(fileURLToPath(new URL('../lib/client.js', imp
 const CONFIG_ROUTE = '/plugins/dsh-image-forge/studio/config'
 const BOARD_ROUTE = '/plugins/dsh-image-forge/studio/board'
 const FILE_ROUTE = '/plugins/dsh-image-forge/studio/file'
+const ASSETS_ROUTE = '/plugins/dsh-image-forge/studio/assets'
 
 /** The one tab that is always present, in the strip's own language. */
 const PROJECTS_LABEL = '项目管理'
@@ -184,10 +185,18 @@ function installFakeNetwork(options = {}) {
   let workspace = options.workspace === undefined ? null : options.workspace
   let created = 0
   let duplicates = 0
+  // U08: the library the asset route answers with. A copy is not this stub's
+  // job (the route is asserted by `test/studio.test.mjs`); what matters here is
+  // that the request body is the one §9.3 promises, and that the answer is
+  // shaped like `StudioAssetsResponse`.
+  const assets = (options.assets ?? []).map((asset) => ({ ...asset }))
   globalThis.fetch = async (input, init) => {
     const url = String(input)
     const method = init === undefined || init.method === undefined ? 'GET' : init.method
     calls.push({ url, method, body: init === undefined ? undefined : init.body })
+    if (url.indexOf(ASSETS_ROUTE) === 0) {
+      return respond({ assets: assets.map((asset) => ({ ...asset })), boards: library, total: assets.length })
+    }
     // A fresh payload per read, the way a real host re-serialises the snapshot:
     // `create`/`duplicate` answer a new array, and a shell that re-reads must be
     // able to render it. Handing back the same array reference would let a stale
@@ -271,6 +280,31 @@ function installFakeNetwork(options = {}) {
           item.y = action.y
           return respond({ ok: true, item, board: detail })
         }
+        // U08: the library's three mutations, answered the way the route does
+        // (§9.3: `copy-item` / `move-item` per item, `remove-item` for a drop).
+        // The fixture list is what a re-read sees, so "copy added one" and "move
+        // left the source" are observable without a second stub.
+        if (action.action === 'copy-item' || action.action === 'move-item') {
+          const source = assets.find((asset) => asset.id === action.item && asset.boardId === action.board)
+          if (source === undefined) return respond({ error: '这张图不在画板里' }, 404)
+          const target = library.find((board) => board.id === action.toBoard)
+          if (target === undefined) return respond({ error: '目标画板不存在' }, 404)
+          if (action.action === 'move-item') {
+            source.boardId = target.id
+            source.boardName = target.name
+          } else {
+            assets.push({ ...source, id: `${source.id}_copy`, boardId: target.id, boardName: target.name })
+          }
+          return respond({ ok: true, item: { ...source }, board: target })
+        }
+        if (action.action === 'remove-item') {
+          const index = assets.findIndex((asset) => asset.id === action.item && asset.boardId === action.board)
+          if (index < 0) return respond({ error: '这张图不在画板里' }, 404)
+          const [removed] = assets.splice(index, 1)
+          // The shared-reference guard keeps a file another project uses; the
+          // stub reports the unlink only when `deleteFile` actually asked.
+          return respond({ ok: true, removed, fileDeleted: action.deleteFile === true })
+        }
       }
       return respond({ ok: true })
     }
@@ -292,6 +326,10 @@ function installFakeNetwork(options = {}) {
       return calls
         .filter((call) => call.method === 'POST' && call.url.indexOf(BOARD_ROUTE) === 0 && typeof call.body === 'string')
         .map((call) => JSON.parse(call.body))
+    },
+    /** U08: every `/studio/assets` read, as a full URL (§14.9 acceptance ②). */
+    assetReads() {
+      return calls.filter((call) => call.method === 'GET' && call.url.indexOf(ASSETS_ROUTE) === 0).map((call) => call.url)
     },
     restore() {
       globalThis.fetch = previousFetch
@@ -785,16 +823,330 @@ test('an empty library shows the first-run card, with the backend hint above it'
   }
 })
 
-test('the assets entry opens the placeholder sub-view and comes back', async () => {
-  const { network, host, mounted } = await mountShell({ boards: [BOARD_ONE] })
+/* -------------------------------------------------------------------------- */
+/* U08 — the global asset library, inside the projects tab (§9.2, §9.3)       */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * What this section proves, and what it cannot.
+ *
+ * The library is a **view of the projects tab** (Q7), so the first thing every
+ * case asserts is that the strip did not grow: a tab of its own would be a
+ * visible regression against §9.2 even if the list looked right.
+ *
+ * Everything the pane does with a click runs end to end through the built
+ * bundle: the one read (with no `board` query — §14.9 ②), the local filter and
+ * order, the three mutations' request bodies, and the disabled state when there
+ * is no canvas to open onto. What it cannot see is the *canvas* the picture
+ * lands on — React Flow needs a measured container — and real drag-and-drop of
+ * a card onto the canvas, which stays on U08's manual checklist.
+ */
+
+/** Two pictures from two different projects: the library's reason to exist. */
+const ASSET_ONE = {
+  id: 'ia1',
+  boardId: 'b_one',
+  boardName: '橘猫计划',
+  path: 'C:/out/cat.png',
+  markdownPath: 'C:/out/cat.png',
+  width: 1024,
+  height: 768,
+  bytes: 2 * 1024 * 1024,
+  mediaType: 'image/png',
+  prompt: '一只橘猫坐在窗台上\n光影很好',
+  ratio: '1:1',
+  steps: 8,
+  seed: 3,
+  mode: 'generate',
+  backend: 'studio',
+  parents: [],
+  createdAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+}
+const ASSET_TWO = {
+  ...ASSET_ONE,
+  id: 'ia2',
+  boardId: 'b_two',
+  boardName: '海报草图',
+  path: 'C:/out/poster.png',
+  markdownPath: 'C:/out/poster.png',
+  bytes: 5 * 1024 * 1024,
+  prompt: '蓝色海报',
+  createdAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+}
+
+/** The asset cards, in render order. */
+function assetCards(root) {
+  return findAll(root, (element) => element.props['data-asset-id'] !== undefined)
+}
+
+/** Open the library from the projects toolbar and settle. */
+async function openLibrary(handle) {
+  const entry = buttonByText(handle.mounted.tree, '全局素材')
+  if (entry !== undefined) entry.props.onClick()
+  // The sub-view is shell state, so a tab that comes back to 项目管理 may already
+  // be showing the library — that is the point, not a missing entry.
+  else assert.ok(byClass(handle.mounted.tree, 'dsh-forge-workbench-assets') !== undefined, 'the library must be on screen')
+  await settle(handle.host, handle.mounted)
+}
+
+/** One asset action by its accessible name (the pane labels each card's verbs). */
+function assetAction(root, label) {
+  const button = byLabel(root, label)
+  assert.ok(button !== undefined, `the library must offer 「${label}」`)
+  return button
+}
+
+test('U08: 全局素材 is a view of the projects tab — the strip does not grow a tab', async () => {
+  const handle = await mountShell({ boards: [BOARD_ONE, BOARD_TWO], assets: [ASSET_ONE, ASSET_TWO] })
+  const { network, host, mounted } = handle
   try {
-    buttonByText(mounted.tree, '全局素材').props.onClick()
-    await settle(host, mounted)
-    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-assets')), /全局素材库/)
-    assert.equal(cardsOf(mounted.tree).length, 0, 'the grid is replaced by the sub-view, not stacked under it')
+    await openLibrary(handle)
+
+    // §9.2/Q7: a view, never a tab. The strip still holds only 项目管理.
+    assert.deepEqual(
+      tabsOf(mounted.tree).map((tab) => tab.props['data-tab-key']),
+      ['projects'],
+      'the library must not add a tab',
+    )
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'projects')
+
+    // The read is the cross-project one: no `board` parameter, and the cap asked
+    // for explicitly so a default page of 200 is never mistaken for everything.
+    const reads = network.assetReads()
+    assert.equal(reads.length, 1, 'one read, when the view is first shown')
+    assert.equal(reads[0].includes('board='), false, '§14.9 ②: the global library asks without a board')
+    assert.ok(reads[0].includes('limit=500'))
+
+    // The grid is the library: one card per picture, a title per prompt's first
+    // line, and the project, size and time on the meta line.
+    const cards = assetCards(mounted.tree)
+    assert.equal(cards.length, 2)
+    assert.match(textOf(cards[0]), /一只橘猫坐在窗台上/)
+    assert.match(textOf(cards[0]), /橘猫计划/)
+    assert.match(textOf(cards[0]), /2 MB/)
+    assert.match(textOf(cards[0]), /3 分钟前/)
+    assert.equal(cards[0].props['data-asset-board'], 'b_one')
+    assert.match(textOf(cards[1]), /蓝色海报/)
+
+    // The project grid is replaced, not stacked under the library.
+    assert.equal(cardsOf(mounted.tree).length, 0)
+
     buttonByText(mounted.tree, '返回项目').props.onClick()
     await settle(host, mounted)
-    assert.equal(cardsOf(mounted.tree).length, 1, 'and the grid is back')
+    assert.equal(cardsOf(mounted.tree).length, 2, 'and the grid is back')
+    assert.equal(assetCards(mounted.tree).length, 0)
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U08: the search box and the scope switch narrow the list without another read', async () => {
+  const handle = await mountShell({ boards: [BOARD_ONE, BOARD_TWO], assets: [ASSET_ONE, ASSET_TWO] })
+  const { network, host, mounted } = handle
+  try {
+    await openLibrary(handle)
+    assert.equal(assetCards(mounted.tree).length, 2)
+
+    const search = byLabel(mounted.tree, '搜索素材')
+    search.props.onChange({ target: { value: '海报' } })
+    await settle(host, mounted)
+    assert.equal(assetCards(mounted.tree).length, 1, 'a project name is a searchable field')
+    assert.equal(assetCards(mounted.tree)[0].props['data-asset-id'], 'ia2')
+
+    // A scope that excludes the match says so instead of showing the other one.
+    byLabel(mounted.tree, '素材范围').props.onChange({ target: { value: 'b_one' } })
+    await settle(host, mounted)
+    assert.equal(assetCards(mounted.tree).length, 0)
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-empty-note')), /没有匹配的素材/)
+
+    // Clear the text: the scope alone now decides, and it is one picture.
+    byLabel(mounted.tree, '搜索素材').props.onChange({ target: { value: '' } })
+    await settle(host, mounted)
+    assert.deepEqual(assetCards(mounted.tree).map((card) => card.props['data-asset-id']), ['ia1'])
+
+    // None of it went to the host: the library is filtered in memory (§9.4).
+    assert.equal(network.assetReads().length, 1, 'typing must not re-query the host')
+
+    // The order picker is local too, and it reorders what is on screen.
+    byLabel(mounted.tree, '素材范围').props.onChange({ target: { value: 'all' } })
+    await settle(host, mounted)
+    byLabel(mounted.tree, '素材排序').props.onChange({ target: { value: 'largest' } })
+    await settle(host, mounted)
+    assert.deepEqual(
+      assetCards(mounted.tree).map((card) => card.props['data-asset-id']),
+      ['ia2', 'ia1'],
+      '最大 puts the 5 MB poster first',
+    )
+    assert.equal(network.assetReads().length, 1)
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U08: 复制 / 移动… sends the picked destination and the verb that matches', async () => {
+  const handle = await mountShell({ boards: [BOARD_ONE, BOARD_TWO], assets: [ASSET_ONE, ASSET_TWO] })
+  const { network, host, mounted } = handle
+  try {
+    await openLibrary(handle)
+
+    // 复制到另一个项目: the destination comes from a picker that never offers
+    // the picture's own project (that is the canvas's own duplicate).
+    assetAction(mounted.tree, '复制 / 移动… 蓝色海报').props.onClick()
+    await settle(host, mounted)
+    const select = byLabel(mounted.tree, '目标项目')
+    assert.ok(select !== undefined, 'the panel offers a destination board')
+    assert.deepEqual(
+      select.children.filter((child) => child !== null).map((child) => child.props.value),
+      ['b_one'],
+      'the destination list excludes the project the picture already lives in',
+    )
+    assetAction(mounted.tree, '复制一份 蓝色海报').props.onClick()
+    await settle(host, mounted)
+    assert.deepEqual(
+      network.boardActions().filter((action) => action.action === 'copy-item'),
+      [{ action: 'copy-item', board: 'b_two', item: 'ia2', toBoard: 'b_one' }],
+      '§9.3: 复制 uses the route that never moves the file',
+    )
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-notice')), /复制到「橘猫计划」/)
+    // The library re-reads after the write: the copy is a second entry now.
+    assert.equal(network.assetReads().length, 2)
+    assert.equal(assetCards(mounted.tree).length, 3)
+
+    // 移动 says so, and uses the other verb.
+    assetAction(mounted.tree, '复制 / 移动… 蓝色海报').props.onClick()
+    await settle(host, mounted)
+    byLabel(mounted.tree, '目标项目').props.onChange({ target: { value: 'b_one' } })
+    await settle(host, mounted)
+    assetAction(mounted.tree, '移动到那里 蓝色海报').props.onClick()
+    await settle(host, mounted)
+    assert.deepEqual(
+      network.boardActions().filter((action) => action.action === 'move-item'),
+      [{ action: 'move-item', board: 'b_two', item: 'ia2', toBoard: 'b_one' }],
+    )
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-notice')), /移到「橘猫计划」/)
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U08: 删除文件 asks first, and only the confirmation unlinks anything', async () => {
+  const handle = await mountShell({ boards: [BOARD_ONE, BOARD_TWO], assets: [ASSET_ONE, ASSET_TWO] })
+  const { network, host, mounted } = handle
+  try {
+    await openLibrary(handle)
+
+    assetAction(mounted.tree, '删除文件 一只橘猫坐在窗台上').props.onClick()
+    await settle(host, mounted)
+    // Nothing has happened yet: the confirmation is the second click (§5.4's rule
+    // applied to one file — the highest-risk action in this pane).
+    assert.deepEqual(network.boardActions().filter((action) => action.action === 'remove-item'), [])
+    const confirm = byClass(mounted.tree, 'dsh-forge-workbench-asset-confirm')
+    assert.ok(confirm !== undefined, 'the first click only asks')
+    assert.match(textOf(confirm), /不可撤销/)
+    // The warning has to admit what the guard will do (§7.2's shared file).
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-confirm-warn')), /文件会保留/)
+
+    assetAction(mounted.tree, '确认删除文件 一只橘猫坐在窗台上').props.onClick()
+    await settle(host, mounted)
+    assert.deepEqual(
+      network.boardActions().filter((action) => action.action === 'remove-item'),
+      [{ action: 'remove-item', board: 'b_one', item: 'ia1', deleteFile: true }],
+      'the confirmed delete is the only call that carries deleteFile',
+    )
+    assert.equal(assetCards(mounted.tree).length, 1, 'and the library re-read without it')
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U08: 在画布中打开 is disabled until a canvas is open, then copies the picture there', async () => {
+  const handle = await mountShell({ boards: [BOARD_ONE, BOARD_TWO], assets: [ASSET_ONE, ASSET_TWO] })
+  const { network, host, mounted } = handle
+  try {
+    await openLibrary(handle)
+
+    // §9.2's degradation: no canvas tab anywhere, so the action is disabled and
+    // the hint says what to do instead of the button failing silently.
+    const blocked = assetAction(mounted.tree, '在画布中打开 蓝色海报')
+    assert.equal(blocked.props.disabled, true)
+    assert.equal(blocked.props.title, '先打开一个项目，才能把素材放进它的画布。')
+    const hint = byClass(mounted.tree, 'dsh-forge-workbench-asset-hint')
+    assert.match(textOf(hint), /先打开一个项目/)
+
+    // Open a project (a canvas tab), then come back to the library: the library
+    // view survives the tab switch — that is what lets the picture be placed.
+    buttonByText(mounted.tree, '返回项目').props.onClick()
+    await settle(host, mounted)
+    byClass(cardOf(mounted.tree, 'b_one'), 'dsh-forge-workbench-card-open').props.onClick()
+    await settle(host, mounted)
+    tabByKey(mounted.tree, 'canvas:b_one').props.onClick()
+    await settle(host, mounted)
+    tabByKey(mounted.tree, 'projects').props.onClick()
+    await settle(host, mounted)
+    await openLibrary(handle)
+
+    const enabled = assetAction(mounted.tree, '在画布中打开 蓝色海报')
+    assert.equal(enabled.props.disabled, false, 'a canvas is open now')
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-asset-hint')), /橘猫计划/)
+
+    enabled.props.onClick()
+    await settle(host, mounted)
+    assert.deepEqual(
+      network.boardActions().filter((action) => action.action === 'copy-item'),
+      [{ action: 'copy-item', board: 'b_two', item: 'ia2', toBoard: 'b_one' }],
+      'the picture lands on the canvas tab that was open',
+    )
+    // …and the shell switches to that canvas, which is what "in the canvas" means.
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'canvas:b_one')
+
+    // A picture already on the destination board is not copied a second time:
+    // it is already on that canvas, so the action is a tab switch.
+    tabByKey(mounted.tree, 'projects').props.onClick()
+    await settle(host, mounted)
+    await openLibrary(handle)
+    assetAction(mounted.tree, '在画布中打开 一只橘猫坐在窗台上').props.onClick()
+    await settle(host, mounted)
+    assert.equal(
+      network.boardActions().filter((action) => action.action === 'copy-item').length,
+      1,
+      'same-board 在画布中打开 must not duplicate the node',
+    )
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'canvas:b_one')
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U08: the canvas tab keeps its own project-scope 素材 view (the other half of §9.2)', async () => {
+  const handle = await mountShell({ boards: [BOARD_ONE], board: LAYOUT_BOARD, assets: [ASSET_ONE] })
+  const { network, host, mounted } = handle
+  try {
+    // The library's scope is *all projects*; the canvas tab's list is its own
+    // project's entries. U08 adds the first and deliberately leaves the second
+    // where it was (inside the studio's view switch), so a user never sees two
+    // different libraries of the same thing.
+    byClass(cardOf(mounted.tree, 'b_one'), 'dsh-forge-workbench-card-open').props.onClick()
+    await settle(host, mounted)
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'canvas:b_one')
+    const viewSwitch = findAll(mounted.tree, (element) => element.props.role === 'group' && element.props['aria-label'] === '结果视图')
+    assert.equal(viewSwitch.length, 1, 'the canvas tab still offers 画布 / 列表 / 素材')
+    assert.deepEqual(
+      viewSwitch[0].children.filter((child) => child !== null).map((child) => textOf(child)),
+      ['画布', '列表', '素材'],
+    )
+
+    // Coming back to the projects tab after a canvas: the library is still the
+    // view that is showing (shell state), not the grid.
+    tabByKey(mounted.tree, 'projects').props.onClick()
+    await settle(host, mounted)
+    await openLibrary(handle)
+    assert.equal(assetCards(mounted.tree).length, 1)
+    tabByKey(mounted.tree, 'canvas:b_one').props.onClick()
+    await settle(host, mounted)
+    tabByKey(mounted.tree, 'projects').props.onClick()
+    await settle(host, mounted)
+    assert.equal(assetCards(mounted.tree).length, 1, 'the sub-view survives a tab switch')
+    assert.equal(cardsOf(mounted.tree).length, 0)
   } finally {
     await stop(host, network)
   }

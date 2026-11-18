@@ -377,6 +377,28 @@ export const WORKBENCH_CSS = `
 .dsh-forge-workbench-empty-note{margin:0;padding:18px 10px;text-align:center;font-size:12px;opacity:.5;border:1px dashed rgba(127,127,127,.3);border-radius:8px}
 .dsh-forge-workbench-deleted{display:flex;flex-direction:column;align-items:center;gap:8px;padding:22px 12px}
 .dsh-forge-workbench-assets{display:flex;flex-direction:column;gap:8px;padding:6px 2px}
+/* U08: the global library. Same card grammar as the project grid (cover on top,
+   one meta line, one action row) so the two views read as siblings, not as two
+   products; the only new pieces are the thumbnail band and the two in-card
+   panels (destination picker, delete confirmation). */
+.dsh-forge-workbench-assets-count{font-size:10.5px;opacity:.6;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsh-forge-workbench-assets-back{margin-left:auto}
+.dsh-forge-workbench-asset-hint{margin:0;font-size:11px;line-height:1.5;opacity:.62;overflow-wrap:anywhere}
+.dsh-forge-workbench-asset-hint.is-blocked{color:#b45309}
+.dsh-forge-workbench-assets-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;min-width:0}
+.dsh-forge-workbench-asset{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:9px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.03);min-width:0}
+.dsh-forge-workbench-asset:hover{border-color:rgba(59,130,246,.45)}
+.dsh-forge-workbench-asset-head{display:flex;flex-direction:column;gap:5px;min-width:0}
+.dsh-forge-workbench-asset-cover{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;border-radius:6px;overflow:hidden;background:rgba(127,127,127,.1);min-width:0}
+.dsh-forge-workbench-asset-cover img{width:100%;height:100%;object-fit:cover;display:block}
+.dsh-forge-workbench-asset-title{font-size:12px;font-weight:600;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-width:0;overflow-wrap:anywhere}
+.dsh-forge-workbench-asset-meta{display:flex;align-items:baseline;gap:5px;font-size:10.5px;line-height:1.4;opacity:.62;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.dsh-forge-workbench-asset-board{overflow:hidden;text-overflow:ellipsis;min-width:0;max-width:12ch}
+.dsh-forge-workbench-asset-actions{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.dsh-forge-workbench-action[disabled]{opacity:.45;cursor:not-allowed}
+.dsh-forge-workbench-asset-transfer{display:flex;flex-direction:column;gap:5px;padding:6px;border-radius:6px;border:1px solid rgba(59,130,246,.4);background:rgba(59,130,246,.07)}
+.dsh-forge-workbench-asset-transfer-copy{margin:0;font-size:10.5px;line-height:1.5;opacity:.75;overflow-wrap:anywhere}
+.dsh-forge-workbench-asset-confirm{display:flex;flex-direction:column;gap:5px;padding:6px;border-radius:6px;border:1px solid rgba(220,38,38,.4);background:rgba(220,38,38,.07)}
 `
 
 /**

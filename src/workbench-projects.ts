@@ -49,8 +49,16 @@ export const PROJECTS_EMPTY_BODY = '项目 = 一块无限画布，你的图、�
 export const PROJECTS_EMPTY_ACTION = '新建项目'
 export const PROJECTS_NO_MATCH_COPY = '没有匹配的项目。'
 
-/** Copy of the assets sub-view, which U08 fills in (§9.2). */
-export const PROJECTS_ASSETS_COPY = '全局素材库会在这里列出所有项目产出的图（U08 落地）。'
+/**
+ * The toolbar entry to the global asset library (U08).
+ *
+ * The library itself is **not** this module's business any more: it is
+ * `AssetsPane` (`./workbench-assets.ts`), and the shell swaps it in as the
+ * projects tab's second view (§9.2 — a view, never a tab of its own). This pane
+ * only offers the entry, because the entry belongs to the toolbar the user is
+ * looking at when they think "where did that picture go".
+ */
+export const PROJECTS_ASSETS_ENTRY = '全局素材'
 
 /* -------------------------------------------------------------------------- */
 /* Pure helpers (asserted directly by the tests)                              */
@@ -184,6 +192,15 @@ export interface ProjectsPaneProps {
   readonly onDelete: (boardId: string, mode?: ProjectDeleteMode) => unknown
   /** Re-read the library and the environment (`重新检测`). */
   readonly onRefresh?: () => void
+  /**
+   * Show the global asset library (U08, §9.2).
+   *
+   * The pane does **not** render that view itself: the shell owns which of the
+   * projects tab's two views is on screen, so the switch survives a tab change
+   * and so this component keeps its "presentational, assertable alone" shape.
+   * Absent means the entry is not offered at all.
+   */
+  readonly onOpenAssets?: () => void
 }
 
 /** One card's cover: the newest image at 256 px, or a glyph when there is none. */
@@ -210,18 +227,17 @@ function Cover(props: { board: BoardSummary }): ReactNode {
  * The projects pane.
  *
  * @param props - the library plus the mutation callbacks the shell owns.
- * @returns the toolbar, the card grid (or the empty state), and the assets
- *   sub-view when it is open.
+ * @returns the toolbar (whose last entry is a request to switch views), the
+ *   environment hint, and the card grid — or the first-run / no-match state.
  */
 export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof createElement> {
-  const { boards, loading, environment, error, onCreate, onOpen, onRename, onDuplicate, onDelete, onRefresh } = props
+  const { boards, loading, environment, error, onCreate, onOpen, onRename, onDuplicate, onDelete, onRefresh, onOpenAssets } = props
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<ProjectSort>('recent')
   const [draftName, setDraftName] = useState('')
   const [renaming, setRenaming] = useState<string | undefined>(undefined)
   const [renameValue, setRenameValue] = useState('')
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
-  const [assetsOpen, setAssetsOpen] = useState(false)
 
   const visible = useMemo(() => sortProjects(filterProjects(boards, query), sort), [boards, query, sort])
   const now = Date.now()
@@ -279,18 +295,21 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
         createElement('option', { key: choice, value: choice }, PROJECT_SORT_LABELS[choice]),
       ),
     ),
-    createElement(
-      'button',
-      {
-        key: 'assets',
-        type: 'button',
-        className: 'dsh-forge-workbench-action dsh-forge-workbench-assets-entry',
-        'aria-pressed': assetsOpen,
-        title: '全局素材库',
-        onClick: () => setAssetsOpen((open) => !open),
-      },
-      assetsOpen ? '返回项目' : '全局素材',
-    ),
+    onOpenAssets === undefined
+      ? null
+      : createElement(
+          'button',
+          {
+            key: 'assets',
+            type: 'button',
+            className: 'dsh-forge-workbench-action dsh-forge-workbench-assets-entry',
+            title: '全局素材库：这个工作台所有项目产出的图',
+            onClick: () => {
+              onOpenAssets()
+            },
+          },
+          PROJECTS_ASSETS_ENTRY,
+        ),
   ])
 
   const environmentHint =
@@ -319,17 +338,6 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
               ),
         ])
       : null
-
-  if (assetsOpen) {
-    return createElement('div', { className: 'dsh-forge-workbench-projects' }, [
-      toolbar,
-      environmentHint,
-      createElement('div', { key: 'assets', className: 'dsh-forge-workbench-assets' }, [
-        createElement('h3', { key: 'title', className: 'dsh-forge-workbench-empty-title' }, '全局素材'),
-        createElement('p', { key: 'copy', className: 'dsh-forge-workbench-empty-body' }, PROJECTS_ASSETS_COPY),
-      ]),
-    ])
-  }
 
   let body: ReactNode
   if (boards.length === 0 && loading === true) {

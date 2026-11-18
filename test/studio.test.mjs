@@ -163,6 +163,35 @@
  * 8. 图片节点:抽屉「打开详情」→ 「图片 · <时间>」页签,大图 + 元信息 + 「按这张继续」;
  *    任务节点:「任务 · <prompt 首行>」页签,全参数 + 失败原因 + 「重试」。
  * 9. 窄面板(< 760 px)下详情页签的大图与信息栏**上下堆叠**,不出现横向滚动。
+ *
+ * ## U08 的人工验收清单(全局素材库)
+ *
+ * 机器能验的是:库在 projects 页签里(`/studio/assets` 请求**不带 board**)、条目数、
+ * 搜索/范围/排序的过滤结果、跨板动作的请求体、无画布时按钮 disabled,以及
+ * `remove-item` 的 `deleteFile` 口径。验不了的是拖拽手感、缩略图是否真的清晰、
+ * 以及"在画布中打开"之后**画布里那张图的样子**(React Flow 要量容器,这个渲染器没有 DOM)。
+ * 要看的:
+ *
+ * 1. 项目管理页签工具条右侧「全局素材」→ 页签条**不新增页签**,面板内换成素材库;
+ *    工具条变成 搜索 / 全部项目 / 排序 / 张数 / 刷新 / 返回项目。
+ * 2. 一个项目都没打开时:每张卡片的「在画布中打开」是**灰的**,上方一行提示
+ *    "先打开一个项目…";打开一个项目再回到素材库,同一个按钮变成可用,提示改成
+ *    "…放进「<项目名>」的画布"。
+ * 3. 搜索框输入提示词片段 / 文件名 / 项目名都能筛到图;清空即恢复;切"全部项目 ↔ 单个项目"
+ *    即时生效,**网络面板里不出现第二次 `/studio/assets`**。
+ * 4. 排序切 最新 / 最大 / 名称,顺序随之变化,且相同时按最新在前。
+ * 5. 点一张别的项目的图「在画布中打开」:自动切到那个画布页签,画布上**多出一个节点**
+ *    (落在网格位),网络面板里只有一次 `copy-item`;同一项目里的图点它 → **不复制**,
+ *    只切到页签并提示"已经在这个画布里"。
+ * 6. 「复制 / 移动…」→ 选目标项目 → 复制:目标项目卡片条目数 +1,文件仍是同一张
+ *    (磁盘上**没有**多一个 PNG);移动:源项目 −1、目标 +1,图片文件不变。
+ * 7. 「删除文件」→ 先出现确认(说明项目名、体积、"不可撤销"),**未点击前不删**;
+ *    确认后文件从磁盘消失、条目消失。另一项目也引用同一张图时,文件**保留**,
+ *    提示明确说"文件还在",另一个项目里的图仍能显示。
+ * 8. 切到别的页签再切回项目管理:素材库**还在**(子视图是外壳状态，不因页签切换退回项目网格）；
+ *    搜索词与范围会重置——与项目网格的搜索框行为一致(两个视图都随面板卸载复位)。
+ * 9. 画布页签内那条老「素材」视图仍在(三视图之一,默认本画板)——它列出的是**同一个项目**
+ *    的图;两处列表的关系是"全局 vs 当前项目",不是两份不同的数据。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -306,6 +335,28 @@ import {
   shortSubject,
   undoDraftHistory,
 } from '../src/node-detail-pane.ts'
+// U08: the asset library's filters, orders and cross-tab rule are pure and live
+// in their own module — imported from the source that ships, like the drawer's
+// and the detail tab's decisions above. `react` is its only dependency.
+import {
+  ASSET_SCOPE_ALL,
+  ASSETS_BOARD_EMPTY_COPY,
+  ASSETS_EMPTY_BODY,
+  ASSET_NEEDS_PROJECT_COPY,
+  ASSET_PAGE_LIMIT,
+  ASSET_SORT_LABELS,
+  ASSET_SORTS,
+  ASSET_THUMB_WIDTH,
+  assetDimensions,
+  assetFilter,
+  assetSizeLabel,
+  assetSort,
+  assetThumbUrl,
+  assetTimeLabel,
+  assetTitle,
+  assetsScopeHint,
+  canvasTargetBoard,
+} from '../src/workbench-assets.ts'
 
 /** The authoritative compiled-layout sample (T21's format authority). */
 const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
@@ -2931,6 +2982,167 @@ test('U07: the panel ships 复制/两口径, and the stylesheet carries their cl
   // The two U07 classes live in the workbench sheet, not the studio's.
   assert.ok(WORKBENCH_CSS.includes('.dsh-forge-workbench-confirm-warn'), 'the irreversibility line is styled')
   assert.ok(WORKBENCH_CSS.includes('.dsh-forge-workbench-card-size'), 'so is the size chip')
+})
+
+/* -------------------------------------------------------------------------- */
+/* U08 — the global asset library's pure half (§9.2, §9.3)                    */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * The library lives in the projects tab as a **view** (§9.2/Q7), so nothing here
+ * opens a tab. What is decidable without a browser is the part the pane spends
+ * its time on: filtering by scope and text, the three orders, the three labels
+ * that have to agree with the project cards, and the cross-tab rule that decides
+ * where 在画布中打开 lands. The rendering side is in the shell suite.
+ */
+
+/** One library asset; every field the pane reads, overridable per case. */
+function u08Asset(overrides = {}) {
+  const base = {
+    id: 'i1',
+    boardId: 'b_one',
+    boardName: '橘猫计划',
+    path: 'C:/out/cat.png',
+    markdownPath: 'C:/out/cat.png',
+    width: 1024,
+    height: 1024,
+    bytes: 2 * 1024 * 1024,
+    mediaType: 'image/png',
+    prompt: '一只橘猫坐在窗台上\n光影很好',
+    ratio: '1:1',
+    steps: 8,
+    seed: 7,
+    mode: 'generate',
+    backend: 'studio',
+    parents: [],
+    createdAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+  }
+  return { ...base, ...overrides }
+}
+
+/** 'projects' + two canvas tabs, the strip the library is read from. */
+const U08_TABS = [
+  { key: 'projects', kind: 'projects', orphaned: false },
+  { key: 'canvas:b_one', kind: 'canvas', boardId: 'b_one', orphaned: false },
+  { key: 'canvas:b_two', kind: 'canvas', boardId: 'b_two', orphaned: false },
+]
+
+test('U08: the library filters by scope and text locally, no board query involved', () => {
+  const assets = [
+    u08Asset({ id: 'i1', boardId: 'b_one', boardName: '橘猫计划', prompt: '一只橘猫' }),
+    u08Asset({ id: 'i2', boardId: 'b_two', boardName: '海报草图', prompt: '蓝色海报', path: 'C:/out/poster.png' }),
+    u08Asset({ id: 'i3', boardId: 'b_two', boardName: '海报草图', prompt: '', path: 'C:/out/DSC_0042.png' }),
+  ]
+
+  // 全部项目: everything, in the order it arrived (sorting is a separate step).
+  assert.deepEqual(
+    assetFilter(assets, { query: '', scope: ASSET_SCOPE_ALL }).map((asset) => asset.id),
+    ['i1', 'i2', 'i3'],
+  )
+  // 指定项目: the board's own pictures only.
+  assert.deepEqual(
+    assetFilter(assets, { query: '', scope: 'b_two' }).map((asset) => asset.id),
+    ['i2', 'i3'],
+  )
+  // The needle the route's `q=` matches: prompt, file name and project name.
+  assert.deepEqual(
+    assetFilter(assets, { query: '海报', scope: ASSET_SCOPE_ALL }).map((asset) => asset.id),
+    ['i2', 'i3'],
+    'a project name is a searchable field',
+  )
+  assert.deepEqual(
+    assetFilter(assets, { query: 'DSC_0042', scope: ASSET_SCOPE_ALL }).map((asset) => asset.id),
+    ['i3'],
+    'so is the file name — an imported picture has no prompt',
+  )
+  assert.deepEqual(
+    assetFilter(assets, { query: '橘猫', scope: 'b_two' }),
+    [],
+    'scope and text are both applied (searching one project cannot leak the other)',
+  )
+  // Whitespace is not a needle, and the filter never reorders or mutates.
+  assert.equal(assetFilter(assets, { query: '   ', scope: ASSET_SCOPE_ALL }).length, 3)
+  assert.equal(assets[0].id, 'i1')
+})
+
+test('U08: the three orders sort a copy, and a tie falls back to newest', () => {
+  const assets = [
+    u08Asset({ id: 'old', createdAt: '2026-11-01T00:00:00.000Z', bytes: 900, prompt: 'b 图' }),
+    u08Asset({ id: 'new', createdAt: '2026-11-18T00:00:00.000Z', bytes: 100, prompt: 'a 图' }),
+    u08Asset({ id: 'mid', createdAt: '2026-11-10T00:00:00.000Z', bytes: 900, prompt: 'c 图' }),
+  ]
+  assert.deepEqual(assetSort(assets, 'recent').map((asset) => asset.id), ['new', 'mid', 'old'])
+  assert.deepEqual(
+    assetSort(assets, 'largest').map((asset) => asset.id),
+    ['mid', 'old', 'new'],
+    'equal sizes keep the newest first',
+  )
+  assert.deepEqual(assetSort(assets, 'name').map((asset) => asset.id), ['new', 'old', 'mid'], 'A→Z by title')
+  assert.deepEqual(assets.map((asset) => asset.id), ['old', 'new', 'mid'], 'the input array is untouched')
+  // The picker and the label table never drift apart.
+  assert.deepEqual(ASSET_SORTS.map((sort) => ASSET_SORT_LABELS[sort]), ['最新', '最大', '名称'])
+})
+
+test('U08: a card reuses the project card’s size and time spellings, and names itself by prompt', () => {
+  // formatBytes is U07's: the same 86 MB on a project card is the same here.
+  assert.equal(assetSizeLabel({ bytes: 86 * 1024 * 1024 }), formatBytes(86 * 1024 * 1024))
+  assert.equal(assetSizeLabel({ bytes: 0 }), '0 B')
+  // relativeTime is U07's too, so `3 分钟前` cannot be spelled two ways.
+  const at = new Date(2026, 10, 18, 12, 0, 0).toISOString()
+  assert.equal(assetTimeLabel({ createdAt: at }, new Date(2026, 10, 18, 12, 3, 0).getTime()), '3 分钟前')
+  assert.equal(assetTimeLabel({ createdAt: 'not a date' }), '')
+
+  // The title rule: prompt's first line, else the file name, else the id.
+  assert.equal(assetTitle({ prompt: '  一只橘猫\n第二行', path: 'C:/out/a.png', id: 'i1' }), '一只橘猫')
+  assert.equal(assetTitle({ prompt: '   ', path: 'C:\\out\\imported.png', id: 'i1' }), 'imported.png')
+  assert.equal(assetTitle({ prompt: '', path: '', id: 'i9' }), 'i9')
+  // Geometry is omitted rather than printed as 0×0 on a task/layout entry.
+  assert.equal(assetDimensions({ width: 1024, height: 768 }), '1024×768')
+  assert.equal(assetDimensions({ width: 0, height: 0 }), '')
+})
+
+test('U08: thumbnails ask the file route for the 256-px contact-sheet cell', () => {
+  const url = assetThumbUrl({ markdownPath: 'C:/out/cat.png', path: 'C:/out/cat.png' })
+  assert.equal(ASSET_THUMB_WIDTH, 256)
+  assert.ok(url.includes(encodeURIComponent('C:/out/cat.png')), 'the path is encoded into ?path=')
+  assert.ok(url.endsWith('&w=256'), 'one whitelisted width, never a free number')
+  // An item the host stored without a markdown path still gets a URL.
+  assert.ok(assetThumbUrl({ markdownPath: '', path: 'C:/out/b.png' }).includes('b.png'))
+})
+
+test('U08: 在画布中打开 lands on the active canvas, then the last one — never on a closed tab', () => {
+  // 1. The active tab *is* a canvas: that board.
+  assert.equal(canvasTargetBoard(U08_TABS, 'canvas:b_two', 'b_one'), 'b_two')
+  // 2. The projects tab is in front (which is where the library lives): the
+  //    canvas the user looked at last, as long as it is still open.
+  assert.equal(canvasTargetBoard(U08_TABS, 'projects', 'b_one'), 'b_one')
+  // 3. That tab was closed → no destination, so the action is disabled.
+  const closed = U08_TABS.filter((tab) => tab.key !== 'canvas:b_one')
+  assert.equal(canvasTargetBoard(closed, 'projects', 'b_one'), undefined)
+  // Nothing remembered, and only the projects tab: still nothing.
+  assert.equal(canvasTargetBoard([U08_TABS[0]], 'projects'), undefined)
+
+  // The hint says the same thing the disabled button's title does.
+  assert.equal(assetsScopeHint(), ASSET_NEEDS_PROJECT_COPY)
+  assert.match(assetsScopeHint('橘猫计划'), /橘猫计划/)
+})
+
+test('U08: the library’s constants match the routes and the copy §9/§11 ask for', () => {
+  // One read asks for the route's own cap (`listAssets` clamps to 1..500).
+  assert.equal(ASSET_PAGE_LIMIT, 500)
+  assert.match(ASSETS_EMPTY_BODY, /所有项目产出的图/)
+  assert.match(ASSETS_BOARD_EMPTY_COPY, /这个项目还没有素材/)
+  // The scope sentinel cannot collide with a board id (`b<base36><4 hex>`).
+  assert.equal(/^b[0-9a-z]/.test(ASSET_SCOPE_ALL), false)
+  // The classes the pane renders are in the workbench sheet, not the studio's.
+  for (const className of [
+    '.dsh-forge-workbench-assets-grid',
+    '.dsh-forge-workbench-asset-hint',
+    '.dsh-forge-workbench-asset-transfer',
+    '.dsh-forge-workbench-asset-confirm',
+  ]) {
+    assert.ok(WORKBENCH_CSS.includes(className), `${className} must be styled`)
+  }
 })
 
 /** Mount a board holding exactly one layout node with `draft`. */
