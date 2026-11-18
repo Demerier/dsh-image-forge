@@ -96,6 +96,11 @@ import {
   recordItems as recordItemsLive,
   saveLayout as saveLayoutLive,
 } from '../src/boards.ts'
+// G27: the handle's size rule is split between the constants the state machine
+// owns and the `calc()` the stylesheet writes; reading both from source is what
+// lets the test pin one to the other instead of restating the numbers.
+import { HANDLE_SCREEN_HIT, HANDLE_SCREEN_SIZE } from '../src/canvas-connections.ts'
+import { STUDIO_CSS } from '../src/client-styles.ts'
 
 /** The authoritative compiled-layout sample (T21's format authority). */
 const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
@@ -2114,6 +2119,49 @@ test('G26: every node wears an output handle, and it never starts a node drag', 
   }
 })
 
+test('G27: the handle is sized in screen pixels, so it stays clickable at any zoom', async () => {
+  // The dot is painted inside the layer that scales the board. Sized in board
+  // units it came out at 1.1 px at the 10 % floor: present, painted, impossible
+  // to hit. The fix is one division, and it has two halves that both have to
+  // ship — the layer publishing its zoom, and the handle dividing by it.
+  assert.ok(CLIENT_SOURCE.includes('--dsh-forge-zoom'), 'the canvas layer must publish its zoom to the stylesheet')
+  assert.ok(CLIENT_SOURCE.includes('var(--dsh-forge-zoom'), 'and the handle must divide by it')
+  // The numbers are interpolated from the state machine's constants, so this
+  // pins the shipped CSS to the same 11 / 16 the unit tests assert: a later edit
+  // cannot move the paint without moving the constant, or the other way round.
+  const screenLength = (amount) => `calc(${String(amount)}px / var(--dsh-forge-zoom, 1))`
+  assert.ok(
+    STUDIO_CSS.includes(`.dsh-forge-handle{position:absolute;right:0;top:50%;width:${screenLength(HANDLE_SCREEN_HIT)}`),
+    'the click target keeps a screen size',
+  )
+  assert.ok(
+    STUDIO_CSS.includes(`width:${screenLength(HANDLE_SCREEN_SIZE)};height:${screenLength(HANDLE_SCREEN_SIZE)}`),
+    'and the painted dot keeps one too',
+  )
+})
+
+test('G27: the layer carries the zoom the handle divides by, at the floor and the ceiling', async () => {
+  // 10 % and 800 % are the camera's limits, so they are where a fixed-size dot
+  // failed and where a fixed-size dot would be grotesque. Both are one inline
+  // property — the same string `screenPx()` divides by.
+  for (const zoom of [0.1, 8]) {
+    const mounted = await mountWireWorkbench({ board: { ...HARNESS_BOARD, camera: { x: 0, y: 0, zoom } } })
+    try {
+      const layer = fakeElementWithClass(mounted.panel.tree, 'dsh-forge-canvas-layer')
+      assert.ok(layer !== undefined, 'the canvas paints its world layer')
+      assert.equal(layer.props.style['--dsh-forge-zoom'], String(zoom), `the layer says it is at ${String(zoom)}x`)
+      assert.ok(
+        layer.props.style.transform.endsWith(`scale(${String(zoom)})`),
+        'and the zoom it publishes is the one that scales the layer',
+      )
+      assert.equal(handleElements(mounted.panel).length, 3, 'every node still wears its dot')
+    } finally {
+      mounted.restoreFrames()
+      mounted.network.restore()
+    }
+  }
+})
+
 test('G26: a drag shows a preview wire in flight and drops it on release', async () => {
   const mounted = await mountWireWorkbench()
   const { network, panel } = mounted
@@ -2153,10 +2201,20 @@ test('G26: dropping on an existing node only draws the edge — it never generat
       nodeElements(panel)[1].props.className.includes('is-connect-target'),
       'the node that would receive the edge says so',
     )
+    // G27: the pointer has left the source, so `:hover` alone would hide the dot
+    // the wire is being pulled out of. The source node keeps it lit instead.
+    assert.ok(
+      nodeElements(panel)[0].props.className.includes('is-connect-source'),
+      'the wire keeps a visible origin until it is dropped',
+    )
 
     releasePointer(mounted)
     await settle(panel)
     assert.equal(edgeCount(panel), 1, 'the edge is committed and painted')
+    assert.ok(
+      !nodeElements(panel)[0].props.className.includes('is-connect-source'),
+      'and the origin goes quiet again once the wire is committed',
+    )
     assert.equal(connectMenu(panel), undefined, 'a node drop does not open the node-type menu')
     assert.deepEqual(
       network.calls.filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0),

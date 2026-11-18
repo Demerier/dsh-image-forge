@@ -17,14 +17,19 @@ import test from 'node:test'
 import {
   CONNECT_THRESHOLD,
   CONNECT_TARGETS,
+  HANDLE_SCREEN_HIT,
+  HANDLE_SCREEN_SIZE,
   beginConnection,
   connectMenuItems,
   connectionAnchor,
+  handleHitRadius,
+  handleWorldSize,
   linkParents,
   nodeUnderPoint,
   previewPath,
   reaches,
   resolveDrop,
+  screenToWorldLength,
   updateConnection,
 } from '../src/canvas-connections.ts'
 
@@ -248,3 +253,63 @@ test('every transition returns a fresh state and leaves the old one intact', () 
   assert.notEqual(blank, dragging)
   assert.equal(dragging.targetId, 'ibbb2')
 })
+
+// ---------------------------------------------------------------------------
+// G27: the handle is a *screen* size, not a board size.
+//
+// The dot is painted inside the layer the camera scales. Sizing it in board
+// units made it 1.1 px at the 10 % floor — the affordance existed and could not
+// be hit. The rule that fixes it is one division, and this is the half of it
+// that has no DOM: the stylesheet performs the same division with `calc()` and
+// interpolates the same two constants, so what is asserted here is what ships.
+// ---------------------------------------------------------------------------
+
+test('the dot keeps one screen size, so its board size grows as the zoom shrinks', () => {
+  // The three zooms that matter: the 10 % floor, the 1:1 default, and the 800 %
+  // ceiling. The screen size never moves; the board size moves tenfold and then
+  // the other way, which is exactly what the layer then scales back.
+  assert.equal(handleWorldSize(0.1), 110)
+  assert.equal(handleWorldSize(1), 11)
+  assert.equal(handleWorldSize(8), 1.375)
+  for (const zoom of [0.1, 1, 8]) {
+    assert.ok(
+      Math.abs(handleWorldSize(zoom) * zoom - HANDLE_SCREEN_SIZE) < 1e-9,
+      `a ${String(HANDLE_SCREEN_SIZE)}-px dot must paint as ${String(HANDLE_SCREEN_SIZE)} px at ${String(zoom)}x`,
+    )
+  }
+  // Three zooms, three different board sizes: a conversion that ignored the zoom
+  // would pass the loop above only by being wrong three times identically.
+  assert.equal(new Set([handleWorldSize(0.1), handleWorldSize(1), handleWorldSize(8)]).size, 3)
+})
+
+test('the click radius is converted the same way, and is wider than the dot', () => {
+  // 8 screen px of tolerance is 80 board units at the floor and 1 at the ceiling.
+  // A tolerance written in board units would be wrong at every zoom but one.
+  assert.equal(handleHitRadius(0.1), 80)
+  assert.equal(handleHitRadius(1), 8)
+  assert.equal(handleHitRadius(8), 1)
+  assert.equal(handleHitRadius(1) * 2, HANDLE_SCREEN_HIT)
+  assert.ok(handleHitRadius(1) > HANDLE_SCREEN_SIZE / 2, 'the target is bigger than the dot')
+})
+
+test('both painted lengths sit in the 10–12 px band the design asks for', () => {
+  // The dot is what the user aims at, so it has to be readable; the target is
+  // what the browser hit-tests, so it is allowed to be invisible and generous.
+  assert.ok(HANDLE_SCREEN_SIZE >= 10 && HANDLE_SCREEN_SIZE <= 12, 'the dot reads as a dot, not as a speck')
+  assert.ok(HANDLE_SCREEN_HIT >= HANDLE_SCREEN_SIZE, 'the target is never smaller than the paint')
+  assert.ok(HANDLE_SCREEN_HIT <= 16, 'and never so large that it swallows the node it sits on')
+})
+
+test('a missing or impossible zoom falls back to the camera floor, not to Infinity', () => {
+  // The CSS variable falls back to 1 and the camera clamps to [10 %, 800 %]; a
+  // caller that hands this function 0 / NaN / an out-of-range zoom must still get
+  // a finite length, because an infinite target would swallow the whole canvas.
+  const floor = screenToWorldLength(HANDLE_SCREEN_SIZE, 0.1)
+  assert.equal(screenToWorldLength(HANDLE_SCREEN_SIZE, 0), floor)
+  assert.equal(screenToWorldLength(HANDLE_SCREEN_SIZE, Number.NaN), floor)
+  assert.equal(screenToWorldLength(HANDLE_SCREEN_SIZE, 0.01), floor, 'below the floor is the floor')
+  assert.equal(screenToWorldLength(HANDLE_SCREEN_SIZE, -2), floor)
+  assert.equal(handleWorldSize(99), 11 / 8, 'above the ceiling is the ceiling')
+  assert.ok(Number.isFinite(handleHitRadius(0)))
+})
+

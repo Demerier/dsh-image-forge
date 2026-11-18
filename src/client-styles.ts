@@ -15,8 +15,29 @@
  * so the page stays readable at 320 px and at full width.
  */
 
+import { HANDLE_SCREEN_HIT, HANDLE_SCREEN_SIZE } from './canvas-connections.ts'
+
 /** DOM id of the injected sheet; also the idempotence guard. */
 export const CLIENT_STYLE_ID = 'dsh-image-forge-client-styles'
+
+/**
+ * A screen-pixel length as a board length inside the zoomed canvas layer.
+ *
+ * The layer transforms itself with `scale(zoom)` and publishes that zoom as
+ * `--dsh-forge-zoom`, so dividing by the variable turns a length the user
+ * measures on their monitor into a length that survives the transform. Written
+ * as `calc()` rather than computed in JS because every node wears a handle: the
+ * division belongs to the stylesheet, and the sizes belong to
+ * `canvas-connections.ts` (one source, asserted by the tests).
+ *
+ * `var(…, 1)` is the fallback for a handle rendered outside the layer — the
+ * first paint, or the fake renderer the panel tests mount — where the variable
+ * does not exist yet; without it the whole `calc()` would be invalid and the dot
+ * would inherit its default size.
+ */
+function screenPx(amount: number): string {
+  return `calc(${String(amount)}px / var(--dsh-forge-zoom, 1))`
+}
 
 /**
  * Workbench rules, kept in their own constant and appended to the sheet below.
@@ -101,10 +122,20 @@ export const STUDIO_CSS = `
 /* G26: the output handle. Invisible until it is wanted — a dot on every node
    would compete with the picture, and the affordance belongs to hover and to the
    selection. Pointer events follow the opacity, so an invisible dot cannot be
-   grabbed by accident. */
-.dsh-forge-handle{position:absolute;right:2px;top:50%;width:11px;height:11px;margin-top:-5.5px;border-radius:50%;border:1.5px solid #fff;background:#3b82f6;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:crosshair;opacity:0;pointer-events:none;transition:opacity .12s ease;touch-action:none}
-.dsh-forge-node:hover .dsh-forge-handle,.dsh-forge-node.is-selected .dsh-forge-handle,.dsh-forge-handle:focus-visible{opacity:1;pointer-events:auto}
-.dsh-forge-handle:hover{transform:scale(1.18)}
+   grabbed by accident.
+   G27: and it must stay *reachable*. This whole layer is scale(zoom)'d, so a
+   dot measured in board units was 1.1 px at the 10 % floor: present, painted,
+   impossible to hit. Every length below is therefore a screen length divided by
+   the layer's zoom (see the screenPx() helper above), which keeps the target
+   ${HANDLE_SCREEN_HIT} px and the painted dot ${HANDLE_SCREEN_SIZE} px at every zoom. The element
+   is the target — deliberately larger than the dot — and the dot itself is the
+   ::after, anchored to the node's right edge so growing the target can never push
+   the paint outside the frame's clip. During a drag the source node keeps its dot
+   visible (.is-connect-source) so the wire still has a visible origin. */
+.dsh-forge-handle{position:absolute;right:0;top:50%;width:${screenPx(HANDLE_SCREEN_HIT)};height:${screenPx(HANDLE_SCREEN_HIT)};margin-top:${screenPx(-HANDLE_SCREEN_HIT / 2)};cursor:crosshair;opacity:0;pointer-events:none;transition:opacity .12s ease;touch-action:none}
+.dsh-forge-node:hover .dsh-forge-handle,.dsh-forge-node.is-selected .dsh-forge-handle,.dsh-forge-node.is-connect-source .dsh-forge-handle,.dsh-forge-handle:focus-visible{opacity:1;pointer-events:auto}
+.dsh-forge-handle::after{content:"";position:absolute;right:0;top:50%;width:${screenPx(HANDLE_SCREEN_SIZE)};height:${screenPx(HANDLE_SCREEN_SIZE)};margin-top:${screenPx(-HANDLE_SCREEN_SIZE / 2)};box-sizing:border-box;border-radius:50%;border:${screenPx(1.5)} solid #fff;background:#3b82f6;box-shadow:0 ${screenPx(1)} ${screenPx(4)} rgba(0,0,0,.35);transform-origin:100% 50%}
+.dsh-forge-handle:hover::after{transform:scale(1.18)}
 /* G26: where the wire would land. Same green the run states use for "will do
    the right thing", not a warning colour. */
 .dsh-forge-node.is-connect-target{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.35)}

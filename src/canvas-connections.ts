@@ -41,9 +41,15 @@
  * `screenToWorld` (the camera owns that maths) and passes rectangles from
  * `nodeRect`. This module never sees a `clientX`.
  *
+ * A note on the handle's size: it lives inside the zoomed layer, so its lengths
+ * are screen lengths divided by the zoom ({@link HANDLE_SCREEN_SIZE},
+ * {@link handleWorldSize}). A gesture whose affordance shrinks to a screen
+ * pixel at the 10 % floor is not a gesture anyone can perform.
+ *
  * @module canvas-connections
  */
 
+import { CANVAS_MIN_ZOOM, clampZoom } from './studio-canvas.ts'
 import type { Point, Rect } from './studio-canvas.ts'
 
 /* -------------------------------------------------------------------------- */
@@ -95,6 +101,74 @@ export type DropResult =
 /** The output handle's world position: the right edge's midpoint. */
 export function connectionAnchor(rect: Rect): Point {
   return { x: rect.x + rect.width, y: rect.y + rect.height / 2 }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The handle on screen                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The connection dot's diameter, in **screen** pixels, at every zoom.
+ *
+ * The handle is painted inside the layer that `scale(zoom)`s the whole board, so
+ * a board-sized dot measured ~1 px at the 10 % floor: the affordance existed and
+ * could not be hit. The fix is a division rather than a bigger dot — the layer
+ * publishes its zoom as `--dsh-forge-zoom` and every handle length is
+ * `calc(<screen>px / var(--dsh-forge-zoom))` (see `.dsh-forge-handle` in
+ * `client-styles.ts`), so the board-space box grows as the zoom shrinks and the
+ * painted size never changes.
+ *
+ * This constant, and {@link HANDLE_SCREEN_HIT}, are the one place those sizes
+ * are chosen; the stylesheet interpolates them, so the painted dot and the rule
+ * asserted here cannot drift apart.
+ */
+export const HANDLE_SCREEN_SIZE = 11
+
+/**
+ * The handle's **click target**, in screen pixels.
+ *
+ * Wider than the dot on purpose: 11 px is a readable dot and a fussy target, and
+ * a wire gets pulled in a hurry. The element is the transparent target and
+ * paints the dot through its own `::after`, so the extra ring is hit area only —
+ * the dot keeps looking like an 11-px dot at every zoom.
+ */
+export const HANDLE_SCREEN_HIT = 16
+
+/**
+ * A screen length in board units at `zoom` — the arithmetic the stylesheet's
+ * `calc()` performs, usable where there is no DOM (tests, and any caller that
+ * has to reason about the handle geometrically).
+ *
+ * The camera clamps the zoom to {@link CANVAS_MIN_ZOOM} and up before it reaches
+ * the board, and the CSS variable falls back to 1 when it is missing. A zero or
+ * NaN arriving here anyway must not produce `Infinity` — an infinitely large
+ * target would swallow the canvas — so it settles on the same floor the camera
+ * uses.
+ */
+export function screenToWorldLength(screenPixels: number, zoom: number): number {
+  const safe = Number.isFinite(zoom) && zoom > 0 ? clampZoom(zoom) : CANVAS_MIN_ZOOM
+  return screenPixels / safe
+}
+
+/**
+ * The dot's diameter in board units at `zoom`: always {@link HANDLE_SCREEN_SIZE}
+ * px once the layer scales it back down.
+ */
+export function handleWorldSize(zoom: number): number {
+  return screenToWorldLength(HANDLE_SCREEN_SIZE, zoom)
+}
+
+/**
+ * The radius, in board units, within which a pointer counts as on the handle at
+ * `zoom` — always {@link HANDLE_SCREEN_HIT} / 2 px on screen.
+ *
+ * This is the number that makes a low zoom work: 8 screen px is 80 board units at
+ * 10 % and 1 board unit at 800 %, so a tolerance written in board units would be
+ * wrong at every zoom but one. It also explains why the dot is not enlarged past
+ * its screen size: the target is generous, the paint is not.
+ */
+export function handleHitRadius(zoom: number): number {
+  return screenToWorldLength(HANDLE_SCREEN_HIT, zoom) / 2
 }
 
 /**

@@ -2726,10 +2726,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     setTransfer(undefined)
     setWireMenu(undefined)
     event.currentTarget.setPointerCapture(event.pointerId)
-    // The canvas box, not the handle's: the handle is a 10-px dot on a scaled
-    // layer, so its own rectangle says nothing about where the pointer is in the
-    // viewport. Before the canvas has been measured (first frame, and the test
-    // harness, which has no DOM) the handle's box is the only one there is.
+    // The canvas box, not the handle's: every coordinate in this gesture is
+    // relative to the canvas (the camera is), and the handle is a dot hanging off
+    // one node rather than the board itself. Before the canvas has been measured
+    // (first frame, and the test harness, which has no DOM) the handle's box is
+    // the only one there is.
     const box = canvasRef.current?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect()
     const screen = { x: event.clientX - box.left, y: event.clientY - box.top }
     const state = beginConnection({
@@ -2748,6 +2749,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
    * the node holds, so an image, a task and a layout node all pull a wire the
    * same way. `data-connect="out"` is the stable hook the panel tests address —
    * a class name can change, a data contract should not.
+   *
+   * G27: the element carries no size of its own. `.dsh-forge-handle` divides the
+   * layer's `--dsh-forge-zoom`, so the dot is 11 screen px and the target 16 at
+   * 10 % as well as at 800 % — a 10-px dot inside the zoomed layer was 1 px at
+   * the floor, i.e. a gesture nobody could perform.
    */
   const connectHandle = useCallback((node: CanvasNode) => createElement('div', {
     className: 'dsh-forge-handle',
@@ -4886,7 +4892,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               'div',
               {
                 className: 'dsh-forge-canvas-layer',
-                style: { transform: `translate(${String(-camera.x * camera.zoom)}px, ${String(-camera.y * camera.zoom)}px) scale(${String(camera.zoom)})` },
+                // G27: the layer is `scale(zoom)`d, so anything inside it that
+                // must read as a *screen* size has to divide by this zoom —
+                // `.dsh-forge-handle` does (see `screenPx` in `client-styles`).
+                // Published as a custom property because the alternative is one
+                // inline size per node, recomputed on every camera change.
+                style: {
+                  transform: `translate(${String(-camera.x * camera.zoom)}px, ${String(-camera.y * camera.zoom)}px) scale(${String(camera.zoom)})`,
+                  '--dsh-forge-zoom': String(camera.zoom),
+                },
               },
               createElement(
                 'svg',
@@ -4935,6 +4949,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                     // G26: the node the wire would land on, so the drop is not a
                     // surprise — the wire snaps to this node's input handle too.
                     wire !== undefined && wire.targetId === node.id ? 'is-connect-target' : '',
+                    // G27: the node the wire came from keeps its dot lit while the
+                    // gesture is in flight. The pointer has left the node by then,
+                    // so `:hover` alone would hide the origin of the wire.
+                    wire !== undefined && wire.sourceId === node.id ? 'is-connect-source' : '',
                   ].filter((part) => part.length > 0).join(' '),
                   // What `onCanvasContextMenu` reads back to find the node it
                   // can only identify through `closest`.
