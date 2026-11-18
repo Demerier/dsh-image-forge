@@ -227,13 +227,23 @@ test('a second drop of the same wire is a no-op the view can detect', () => {
   assert.equal(linkParents(empty, ''), empty)
 })
 
-test('the drop menu offers the three node kinds, with 放入素材 still greyed out', () => {
+test('the drop menu offers the three node kinds, and all three are live', () => {
   const items = connectMenuItems()
   assert.deepEqual(items.map((item) => item.id), [...CONNECT_TARGETS])
   assert.deepEqual(items.map((item) => item.label), ['图片生成', '布局', '放入素材'])
-  assert.deepEqual(items.filter((item) => item.disabled !== true).map((item) => item.id), ['image', 'layout'])
-  // The disabled one says why, instead of vanishing between releases.
-  assert.ok(items[2].hint.includes('尚未接线'))
+  // G28: the third entry is wired now, so nothing in this menu is grey.
+  assert.deepEqual(items.filter((item) => item.disabled !== true).map((item) => item.id), ['image', 'layout', 'asset'])
+  assert.deepEqual(items.filter((item) => item.disabled === true), [])
+})
+
+test('the 放入素材 entry says what it will do, and that nothing is moved or generated', () => {
+  const asset = connectMenuItems()[2]
+  // The two promises the gesture makes: the file stays where it was, and no GPU
+  // run follows. The wording is what the button's tooltip shows, so it is the
+  // only place a user can read them before clicking.
+  assert.ok(asset.hint.includes('放进画布'))
+  assert.ok(asset.hint.includes('原地不动'), 'the picture is referenced, not moved')
+  assert.ok(!asset.hint.includes('尚未接线'), 'and the old "not wired yet" note is gone')
 })
 
 test('an idle gesture is inert: no preview, no drop, no state change', () => {

@@ -70,6 +70,7 @@ import {
   stripWrappingQuotes,
 } from '../testlib/studio-prompt.js'
 import {
+  STUDIO_ASSETS_ROUTE,
   STUDIO_BOARD_ROUTE,
   STUDIO_CLIENT_ID_MAX_CHARS,
   STUDIO_CONFIG_ROUTE,
@@ -1260,6 +1261,11 @@ function installFakeNetwork(options) {
   // C11: generation is stubbed per test — the panel's POST is the conversion
   // authority, so a test owns when (and whether) the response arrives.
   const generate = options === undefined ? undefined : options.generate
+  // G28: the library the asset page *and* the wire menu's picker read, plus a
+  // copy/move echo. The picker turns one of these into a canvas node, and the
+  // node is built from the item the route returns, so the stub has to answer.
+  const assetItems = options === undefined || options.assets === undefined ? [] : options.assets
+  let copiedItems = 0
   const baseConfig = board === undefined
     ? HARNESS_CONFIG
     : {
@@ -1303,6 +1309,20 @@ function installFakeNetwork(options) {
       if (generate === undefined) return fakeResponse({ error: 'no generate stub' }, 500)
       return generate(init === undefined ? {} : init)
     }
+    if (url.indexOf(STUDIO_ASSETS_ROUTE) === 0) {
+      // The route's own filter, honoured: `board=` narrows to one board and `q=`
+      // is a substring match over prompt, file name and board name (§7.3), so a
+      // test can assert both scopes of the picker without a second stub.
+      const query = new URLSearchParams(url.slice(url.indexOf('?') + 1))
+      const board = query.get('board')
+      const text = (query.get('q') ?? '').trim()
+      const matching = assetItems.filter((entry) => {
+        if (board !== null && board !== '' && entry.boardId !== board) return false
+        if (text.length === 0) return true
+        return [entry.prompt, entry.path, entry.boardName].some((field) => String(field).includes(text))
+      })
+      return fakeResponse({ assets: matching, boards: [], total: matching.length }, 200)
+    }
     if (url.indexOf(STUDIO_BOARD_ROUTE) === 0) {
       // A board mutation is accepted: the wiring section asserts the canvas, not
       // the store. C14's two node writers answer even without a fixture board —
@@ -1315,6 +1335,48 @@ function installFakeNetwork(options) {
           action = JSON.parse(init.body)
         } catch {
           action = undefined
+        }
+        if (action !== undefined && (action.action === 'copy-item' || action.action === 'move-item')) {
+          // G28: the picker's write, echoed the way the route does it — a new id,
+          // the same file and metadata, the landing spot it was given.
+          const original = assetItems.find((entry) => entry.id === action.item)
+          copiedItems += 1
+          const id = 'icopy' + String(copiedItems)
+          const now = '2026-11-18T00:00:00.000Z'
+          return fakeResponse({
+            ok: true,
+            item: {
+              id,
+              kind: 'image',
+              path: original === undefined ? '' : original.path,
+              markdownPath: original === undefined ? '' : original.markdownPath,
+              width: original === undefined ? 1024 : original.width,
+              height: original === undefined ? 1024 : original.height,
+              bytes: original === undefined ? 1024 : original.bytes,
+              mediaType: 'image/png',
+              prompt: original === undefined ? '' : original.prompt,
+              ratio: '1:1',
+              steps: 8,
+              seed: 1,
+              mode: 'generate',
+              backend: 'studio',
+              parents: [],
+              createdAt: now,
+              sessionId: null,
+              batchId: 'bcopy',
+              x: typeof action.x === 'number' ? action.x : 0,
+              y: typeof action.y === 'number' ? action.y : 0,
+            },
+            board: {
+              id: board === undefined ? 'cbrdauto' : board.id,
+              name: board === undefined ? '自动画板' : board.name,
+              itemCount: board === undefined ? 1 : board.items.length + 1,
+              cover: null,
+              createdAt: now,
+              updatedAt: now,
+              sessionId: null,
+            },
+          }, 200)
         }
         if (action !== undefined && (action.action === 'save-task' || action.action === 'save-layout-node')) {
           const kind = action.action === 'save-task' ? 'task' : 'layout'
@@ -2032,9 +2094,37 @@ function connectMenu(panel) {
   if (found === undefined) return undefined
   const items = []
   fakeVisit(found, (entry) => {
-    if (entry.type === 'button') items.push(entry)
+    // G28 put the asset picker *inside* this card, and its rows are buttons too —
+    // so the node-type entries are addressed by their own data contract.
+    if (entry.type === 'button' && entry.props['data-connect-target'] !== undefined) items.push(entry)
   })
   return { card: found, items }
+}
+
+/**
+ * The asset picker the third entry grows, or `undefined` when it is closed.
+ *
+ * Rows are addressed by `data-pick-board` / `data-pick-item` rather than by their
+ * rendered text: the caption is a prompt, and asserting on a prompt would make
+ * the fixture the subject instead of the wiring.
+ */
+function connectPicker(panel) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.props['data-connect-picker'] === 'open') found = entry
+  })
+  if (found === undefined) return undefined
+  const rows = []
+  fakeVisit(found, (entry) => {
+    if (entry.props['data-pick-item'] !== undefined) rows.push(entry)
+  })
+  const inputs = []
+  const toggles = []
+  fakeVisit(found, (entry) => {
+    if (entry.type === 'input') inputs.push(entry)
+    if (entry.type === 'button' && entry.props['data-pick-item'] === undefined) toggles.push(entry)
+  })
+  return { card: found, rows, inputs, toggles, text: fakeText(found) }
 }
 
 /**
@@ -2243,7 +2333,12 @@ test('G26: dropping on blank canvas asks what to build there, and builds nothing
       menu.items.map((entry) => fakeText(entry)),
       ['图片生成', '布局', '放入素材'],
     )
-    assert.equal(menu.items[2].props.disabled, true, '放入素材 is still a placeholder, and says so')
+    assert.deepEqual(
+      menu.items.filter((entry) => entry.props.disabled === true),
+      [],
+      'every entry has a handler now — 放入素材 included (G28)',
+    )
+    assert.equal(connectPicker(panel), undefined, 'and the asset picker waits to be asked for')
     assert.equal(nodeElements(panel).length, 3, 'opening the menu creates nothing on its own')
     assert.deepEqual(
       network.calls.filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0),
@@ -2461,6 +2556,235 @@ test('G26: a draft is undoable too, and undo leaves the form untouched', async (
 })
 
 // ---------------------------------------------------------------------------
+// G28: 放入素材 — the third choice puts a library picture where the wire was
+// released, parented to the source, without moving the file or generating.
+//
+// The library lives in another view, so the entry grows a picker inside the same
+// card. These tests drive that through the real bundle: open the picker, filter
+// it with the asset page's own scope + keyword, pick a row, and assert the node
+// it becomes — plus the three ways to back out with nothing built.
+// ---------------------------------------------------------------------------
+
+/** One picture on *another* board, so the picker has a cross-board case. */
+const LIBRARY_ASSET = {
+  id: 'ishiba9',
+  boardId: 'cbrdother',
+  boardName: '收藏板',
+  path: 'C:/out/shiba.png',
+  markdownPath: 'C:/out/shiba.png',
+  width: 1024,
+  height: 768,
+  bytes: 4096,
+  mediaType: 'image/png',
+  prompt: '一只柴犬在海边奔跑',
+  ratio: '4:3',
+  steps: 8,
+  seed: 3,
+  mode: 'generate',
+  backend: 'studio',
+  parents: [],
+  createdAt: '2026-11-17T00:00:00.000Z',
+  sessionId: null,
+  batchId: 'blib',
+  x: null,
+  y: null,
+}
+
+/**
+ * Let an asset read land: flush the effect that schedules it, wait out its 220 ms
+ * debounce, then flush the answer.
+ *
+ * The order matters — the effect body only runs inside `settle`, so waiting first
+ * would just sit in front of a timer nobody had started yet.
+ */
+async function settleAssets(panel) {
+  await settle(panel)
+  await new Promise((resolve) => setTimeout(resolve, 260))
+  await settle(panel)
+}
+
+/** Drop a wire on blank canvas and click 放入素材; returns the open picker. */
+async function openAssetPicker(mounted, point = { x: 400, y: 300 }) {
+  const { panel } = mounted
+  pressHandle(panel, 0, { x: 200, y: 120 })
+  movePointer(mounted, point)
+  await settle(panel)
+  releasePointer(mounted)
+  await settle(panel)
+  const menu = connectMenu(panel)
+  assert.ok(menu !== undefined, 'a blank drop opens the node-type menu')
+  const choice = menu.items.find((entry) => fakeText(entry) === '放入素材')
+  assert.ok(choice !== undefined, 'the menu must offer 放入素材')
+  assert.notEqual(choice.props.disabled, true, 'and it must not be greyed out any more')
+  choice.props.onClick()
+  await settle(panel)
+  return connectPicker(panel)
+}
+
+/** The picture a node paints, if it paints one — its `src`, or `undefined`. */
+function nodeImageSrc(node) {
+  let src
+  fakeVisit(node, (entry) => {
+    if (src === undefined && entry.type === 'img') src = entry.props.src
+  })
+  return src
+}
+
+/** Click the picker's 全部画板 scope, so a cross-board asset is in range. */
+async function showAllBoards(panel) {
+  const picker = connectPicker(panel)
+  assert.ok(picker !== undefined, 'the picker must be open')
+  const toggle = picker.toggles.find((entry) => fakeText(entry) === '全部画板')
+  assert.ok(toggle !== undefined, 'the picker offers the same two scopes as the asset page')
+  toggle.props.onClick()
+  await settle(panel)
+  await settleAssets(panel)
+  return connectPicker(panel)
+}
+
+test('G28: 放入素材 grows a picker in the same card, and builds nothing by itself', async () => {
+  const mounted = await mountWireWorkbench({ assets: [LIBRARY_ASSET] })
+  const { network, panel } = mounted
+  try {
+    const picker = await openAssetPicker(mounted)
+    assert.ok(picker !== undefined, 'clicking the third entry opens the asset picker')
+    assert.equal(nodeElements(panel).length, 3, 'opening it creates nothing')
+    assert.equal(connectMenu(panel) !== undefined, true, 'the card stays open, so the entry is its own off switch')
+    assert.deepEqual(boardMutations(network).filter((body) => body.action === 'copy-item'), [], 'and it writes nothing')
+
+    // Default scope is 本画板, and this asset lives on another board — the same
+    // filter the asset page uses, so the picker says so instead of lying.
+    await settleAssets(panel)
+    assert.deepEqual(connectPicker(panel).rows, [], 'nothing from this board is listed yet')
+    assert.ok(connectPicker(panel).text.includes('全部画板'), 'and the way out is on screen')
+
+    const all = await showAllBoards(panel)
+    assert.deepEqual(
+      all.rows.map((row) => [row.props['data-pick-board'], row.props['data-pick-item']]),
+      [['cbrdother', 'ishiba9']],
+      'the library is listed, addressed by board and item id',
+    )
+    // The card is the asset page's own language: a 256-px thumbnail and a name.
+    const thumb = fakeElementWithClass(all.rows[0], 'dsh-forge-picker-thumb')
+    assert.ok(thumb !== undefined, 'every row carries a thumbnail')
+    assert.ok(thumb.props.src.includes('shiba.png'), 'and it points at the asset file')
+    assert.ok(thumb.props.src.includes('w=256'), 'at the cheapest size the route caches (G20)')
+    assert.ok(fakeText(all.rows[0]).includes('一只柴犬在海边奔跑'), 'the prompt is the name, as on the asset card')
+
+    // The keyword filter is the same one the asset page uses.
+    connectPicker(panel).inputs[0].props.onChange({ target: { value: '不存在的关键词' } })
+    await settleAssets(panel)
+    assert.deepEqual(connectPicker(panel).rows, [])
+    assert.ok(connectPicker(panel).text.includes('没有匹配的素材'))
+    connectPicker(panel).inputs[0].props.onChange({ target: { value: '柴犬' } })
+    await settleAssets(panel)
+    assert.equal(connectPicker(panel).rows.length, 1, 'and it finds the one that matches')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G28: the picked asset lands at the release point, parented to the source', async () => {
+  const mounted = await mountWireWorkbench({ assets: [LIBRARY_ASSET] })
+  const { network, panel } = mounted
+  try {
+    await openAssetPicker(mounted, { x: 480, y: 320 })
+    const all = await showAllBoards(panel)
+    all.rows[0].props.onClick()
+    await settle(panel)
+
+    // The node: where the wire was let go, and it names the file it references.
+    const nodes = nodeElements(panel)
+    assert.equal(nodes.length, 4, 'the asset is a real node on the canvas')
+    assert.equal(nodes[3].props['data-node-id'], 'icopy1', 'the id is the copy the route minted')
+    assert.equal(nodes[3].props.style.left, '480px', 'it lands where the wire was released')
+    assert.equal(nodes[3].props.style.top, '320px')
+    // A picture node points at the file rather than holding a copy of its bytes:
+    // the node that landed names the asset's own PNG.
+    assert.equal(nodes[3].props['data-node-kind'], 'image', 'it is a picture, not a placeholder')
+    assert.ok(String(nodeImageSrc(nodes[3])).includes('shiba.png'), 'and it references the asset file')
+    assert.equal(connectPicker(panel), undefined, 'picking closes the picker')
+    assert.equal(connectMenu(panel), undefined, 'and the card with it')
+
+    // The write: a copy, at the drop spot, so the file stays on its own board.
+    assert.deepEqual(
+      boardMutations(network).filter((body) => body.action === 'copy-item'),
+      [{ action: 'copy-item', board: 'cbrdother', item: 'ishiba9', toBoard: 'cbrdharness', x: 480, y: 320 }],
+      'the picture is copied onto this board at the release point — never moved',
+    )
+
+    // The lineage: the flush carries the source as this node's parent, which is
+    // what makes the edge survive a reload (`saveLayout` merges the list).
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    await settle(panel)
+    const flushes = boardMutations(network).filter((body) => body.action === 'layout')
+    const placed = flushes.flatMap((body) => body.items ?? []).find((item) => item.id === 'icopy1')
+    assert.deepEqual(placed, { id: 'icopy1', x: 480, y: 320, parents: ['iaaa1'] }, 'the edge is stored with the node')
+    assert.equal(edgeCount(panel), 1, 'and the canvas draws it from the source')
+
+    assert.ok(noteText(panel).includes('已放入素材'), 'the panel says what it just did')
+    assert.deepEqual(
+      network.calls.filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0),
+      [],
+      'placing an asset never generates',
+    )
+
+    // §6.5: it is one undo step, and undo takes the node back off the canvas.
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 3, 'Ctrl+Z removes the placed node')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G28: Esc, a click outside and a second click on 放入素材 all cancel', async () => {
+  const mounted = await mountWireWorkbench({ assets: [LIBRARY_ASSET] })
+  const { network, panel } = mounted
+  try {
+    // 1. Esc closes the picker and the card, and builds nothing.
+    await openAssetPicker(mounted)
+    canvasElement(panel).props.onKeyDown(keyEvent('Escape'))
+    await settle(panel)
+    assert.equal(connectPicker(panel), undefined, 'Esc closes the picker')
+    assert.equal(connectMenu(panel), undefined, 'and the menu it grew from')
+    assert.equal(nodeElements(panel).length, 3)
+
+    // 2. A click on the canvas dismisses both (§6.4's rule, shared by every card).
+    await openAssetPicker(mounted)
+    canvasElement(panel).props.onPointerDown(pointerEvent({ clientX: 20, clientY: 20 }))
+    await settle(panel)
+    assert.equal(connectPicker(panel), undefined, 'a click outside closes the picker')
+    assert.equal(nodeElements(panel).length, 3)
+
+    // 3. Clicking the entry again is the picker's own off switch: the card stays
+    // open (the user may still want 布局) and nothing is built.
+    await openAssetPicker(mounted)
+    const again = connectMenu(panel).items.find((entry) => fakeText(entry) === '放入素材')
+    again.props.onClick()
+    await settle(panel)
+    assert.equal(connectPicker(panel), undefined, 'the second click closes the picker')
+    assert.ok(connectMenu(panel) !== undefined, 'and leaves the node-type menu usable')
+    assert.equal(nodeElements(panel).length, 3, 'nothing was built on any cancel path')
+    assert.deepEqual(
+      boardMutations(network).filter((body) => body.action === 'copy-item'),
+      [],
+      'and no copy was ever requested',
+    )
+    assert.deepEqual(
+      network.calls.filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0),
+      [],
+      'a cancelled pick never generates either',
+    )
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // G26: the edge reaches the store.
 //
 // The gesture is only worth anything if the edge survives a reload, and that is
@@ -2662,7 +2986,13 @@ test('a paste with no pointer history still lands at the view centre', async () 
     // the ladder: (0,0). The point is that the paste still writes — the pointer
     // rule must not become a crash or a silent no-op.
     assert.equal(copies.length, 3, 'every copied node is written')
-    assert.deepEqual(copies.map((body) => [body.x, body.y]), [[0, 0], [0, 0], [0, 0]])
+    // Each copy is offset by 40 from the last so the pile is readable, so the
+    // assertion is on the *origin* the offsets are added to: (0,0) here, i.e. the
+    // bottom rung of the ladder rather than a viewport centre that was never read.
+    assert.deepEqual(
+      copies.map((body, index) => [body.x - index * 40, body.y - index * 40]),
+      [[0, 0], [0, 0], [0, 0]],
+    )
   } finally {
     restoreFrames()
     network.restore()

@@ -198,6 +198,18 @@ export const STUDIO_CSS = `
 .dsh-forge-context-head{padding:5px 9px 4px;font-size:10.5px;font-weight:600;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-forge-context-empty{padding:6px 9px;font-size:11px;opacity:.6;white-space:normal;line-height:1.5}
 .dsh-forge-context-item.is-cancel{margin-top:2px;border-top:1px solid rgba(127,127,127,.22);border-radius:0 0 5px 5px;opacity:.72}
+/* G28: the asset picker the wire menu grows, inside the same card. A filter bar,
+   then the asset page's own card language (thumbnail, name, board) in a
+   scrolling grid — a 200-item library must not push the card off-screen. */
+.dsh-forge-picker{display:flex;flex-direction:column;gap:6px;padding:5px 2px 2px;border-top:1px solid rgba(127,127,127,.22)}
+.dsh-forge-picker-bar{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:0 4px}
+.dsh-forge-picker-bar .dsh-forge-assets-search{flex:1 1 100%;font-size:11.5px;padding:4px 7px}
+.dsh-forge-picker-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:6px;max-height:186px;overflow:auto;padding:2px 4px}
+.dsh-forge-picker-item{appearance:none;display:flex;flex-direction:column;gap:3px;padding:5px;border-radius:7px;border:1px solid rgba(127,127,127,.2);background:rgba(127,127,127,.03);color:inherit;font:inherit;text-align:left;cursor:pointer;min-width:0}
+.dsh-forge-picker-item:hover{border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.1)}
+.dsh-forge-picker-thumb{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:5px;background:rgba(127,127,127,.08)}
+.dsh-forge-picker-name{font-size:11px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-forge-picker-meta{font-size:10px;line-height:1.35;opacity:.55;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* G22: the in-canvas lightbox. Screen-space (outside the zoomed layer, like the
    menu), a dimmed backdrop, and a card whose picture is capped by the viewport
    height — a 2048-px result must fit on screen without scrolling. */

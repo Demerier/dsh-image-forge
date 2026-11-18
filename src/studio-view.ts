@@ -315,6 +315,20 @@ function describeNode(node: CanvasNode): string {
 }
 
 /**
+ * One library asset named in one line.
+ *
+ * The asset page's cards show the prompt under the thumbnail because that is
+ * what a generated picture is *about*; an imported file has no prompt, so the
+ * file name is the only name it has. The wire menu's picker (G28) reuses the
+ * same rule, which is why it is a function rather than two inline expressions.
+ */
+function describeAsset(asset: StudioAsset): string {
+  const first = asset.prompt.split(/\r?\n/)[0]?.trim() ?? ''
+  if (first.length > 0) return first
+  return asset.path.split(/[\\/]/).pop() ?? '素材'
+}
+
+/**
  * A pointer gesture in progress; `undefined` when idle.
  *
  * Three kinds now, not two (`docs/CANVAS-DESIGN.md` §6.6). Panning keeps the
@@ -1287,6 +1301,16 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     /** The node the wire came from, which becomes the new node's parent. */
     readonly sourceId: string
   } | undefined>(undefined)
+  // G28: the asset picker the wire menu's third entry grows. It lives *inside*
+  // that card, so all it has to carry is what the picked node inherits: the
+  // release point in world units and the node the wire came from. `undefined`
+  // means the picker is closed, and opening it builds nothing by itself.
+  const [assetPick, setAssetPick] = useState<{
+    /** Release point in world units: the picked node's top-left corner. */
+    readonly world: Point
+    /** The node the wire came from, which becomes the picked node's parent. */
+    readonly sourceId: string
+  } | undefined>(undefined)
   // Space is a *held* state, so it lives in a ref the pointer handler can read at
   // pointer-down and in state only for the cursor affordance (§6.3, §6.6).
   const panRef = useRef(false)
@@ -1716,7 +1740,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   }, [assetScope, assetQuery])
 
   useEffect(() => {
-    if (view !== 'assets') return undefined
+    // G28: the asset page and the wire menu's picker are the same list, so both
+    // keep it loaded with the same scope and filter — one reader, two surfaces.
+    if (view !== 'assets' && assetPick === undefined) return undefined
     const controller = new AbortController()
     // Typing in the filter should not fire one request per keystroke.
     const timer = setTimeout(() => { void loadAssets(controller.signal) }, 220)
@@ -1724,7 +1750,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       controller.abort()
       clearTimeout(timer)
     }
-  }, [view, boardId, assetScope, assetQuery, loadAssets])
+  }, [view, assetPick, boardId, assetScope, assetQuery, loadAssets])
 
   /** Cancel whatever is in flight; safe to call when nothing is. */
   const cancel = useCallback(() => {
@@ -2725,6 +2751,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     setMenu(undefined)
     setTransfer(undefined)
     setWireMenu(undefined)
+    setAssetPick(undefined)
     event.currentTarget.setPointerCapture(event.pointerId)
     // The canvas box, not the handle's: every coordinate in this gesture is
     // relative to the canvas (the camera is), and the handle is a dot hanging off
@@ -2776,11 +2803,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (event.button !== 0 && event.button !== 1) return
     const target = event.target as HTMLElement
     // Any click outside the menu dismisses it (§6.4), and the same goes for the
-    // board picker a copy/move entry opens (G25) and for the node-type menu a
-    // wire drop opens (G26).
+    // board picker a copy/move entry opens (G25), the node-type menu a wire drop
+    // opens (G26) and the asset picker that menu grows (G28).
     setMenu(undefined)
     setTransfer(undefined)
     setWireMenu(undefined)
+    setAssetPick(undefined)
     // G12: remember where the pointer is, in viewport pixels, so a later paste
     // lands under it. Recorded before the node check because a click on a node
     // is just as good a "the user is looking here" signal as a click on blank.
@@ -3061,8 +3089,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     revealNodeId(pending)
   }, [boardId, revealNodeId, view])
 
-  /** Put one item returned by the host onto the canvas at its stored spot. */
-  const appendBoardItem = useCallback((item: BoardItem, board?: BoardSummary) => {
+  /**
+   * Put one item returned by the host onto the canvas at its stored spot.
+   *
+   * `parents` overrides the entry's own lineage: a copy carries the *source*
+   * item's parents verbatim (§7.2), and the wire-drop gesture wants the node the
+   * wire came from instead. Every other caller passes nothing and gets the
+   * stored list.
+   */
+  const appendBoardItem = useCallback((item: BoardItem, board?: BoardSummary, parents?: readonly string[]) => {
     const fallback = nextNodeSpot(nodesRef.current.map(nodeRect))
     const node: ImageCanvasNode = {
       kind: 'image',
@@ -3079,7 +3114,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       batchId: item.batchId,
       x: item.x ?? fallback.x,
       y: item.y ?? fallback.y,
-      parents: item.parents,
+      parents: parents === undefined ? item.parents : [...parents],
     }
     writeNodes([...nodesRef.current, node])
     if (board !== undefined) setBoards((current) => upsertBoard(current, board))
@@ -3090,6 +3125,61 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     scheduleLayout()
     return node
   }, [scheduleLayout, writeNodes])
+
+  /**
+   * Put one library asset on the canvas where the wire was released (G28).
+   *
+   * Two decisions are worth stating. **Why `copy-item`** even for an asset from
+   * this very board: that route is the one verb that is defined as "the file is
+   * not moved" (§7.2) — a same-board copy lands as a second node on the same
+   * PNG, a cross-board one lands as this board's own entry — so the picked
+   * picture keeps living where the user found it, and nothing here depends on
+   * which board it came from.
+   *
+   * **Where the lineage is written**: the copy arrives carrying the *source*
+   * item's parents, so the node is built with `[sourceId]` instead, and the
+   * debounced layout flush carries that onto the stored entry (`saveLayout`
+   * merges `parents` as a union — the entry itself already exists, so this is a
+   * position+edge write, never a new file).
+   *
+   * The undo step is canvas-local, like every snapshot on this stack: it takes
+   * the node back off the canvas, and the board entry a copy created is removed
+   * with the node's own 移除 entry — the same asymmetry a cross-board paste has.
+   */
+  const placeAsset = useCallback(async (asset: StudioAsset) => {
+    const pick = assetPick
+    setAssetPick(undefined)
+    if (pick === undefined) return
+    const board = boardIdRef.current
+    if (board === undefined) {
+      setBoardError('先打开一个画板，再把素材放进画布')
+      return
+    }
+    const { error, payload } = await postBoardRaw({
+      action: 'copy-item',
+      board: asset.boardId,
+      item: asset.id,
+      toBoard: board,
+      x: pick.world.x,
+      y: pick.world.y,
+    })
+    if (error !== undefined) {
+      setBoardError(error)
+      return
+    }
+    const item = payload?.item as BoardItem | undefined
+    if (item === undefined) {
+      setBoardError('素材没能放进画布：画板没有返回条目')
+      return
+    }
+    const before = nodesRef.current
+    const node = appendBoardItem(item, payload?.board as BoardSummary | undefined, [pick.sourceId])
+    const after = nodesRef.current
+    pushCommand(snapshotCommand('place-asset', before, after, (list) => { writeNodes([...list]) }))
+    setSelection(new Set([node.id]))
+    setWireMenu(undefined)
+    setNote('已放入素材「' + describeAsset(asset) + '」，血缘指向来源节点；不会触发生成。')
+  }, [appendBoardItem, assetPick, pushCommand, writeNodes])
 
   /** Begin dragging one asset card (§7.1: a private MIME, not plain text). */
   const startAssetDrag = useCallback((event: ReactDragEvent<HTMLDivElement>, asset: StudioAsset) => {
@@ -3658,14 +3748,24 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   /**
    * Run one choice of the node-type menu (G26 §1).
    *
-   * All three build at the drop point with the source node as parent — that is
-   * what makes this menu different from the blank-canvas right-click menu, which
-   * has no origin to grow from.
+   * The first two build at the drop point with the source node as parent — that
+   * is what makes this menu different from the blank-canvas right-click menu,
+   * which has no origin to grow from. The third (G28) needs one more decision
+   * *which* asset — so it grows the picker inside the same card and leaves the
+   * menu open: that keeps it clickable as its own off switch, and lets the user
+   * change their mind to 布局 without re-dragging the wire.
    */
   const runConnectTarget = useCallback((target: ConnectTarget) => {
     const open = wireMenu
-    setWireMenu(undefined)
     if (open === undefined) return
+    if (target === 'asset') {
+      // Toggle: a second click closes the picker and builds nothing.
+      setAssetPick((current) => (current === undefined
+        ? { world: open.world, sourceId: open.sourceId }
+        : undefined))
+      return
+    }
+    setWireMenu(undefined)
     const source = nodesRef.current.find((node) => node.id === open.sourceId)
     if (target === 'image') {
       // Pre-fill the form with the source as a reference: the wire says "make
@@ -3685,9 +3785,6 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setNote('已在这里建布局节点，血缘指向来源节点；在里面拖画框、写 summary.caption 再点「生成」。')
       return
     }
-    // 'asset' is rendered disabled; reaching here means the menu changed without
-    // a handler, so say so instead of silently doing nothing.
-    setNote('「放入素材」还没有接线：先在素材页选图，再用 Ctrl+V 放到画布。')
   }, [addDraftNode, addLayoutNode, referenceNode, wireMenu])
 
   /**
@@ -3819,6 +3916,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         // saved, which is exactly the cancel the state machine would report.
         setWire(undefined)
         setWireMenu(undefined)
+        // G28: and it closes the picker that menu grew, without placing anything.
+        setAssetPick(undefined)
         setMenu(undefined)
         setTransfer(undefined)
         setMarquee(undefined)
@@ -5256,6 +5355,83 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   },
                   item.label,
                 )),
+                // G28: the asset picker, grown inside the same card. The pointer
+                // already said *where*, so the list does not need a card of its
+                // own — and keeping it here means the third entry is still there
+                // to click again, which is its own cancel.
+                assetPick === undefined
+                  ? null
+                  : createElement(
+                    'div',
+                    { className: 'dsh-forge-picker', 'data-connect-picker': 'open' },
+                    createElement(
+                      'div',
+                      { className: 'dsh-forge-picker-bar' },
+                      createElement('input', {
+                        className: 'dsh-forge-assets-search',
+                        value: assetQuery,
+                        placeholder: '搜提示词、文件名或画板名',
+                        onChange: (event: ChangeEvent<HTMLInputElement>) => { setAssetQuery(event.target.value) },
+                      }),
+                      ...([
+                        ['board', '本画板'],
+                        ['all', '全部画板'],
+                      ] as const).map(([value, label]) => createElement(
+                        'button',
+                        {
+                          key: value,
+                          type: 'button',
+                          className: assetScope === value ? 'dsh-forge-view-item is-active' : 'dsh-forge-view-item',
+                          'aria-pressed': assetScope === value,
+                          onClick: () => { setAssetScope(value) },
+                        },
+                        label,
+                      )),
+                    ),
+                    assets.length === 0
+                      ? createElement(
+                        'div',
+                        { className: 'dsh-forge-context-empty' },
+                        assetsBusy
+                          ? '读取中…'
+                          : assetQuery.trim().length > 0
+                            ? '没有匹配的素材'
+                            : assetScope === 'board'
+                              ? '这个画板还没有素材：换到「全部画板」，或先生成一张。'
+                              : '还没有素材：对话或工作台出的图都会记进画板。',
+                      )
+                      : createElement(
+                        'div',
+                        { className: 'dsh-forge-picker-grid' },
+                        ...assets.map((asset) => createElement(
+                          'button',
+                          {
+                            key: `${asset.boardId}:${asset.id}`,
+                            type: 'button',
+                            className: 'dsh-forge-picker-item',
+                            'data-pick-board': asset.boardId,
+                            'data-pick-item': asset.id,
+                            title: asset.path,
+                            onClick: () => { void placeAsset(asset) },
+                          },
+                          // G20's rule: the densest surface asks for the smallest
+                          // thumbnail the route caches.
+                          createElement('img', {
+                            className: 'dsh-forge-picker-thumb',
+                            src: studioFileUrl(asset.markdownPath, 256),
+                            alt: '素材',
+                            loading: 'lazy',
+                            decoding: 'async',
+                          }),
+                          createElement('span', { className: 'dsh-forge-picker-name', title: asset.path }, describeAsset(asset)),
+                          createElement(
+                            'span',
+                            { className: 'dsh-forge-picker-meta' },
+                            `${asset.boardName} · ${String(asset.width)}×${String(asset.height)}`,
+                          ),
+                        )),
+                      ),
+                  ),
               ),
             // G25: the board picker a copy/move entry opens. Same panel family
             // as the context menu (one card, one click), not a modal on top of a

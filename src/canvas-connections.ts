@@ -415,15 +415,17 @@ export interface ConnectTargetItem {
 /**
  * The menu a blank drop opens, as data.
  *
- * "放入素材" is present and `disabled` rather than omitted: the library lives in
- * another panel and picking from it mid-gesture would need a second surface, so
- * the honest state is "this is where it goes, it is not wired yet" — the same
- * stance `contextMenuItems` takes for its unfinished entries.
+ * All three are live. "放入素材" needs a second surface — the library lives in
+ * another view — and the cheapest honest one is the card itself: choosing it
+ * grows an asset list right there (the pointer has already said *where*, so the
+ * list does not need a place of its own), and the picked asset becomes a node at
+ * that release point with the source as its parent. It is a **copy**, never a
+ * move: the picture the user picked keeps living where it was.
  */
 export function connectMenuItems(): ConnectTargetItem[] {
   return [
     { id: 'image', label: '图片生成', hint: '在这里放一个待生成的节点，左侧表单的参考图自动填成来源节点' },
     { id: 'layout', label: '布局', hint: '建一个 MOSS 布局节点，血缘指向来源节点' },
-    { id: 'asset', label: '放入素材', disabled: true, hint: '尚未接线：先在素材页选图，再 Ctrl+C / Ctrl+V 放到画布' },
+    { id: 'asset', label: '放入素材', hint: '从素材库挑一张放进画布，血缘指向来源节点；文件原地不动，不生成' },
   ]
 }
