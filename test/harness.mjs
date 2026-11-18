@@ -301,6 +301,166 @@ export async function settle(panel) {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * A context object good enough for a *module body* to create one.
+ *
+ * React Flow creates several at module scope (`createContext(null)` for its
+ * store, node-id and viewport contexts). Nothing here is ever read, because the
+ * renderer below never descends into the library's components — but the calls
+ * happen the moment the factory is evaluated, so the facade has to answer them.
+ * `Provider` renders its children so a hand-written component that uses one
+ * still produces a tree instead of throwing.
+ */
+function fakeCreateContext(defaultValue) {
+  const context = { _defaultValue: defaultValue, _currentValue: defaultValue }
+  context.Provider = (props) => props.children
+  context.Consumer = (props) => props.children(context._currentValue)
+  return context
+}
+
+/**
+ * One element from the automatic JSX transform.
+ *
+ * `children` is pulled out of `props` (React does the same) and flattened with
+ * the same `collectChildren` the `createElement` facade uses, so a tree built by
+ * a JSX-compiled library module is indistinguishable from one the plugin's own
+ * `createElement` calls produced.
+ */
+function jsxElement(type, props) {
+  const source = props === null || props === undefined ? {} : props
+  const { children, ...rest } = source
+  const flat = []
+  collectChildren(children, flat)
+  return { type, props: rest, children: flat }
+}
+
+/**
+ * Build the React surface the client bundle is evaluated against.
+ *
+ * The bundle is one factory that `require`s React; whatever it destructures at
+ * module scope has to exist here, even when the renderer below can never call
+ * it. Two families matter:
+ *
+ * - The hooks. Everything the plugin's own components use is real (it is the
+ *   pair of functions the fake host implements); everything else is the
+ *   smallest thing that keeps evaluation going.
+ * - The portal/`createRoot` surface. `@xyflow/react` imports `react-dom` for
+ *   `createPortal`; the packaging contract keeps that a bare request, so the
+ *   loader owes it an implementation. Two React DOM instances in one page is
+ *   the failure that contract exists to prevent, and the fake loader is exactly
+ *   the same rule at test time.
+ *
+ * @param active - the object whose `host` owns the hook store.
+ * @returns the frozen module table the factory's `require` answers with.
+ */
+function createModuleTable(active) {
+  const react = {
+    createElement(type, props, ...children) {
+      const flat = []
+      for (const child of children) collectChildren(child, flat)
+      return { type, props: props === null || props === undefined ? {} : props, children: flat }
+    },
+    useState(initial) {
+      return active.host.runtime.useState(initial)
+    },
+    useRef(initial) {
+      return active.host.runtime.useRef(initial)
+    },
+    useMemo(factory, deps) {
+      return active.host.runtime.useMemo(factory, deps)
+    },
+    useCallback(callback, deps) {
+      return active.host.runtime.useCallback(callback, deps)
+    },
+    useEffect(effect, deps) {
+      return active.host.runtime.useEffect(effect, deps)
+    },
+    // A layout effect during a *server-less* render has no layout to wait for;
+    // queuing it like a normal effect is the closest honest behaviour.
+    useLayoutEffect(effect, deps) {
+      return active.host.runtime.useEffect(effect, deps)
+    },
+    useInsertionEffect(effect, deps) {
+      return active.host.runtime.useEffect(effect, deps)
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot()
+    },
+    useContext(context) {
+      return context === null || context === undefined ? undefined : context._currentValue
+    },
+    createContext: fakeCreateContext,
+    useId() {
+      return 'fake-id'
+    },
+    memo(component) {
+      return component
+    },
+    forwardRef(component) {
+      return (props) => component(props, null)
+    },
+    useMemoizedFn(fn) {
+      return fn
+    },
+    Children: {
+      map: (children, fn) => (Array.isArray(children) ? children.map(fn) : [fn(children, 0)]),
+      toArray: (children) => (Array.isArray(children) ? children : [children]),
+      count: (children) => (Array.isArray(children) ? children.length : 1),
+      forEach: (children, fn) => {
+        for (const child of Array.isArray(children) ? children : [children]) fn(child)
+      },
+      only: (children) => children,
+    },
+    Fragment: Symbol.for('react.fragment'),
+    version: '19.0.0-fake',
+  }
+  const reactDom = {
+    // A portal into a host that has no document is the children themselves.
+    createPortal(children) {
+      return children
+    },
+    flushSync(callback) {
+      if (typeof callback === 'function') callback()
+    },
+    findDOMNode() {
+      return null
+    },
+    version: '19.0.0-fake',
+  }
+  const reactDomClient = {
+    createRoot() {
+      return { render() {}, unmount() {} }
+    },
+    hydrateRoot() {
+      return { render() {}, unmount() {} }
+    },
+  }
+  // React Flow is built with the automatic JSX transform, so the bundle asks for
+  // `react/jsx-runtime` (it is on the client build's `neverBundle` list, which
+  // keeps it a bare request). The two functions differ only in whether the
+  // children arrive as one value or a variadic list; both produce the same host
+  // element shape `createElement` above does, so every tree assertion works on
+  // either.
+  const jsxRuntime = {
+    Fragment: Symbol.for('react.fragment'),
+    jsx: (type, props) => {
+      return jsxElement(type, props)
+    },
+    jsxs: (type, props) => {
+      return jsxElement(type, props)
+    },
+    jsxDEV: (type, props) => {
+      return jsxElement(type, props)
+    },
+  }
+  return new Map([
+    ['react', react],
+    ['react/jsx-runtime', jsxRuntime],
+    ['react-dom', reactDom],
+    ['react-dom/client', reactDomClient],
+  ])
+}
+
+/**
  * Evaluate `lib/client.js` the way `window.__ModuleLoader__` does.
  *
  * The bundle is evaluated, not imported: `require("react")` is what the web
@@ -325,30 +485,10 @@ export function loadClientBundle(source, extras = {}) {
   assert.equal(loaded.length, 1, 'the client bundle must register exactly one factory')
   assert.equal(loaded[0].id, 'dsh-image-forge')
   const active = { host: createHost() }
-  const react = {
-    createElement(type, props, ...children) {
-      const flat = []
-      for (const child of children) collectChildren(child, flat)
-      return { type, props: props === null || props === undefined ? {} : props, children: flat }
-    },
-    useState(initial) {
-      return active.host.runtime.useState(initial)
-    },
-    useRef(initial) {
-      return active.host.runtime.useRef(initial)
-    },
-    useMemo(factory, deps) {
-      return active.host.runtime.useMemo(factory, deps)
-    },
-    useCallback(callback, deps) {
-      return active.host.runtime.useCallback(callback, deps)
-    },
-    useEffect(effect, deps) {
-      return active.host.runtime.useEffect(effect, deps)
-    },
-  }
+  const modules = createModuleTable(active)
   const exports = loaded[0].factory((name) => {
-    if (name === 'react') return react
+    const found = modules.get(name)
+    if (found !== undefined) return found
     throw new Error('lib/client.js requested an unexpected module: ' + name)
   })
   return { exports, active }

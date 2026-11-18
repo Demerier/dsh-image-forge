@@ -12,16 +12,20 @@
  * visible: a strip of `role="tab"` entries, one `role="tabpanel"` for the tab
  * that is active, and a projects pane for the one tab that can never close.
  *
- * ## What U03 deliberately leaves for U04
+ * ## What the canvas tab is now (U04 step 1b)
  *
- * The canvas tab renders the existing `StudioPanel` unchanged. That component
- * takes **no props** (`src/studio-view.ts:1210`), so the shell cannot hand it the
- * `boardId` of the tab that opened it: the pane shows the board the studio picks
- * for itself. Making the tab own its board is U04's `CanvasPane` + singleton
- * store work, not something this shell can fake by reaching into the studio.
- * The shell therefore also mounts **only the active** canvas pane: a hidden
- * `StudioPanel` per tab would mean one SSE stream and one capability probe per
- * open project, and §10.2's keep-alive-not-render rule belongs with the store.
+ * The canvas tab mounts `CanvasPane` (`./canvas-pane.ts`), and hands it the
+ * **tab's** `boardId` — so a tab shows the project it was opened for instead of
+ * whichever board the profile last had active. The pane owns the engine: the
+ * canvas area is React Flow 12, and the board-to-flow mapping is the pure module
+ * `./canvas-flow-model.ts`. The studio's form, result list and asset page ride
+ * along inside the pane until U05 replaces the form with the node inspector
+ * (§14.5, D12); that is why `CanvasPane` composes `StudioPanel` rather than
+ * rendering a bare canvas.
+ *
+ * The shell still mounts **only the active** canvas pane: a hidden pane per tab
+ * would mean one SSE stream and one capability probe per open project, and
+ * §10.2's keep-alive-not-render rule belongs with the store (U04 step 2).
  *
  * ## Persistence
  *
@@ -50,7 +54,7 @@ import {
   type BoardSummary,
   type StudioConfigResponse,
 } from './studio-shared.ts'
-import { StudioPanel } from './studio-view.ts'
+import { CanvasPane } from './canvas-pane.ts'
 import { ProjectsPane } from './workbench-projects.ts'
 import {
   MAX_CANVAS_TABS,
@@ -543,9 +547,11 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
             '关闭页签',
           ),
         ])
-      : // U03 mounts the existing studio unchanged; U04 replaces it with a
-        // `CanvasPane` that takes the tab's `boardId` as a prop (§14.5).
-        createElement(StudioPanel)
+      : // U04 step 1b: the tab owns its board and the canvas engine. `CanvasPane`
+        // composes them; the studio's form, list and asset page stay where they
+        // are until U05 replaces the form with the node inspector, which is also
+        // when `onOpenNode` gets a detail pane to open (U06).
+        createElement(CanvasPane, { boardId: activeBoardId, boards })
   } else {
     panel = createElement('p', { className: 'dsh-forge-workbench-empty-note' }, WORKBENCH_NODE_PENDING_COPY)
   }

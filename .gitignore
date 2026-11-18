@@ -1,5 +1,9 @@
 node_modules/
 *.log
+# Repository-level pnpm content-addressable store (`pnpm store path` points here).
+# pnpm reuses it across installs, so it must survive on disk — it is not
+# machine-independent state that belongs in the repository or its history.
+.pnpm-store/
 .DS_Store
 # Generated images must never be committed.
 generated-images/

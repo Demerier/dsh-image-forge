@@ -333,6 +333,66 @@ export const WORKBENCH_CSS = `
 .dsh-forge-workbench-assets{display:flex;flex-direction:column;gap:8px;padding:6px 2px}
 `
 
+/**
+ * The React Flow canvas (U04 step 1b).
+ *
+ * React Flow ships its own sheet (`XYFLOW_CSS`, appended last-but-one by
+ * `CLIENT_CSS`); everything here either gives a rule the library does not have
+ * (the node painters) or overrides one it does (the handle's size). The order in
+ * `CLIENT_CSS` matters: this block comes **after** `XYFLOW_CSS`, so the handle
+ * rule below wins against `.react-flow__handle` without `!important`.
+ *
+ * Colours stay translucent-grey so both the light and the dark Host theme can
+ * seat the canvas, and the accents are the ones the rest of the plugin already
+ * uses (#3b82f6 selection, #dc2626 danger).
+ */
+export const CANVAS_FLOW_CSS = `
+.dsh-forge-flow{position:relative;flex:1 1 auto;min-height:clamp(300px,50vh,540px);border:1px solid rgba(127,127,127,.28);border-radius:10px;overflow:hidden;background-color:rgba(127,127,127,.035)}
+.dsh-forge-flow .react-flow{background:transparent}
+.dsh-forge-flow-note{margin:0;padding:26px 12px;text-align:center;font-size:12px;opacity:.55}
+.dsh-forge-flow-hint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);margin:0;padding:0 28px;max-width:44ch;text-align:center;font-size:12.5px;line-height:1.7;opacity:.45;z-index:4;pointer-events:none}
+.dsh-forge-flow-background{opacity:.55}
+.dsh-forge-flow-node{box-sizing:border-box;width:100%;height:100%;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;border:1px solid rgba(127,127,127,.34);background:rgba(127,127,127,.08);box-shadow:0 1px 5px rgba(0,0,0,.09);cursor:grab}
+.dsh-forge-flow-node.is-selected{border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,.22),0 2px 10px rgba(0,0,0,.12)}
+.dsh-forge-flow-thumb{display:block;width:100%;flex:1 1 auto;min-height:0;object-fit:contain;background:rgba(127,127,127,.14);pointer-events:none}
+.dsh-forge-flow-title{padding:4px 8px 0;font-size:11px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.85}
+.dsh-forge-flow-meta{padding:1px 8px 5px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* G27: a handle is drawn inside the zoomed viewport, so its size is a screen
+   length divided by the zoom the node publishes. */
+.dsh-forge-flow-handle{width:calc(10px / var(--dsh-forge-zoom,1));height:calc(10px / var(--dsh-forge-zoom,1));min-width:4px;min-height:4px;border-radius:50%;background:#3b82f6;border:1px solid rgba(255,255,255,.8);opacity:.5;transition:opacity .12s}
+.dsh-forge-flow-node:hover .dsh-forge-flow-handle,.dsh-forge-flow-node.is-selected .dsh-forge-flow-handle{opacity:1}
+.dsh-forge-flow-node.is-task{background:rgba(127,127,127,.06)}
+.dsh-forge-flow-task-head{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 8px 3px}
+.dsh-forge-flow-badge{font-size:10px;line-height:1.5;padding:1px 6px;border-radius:999px;background:rgba(127,127,127,.16)}
+.dsh-forge-flow-badge[data-task-status="running"]{background:rgba(59,130,246,.18);color:#3b82f6}
+.dsh-forge-flow-badge[data-task-status="queued"]{background:rgba(245,158,11,.2);color:#b45309}
+.dsh-forge-flow-badge[data-task-status="failed"]{background:rgba(220,38,38,.16);color:#dc2626}
+.dsh-forge-flow-ratio{font-size:10px;opacity:.6;font-variant-numeric:tabular-nums}
+.dsh-forge-flow-task-prompt{padding:2px 8px;font-size:11px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.dsh-forge-flow-task-meta{padding:0 8px 4px;font-size:10px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-forge-flow-bar{position:relative;height:4px;margin:2px 8px;border-radius:999px;background:rgba(127,127,127,.22);overflow:hidden}
+.dsh-forge-flow-bar-fill{display:block;height:100%;background:#3b82f6;transition:width .18s}
+.dsh-forge-flow-task-status{padding:4px 8px;font-size:10.5px;line-height:1.45;opacity:.72;overflow-wrap:anywhere}
+.dsh-forge-flow-task-status.is-failed,.dsh-forge-flow-task-status.is-interrupted{color:#dc2626;opacity:.9}
+.dsh-forge-flow-actions{display:flex;gap:4px;padding:0 8px 6px;margin-top:auto;flex-wrap:wrap}
+.dsh-forge-flow-btn{appearance:none;font:inherit;font-size:10.5px;padding:3px 7px;border-radius:5px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;cursor:pointer;line-height:1.5;white-space:nowrap;text-decoration:none}
+.dsh-forge-flow-btn:hover{background:rgba(127,127,127,.13);border-color:rgba(127,127,127,.5)}
+.dsh-forge-flow-btn.is-danger:hover{color:#dc2626;border-color:rgba(220,38,38,.5);background:rgba(220,38,38,.08)}
+.dsh-forge-flow-node.is-layout{background:rgba(127,127,127,.06)}
+.dsh-forge-flow-layout-head{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 8px;border-bottom:1px solid rgba(127,127,127,.2);cursor:grab}
+.dsh-forge-flow-layout-title{font-size:11px;font-weight:600;opacity:.8}
+.dsh-forge-flow-layout-body{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
+.dsh-forge-flow-layout-host{position:absolute;inset:0}
+.dsh-forge-flow-layout-foot{display:flex;justify-content:space-between;gap:6px;padding:3px 8px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;border-top:1px solid rgba(127,127,127,.2)}
+.dsh-forge-flow-layout-error{padding:8px;font-size:10.5px;line-height:1.5;color:#dc2626}
+.dsh-forge-flow-node.is-draft{gap:6px;padding:10px;border-style:dashed;border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.05)}
+.dsh-forge-flow-draft-title{font-size:11px;font-weight:600;opacity:.8}
+.dsh-forge-flow-draft-body{font-size:10.5px;line-height:1.5;opacity:.6}
+.dsh-forge-flow-edge{stroke:rgba(127,127,127,.55);stroke-width:1.5;fill:none}
+.react-flow__edge.selected .dsh-forge-flow-edge{stroke:#3b82f6;stroke-width:2}
+.dsh-forge-flow-edge-label{position:absolute;padding:1px 5px;border-radius:4px;background:color-mix(in srgb,Canvas 88%,transparent);color:inherit;font-size:10px;line-height:1.4;opacity:.8;white-space:nowrap;pointer-events:none;box-shadow:0 0 0 1px rgba(127,127,127,.24)}
+`
+
 /** The stylesheet text, exported so tests can pin the rules without a DOM. */
 export const CLIENT_CSS = `
 .dsh-image-forge-settings {
@@ -721,6 +781,7 @@ export const CLIENT_CSS = `
 ${STUDIO_CSS}
 ${WORKBENCH_CSS}
 ${XYFLOW_CSS}
+${CANVAS_FLOW_CSS}
 `
 
 /**

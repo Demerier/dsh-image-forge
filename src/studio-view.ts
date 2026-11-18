@@ -1203,11 +1203,38 @@ function LayoutEditorMount(props: LayoutEditorMountProps): ReturnType<typeof cre
 }
 
 /**
+ * What a host may hand the panel (U04 step 1b).
+ *
+ * Both props exist to let the tabbed shell own a *board* and the *canvas
+ * engine* without this file having to import either:
+ *
+ * - `boardId` is the tab's board (§14.5). Without it the panel falls back to the
+ *   profile's `activeBoard`, which is what every pre-U04 mount did.
+ * - `canvas` is the component that renders the canvas area. The shell supplies
+ *   `FlowCanvas` from `./canvas-pane.ts`; a mount that supplies nothing keeps the
+ *   pre-U04 DOM renderer, which is what any host outside the shell (and the
+ *   manual canvas checklist) still gets.
+ */
+export interface StudioPanelProps {
+  /** The board this panel should open; absent means "the profile's active one". */
+  readonly boardId?: string
+  /** The canvas element the panel should render in place of its own. */
+  readonly canvas?: unknown
+}
+
+/**
  * Render the workbench.
  *
+ * @param props - the owning tab's board and canvas engine (see
+ *   {@link StudioPanelProps}); both are optional so the component still mounts
+ *   standalone.
  * @returns the panel tree; every fetch is same-origin and cancellable.
  */
-export function StudioPanel(): ReturnType<typeof createElement> {
+export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createElement> {
+  // Read once per render: the shell passes a component, and a fresh read keeps
+  // the branch below honest without threading it through every helper.
+  const canvasSlot = props?.canvas
+  const preferredBoardId = props?.boardId
   const [config, setConfig] = useState<StudioConfigResponse | undefined>(undefined)
   const [configError, setConfigError] = useState<string | undefined>(undefined)
   // P2: the environment snapshot (state/pid/owned/logPath) is its own concern,
@@ -1474,8 +1501,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       setBoards(snapshot.boards ?? [])
       setSteps((current) => (current.length > 0 ? current : String(snapshot.defaultSteps)))
       // The library is the display unit, so a snapshot always opens one: an
-      // empty library means an empty canvas, not a stale one.
-      await openBoard(snapshot.activeBoard ?? undefined, signal)
+      // empty library means an empty canvas, not a stale one. A tab that named
+      // its board wins over the profile's "last open" one (§14.5).
+      await openBoard(preferredBoardId ?? snapshot.activeBoard ?? undefined, signal)
       // Reading the environment is what tells the status line whether the
       // running backend is *this plugin's* (and therefore stoppable).
       await loadEnvironment()
@@ -1483,7 +1511,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       if (signal?.aborted === true) return
       setConfigError(cause instanceof Error ? cause.message : String(cause))
     }
-  }, [loadEnvironment, openBoard])
+  }, [loadEnvironment, openBoard, preferredBoardId])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -4953,7 +4981,24 @@ export function StudioPanel(): ReturnType<typeof createElement> {
               view === 'assets' ? `${String(assetsTotal)} 张素材` : `${String(batches.length)} 批`,
             ),
         ),
-        view === 'canvas'
+        view === 'canvas' && canvasSlot !== undefined
+          // U04 step 1b: the shell supplies the canvas engine (React Flow, via
+          // `./canvas-pane.ts`). Everything below this line is the pre-engine
+          // path — still the fallback when a mount passes no canvas, and the
+          // reference the new painters were ported from.
+          ? createElement(canvasSlot as (input: unknown) => unknown, {
+            boardId,
+            nodes,
+            selection,
+            onSelect: (ids: readonly string[]) => { setSelection(new Set(ids)) },
+            onDraft: updateLayoutDraft,
+            onRetry: retryTask,
+            onCancel: cancelTask,
+            onRemove: removeNode,
+            onOpen: openLightbox,
+            onGenerateLayout: generateLayoutNode,
+          })
+          : view === 'canvas'
           ? createElement(
             'div',
             {

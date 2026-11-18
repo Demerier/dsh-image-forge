@@ -1,5 +1,5 @@
 /**
- * U04 step 1a — the packaging contract for `@xyflow/react`.
+ * U04 — the packaging contract for `@xyflow/react`.
  *
  * React Flow is *not* a module the web loader can resolve at runtime: the client
  * half is one CJS bundle evaluated inside a lazy factory, and the only modules it
@@ -15,21 +15,20 @@
  *    `import { createPortal } from 'react-dom'` pulls in a second React DOM,
  *    which then fights the shell's instance over portals and events.
  *
- * This file pins all three against the built artifact and against the config that
- * produces it. It reads files only — it does not evaluate the bundle (that needs
- * a browser-shaped module loader; see `test/harness.mjs`).
+ * Step 1a wired the packaging and shipped only the stylesheet; **step 1b is the
+ * real import**: `src/canvas-pane.ts` renders `<ReactFlow>`, so the component
+ * code is in the bundle and these assertions bite for real — the bare-require
+ * check is no longer satisfied by construction.
  *
- * **What is *not* provable yet.** Step 1a wires the packaging, not the pane: no
- * client module imports a React Flow component, so the *component* code is not in
- * the bundle and the "no bare require" assertion is currently satisfied by
- * construction. What *is* in the bundle is the stylesheet, which is the part this
- * step ships. The library-level proof (React Flow's component code inlined, no
- * `process`, one React DOM) was verified once by temporarily importing
- * `ReactFlowProvider` into `src/xyflow-styles.ts` and rebuilding: 796,878 B, zero
- * `require("@xyflow/react")`, zero `NODE_ENV`, zero `process.`, zero
- * `__SECRET_INTERNALS_DO_NOT_USE`, and exactly one bare `require("react-dom")`.
- * Step 1b re-establishes that on the real import, and these assertions start
- * biting then.
+ * One more contract belongs here now that the library ships: **it must stay a
+ * devDependency.** It is inlined at build time, so a downstream install of this
+ * package has no use for it; leaving it in `dependencies` would make every
+ * profile that installs the plugin download a ~2 MB copy nothing imports. The
+ * build reads it from `node_modules` at build time, which is exactly what a
+ * devDependency is for.
+ *
+ * This file reads files only — it does not evaluate the bundle (that needs a
+ * browser-shaped module loader; see `test/harness.mjs`).
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -74,9 +73,10 @@ function configList(key) {
     .filter(Boolean)
 }
 
-test('the client depends on the React Flow 12 line that is actually installed', () => {
-  const declared = MANIFEST.dependencies?.['@xyflow/react']
-  assert.ok(declared, '@xyflow/react must be a runtime dependency of the package')
+test('React Flow is a build-time dependency, the 12 line, and it is inline', () => {
+  const declared = MANIFEST.devDependencies?.['@xyflow/react']
+  assert.ok(declared, '@xyflow/react must be a devDependency: the artifact inlines it, so a profile installing this package must not download it')
+  assert.equal(MANIFEST.dependencies?.['@xyflow/react'], undefined, 'and it must not reappear in dependencies')
   assert.match(declared, /^\^12\./, `expected a ^12.x range, got ${declared}`)
   assert.equal(INSTALLED.version.split('.')[0], '12', 'the installed copy must be the 12 line')
   // A range that no longer contains the installed copy means the build and the
@@ -122,7 +122,7 @@ test('React Flow is bundled, not left as a bare require', () => {
   const alwaysBundle = configList('alwaysBundle')
   assert.ok(
     alwaysBundle.includes('@xyflow/react'),
-    'deps.alwaysBundle must opt @xyflow/react back into the bundle (it is in `dependencies`)',
+    'deps.alwaysBundle must opt @xyflow/react back into the bundle (it is a devDependency, and the deps plugin still tracks it)',
   )
 })
 
@@ -163,10 +163,29 @@ test('process.env.NODE_ENV is substituted at build time', () => {
   )
 })
 
-test('reports the artifact size (no ceiling: the pane lands in step 1b)', (t) => {
+test('the factory requests nothing the shell does not seed', () => {
+  // The loader's module table is a closed set (React and its DOM, which the
+  // plugin does not bundle). A new bare request — a polyfill, a Node builtin, a
+  // subpath — fails at materialization in the browser, long after this build.
+  const references = [...new Set([...BUNDLE.matchAll(/require\(["']([^"']+)["']\)/g)].map((m) => m[1]))].sort()
+  assert.deepEqual(references, ['react', 'react-dom', 'react/jsx-runtime'])
+})
+
+test('the artifact stays inside the size budget the pane was measured at', (t) => {
   const bytes = Buffer.byteLength(BUNDLE)
-  t.diagnostic(`lib/client.js ${bytes} B, ${gzipSync(BUNDLE).length} B gzip`)
-  // The pre-React-Flow artifact was 400,616 B: it stays a single, self-contained
-  // file either way, which is the invariant worth stating.
-  assert.ok(bytes > 0)
+  const gzipped = gzipSync(BUNDLE).length
+  t.diagnostic(`lib/client.js ${bytes} B, ${gzipped} B gzip`)
+  // Measured at U04 step 1b, React Flow 12.12.1 inlined: 833,700 B raw and
+  // 218,636 B gzip (the CSS-only step 1a artifact was 409,772 B / 108,342 B).
+  // The ceiling is deliberately loose — roughly +32 % raw and +37 % gzip — because
+  // what it guards against is a *second* canvas library or a stray d3 copy being
+  // pulled into a bundle the client evaluates on every page load, not a byte
+  // budget an upstream patch release should be able to trip.
+  assert.ok(bytes < 1_100_000, `raw bundle grew past the budget: ${bytes} B`)
+  assert.ok(gzipped < 300_000, `gzipped bundle grew past the budget: ${gzipped} B`)
+  // The growth is the pane, not filler: its painters, React Flow's own node
+  // wrapper (component code, not just the stylesheet) and the edge builder.
+  assert.ok(BUNDLE.includes('dsh-forge-flow-node'), 'the pane’s node painters must ship')
+  assert.ok(BUNDLE.includes('react-flow__node'), 'React Flow’s node wrapper must ship')
+  assert.ok(BUNDLE.includes('getBezierPath'), 'the lineage edge’s path builder must ship')
 })
