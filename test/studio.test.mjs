@@ -28,6 +28,20 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// The renderer is shared with `test/workbench-shell.test.mjs`: since the shell
+// seats the studio inside a tab, a harness that only walked host elements
+// could no longer see it (see `test/harness.mjs`).
+import {
+  collectChildren,
+  createPanel,
+  fakeElementWithClass,
+  fakeResponse,
+  fakeText,
+  fakeVisit,
+  loadClientBundle,
+  sameDeps,
+  settle,
+} from './harness.mjs'
 import {
   CHILD_OFFSET_X,
 } from '../testlib/studio-canvas.js'
@@ -970,201 +984,21 @@ const HARNESS_BOARD = {
   })),
 }
 
-/** A fetch-shaped response; the panel only ever asks for `json()`. */
-function fakeResponse(payload, status) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => payload,
-  }
-}
-
-/** Collect text out of a fake element tree (strings and numbers only). */
-function fakeText(node) {
-  if (typeof node === 'string') return node
-  if (typeof node === 'number') return String(node)
-  if (Array.isArray(node)) {
-    let text = ''
-    for (const child of node) text += fakeText(child)
-    return text
-  }
-  if (node === null || node === undefined || typeof node !== 'object') return ''
-  let text = ''
-  for (const child of node.children) text += fakeText(child)
-  return text
-}
-
-/** Depth-first visit of every fake element (an object with a string `type`). */
-function fakeVisit(node, visit) {
-  if (node === null || node === undefined || typeof node !== 'object') return
-  if (Array.isArray(node)) {
-    for (const child of node) fakeVisit(child, visit)
-    return
-  }
-  if (typeof node.type !== 'string') return
-  visit(node)
-  for (const child of node.children) fakeVisit(child, visit)
-}
-
-/** The first element carrying exactly `className`, or `undefined`. */
-function fakeElementWithClass(tree, className) {
-  let found
-  fakeVisit(tree, (entry) => {
-    if (found === undefined && entry.props.className === className) found = entry
-  })
-  return found
-}
-
-/** Same deps, element-wise — React's own comparison, close enough here. */
-function sameDeps(left, right) {
-  if (left === undefined || right === undefined) return false
-  if (left.length !== right.length) return false
-  return left.every((value, index) => Object.is(value, right[index]))
-}
-
-/** Flatten `createElement` children the way React does, dropping holes. */
-function collectChildren(child, out) {
-  if (child === null || child === undefined || child === true || child === false) return
-  if (Array.isArray(child)) {
-    for (const entry of child) collectChildren(entry, out)
-    return
-  }
-  out.push(child)
-}
-
-/**
- * A hook runtime just large enough for `StudioPanel`.
- *
- * Call order is identity, exactly like React; effects are queued after render
- * and run by the caller, so they observe the committed tree. `settle` drives
- * render → effects → microtasks until quiet, which is what lets the mount
- * effect's two awaited fetches finish.
+/*
+ * The tree helpers (`fakeResponse` / `fakeText` / `fakeVisit` /
+ * `fakeElementWithClass` / `sameDeps` / `collectChildren`) and the renderer
+ * (`createPanel` / `settle`) now live in `./harness.mjs`, shared with
+ * `test/workbench-shell.test.mjs`. They were moved verbatim; the renderer grew
+ * one capability — it calls function components instead of giving up on them —
+ * because the panel is a tabbed shell now and the studio sits one level deeper.
  */
-function createHookRuntime(active) {
-  const hooks = []
-  let cursor = 0
-  let dirty = false
-  let pending = []
-  let rendered
-  let panel
 
-  const runtime = {
-    useState(initial) {
-      const index = cursor
-      cursor += 1
-      if (hooks[index] === undefined) {
-        hooks[index] = { value: typeof initial === 'function' ? initial() : initial }
-      }
-      const slot = hooks[index]
-      return [slot.value, (next) => {
-        const value = typeof next === 'function' ? next(slot.value) : next
-        if (Object.is(value, slot.value)) return
-        slot.value = value
-        dirty = true
-      }]
-    },
-    useRef(initial) {
-      const index = cursor
-      cursor += 1
-      if (hooks[index] === undefined) hooks[index] = { current: initial }
-      return hooks[index]
-    },
-    useMemo(factory, deps) {
-      const index = cursor
-      cursor += 1
-      if (hooks[index] === undefined) hooks[index] = { value: factory(), deps }
-      else if (!sameDeps(hooks[index].deps, deps)) {
-        hooks[index].value = factory()
-        hooks[index].deps = deps
-      }
-      return hooks[index].value
-    },
-    useCallback(callback, deps) {
-      const index = cursor
-      cursor += 1
-      if (hooks[index] === undefined) hooks[index] = { value: callback, deps }
-      else if (!sameDeps(hooks[index].deps, deps)) {
-        hooks[index].value = callback
-        hooks[index].deps = deps
-      }
-      return hooks[index].value
-    },
-    useEffect(effect, deps) {
-      const index = cursor
-      cursor += 1
-      if (hooks[index] === undefined) hooks[index] = { deps: undefined, cleanup: undefined }
-      const slot = hooks[index]
-      const changed = !sameDeps(slot.deps, deps)
-      slot.deps = deps
-      if (changed) pending.push({ index, effect })
-    },
-  }
-  active.runtime = runtime
-
-  function renderOnce() {
-    cursor = 0
-    pending = []
-    dirty = false
-    rendered = panel({})
-  }
-
-  return {
-    render() {
-      renderOnce()
-    },
-    get tree() {
-      return rendered
-    },
-    get dirty() {
-      return dirty
-    },
-    get pendingEffects() {
-      return pending.length
-    },
-    mount(nextPanel) {
-      panel = nextPanel
-      renderOnce()
-    },
-    takeEffects() {
-      const effects = pending
-      pending = []
-      return effects
-    },
-    runEffect(entry) {
-      const slot = hooks[entry.index]
-      if (typeof slot.cleanup === 'function') slot.cleanup()
-      const cleanup = entry.effect()
-      slot.cleanup = typeof cleanup === 'function' ? cleanup : undefined
-    },
-    unmount() {
-      for (const slot of hooks) {
-        if (slot !== undefined && typeof slot.cleanup === 'function') slot.cleanup()
-      }
-    },
-  }
-}
-
-/** Run render/effects/microtasks until the panel is quiet. */
-async function settle(panel) {
-  for (let round = 0; round < 250; round += 1) {
-    if (panel.dirty) {
-      panel.render()
-      continue
-    }
-    const effects = panel.takeEffects()
-    if (effects.length > 0) {
-      for (const entry of effects) panel.runEffect(entry)
-      continue
-    }
-    if (panel.dirty) continue
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    if (!panel.dirty && panel.pendingEffects === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      if (!panel.dirty && panel.pendingEffects === 0) return
-    }
-  }
-  throw new Error('the workbench panel did not settle after 250 rounds')
-}
+/*
+ * `createHookRuntime` and `settle` moved to `./harness.mjs` (`createPanel` /
+ * `settle`). The panel handle they return keeps the same shape — `mount`,
+ * `render`, `tree`, `dirty`, `pendingEffects`, `takeEffects`, `runEffect`,
+ * `unmount` — so every test below is written exactly as before.
+ */
 
 /** Load the built client bundle the way `window.__ModuleLoader__` does. */
 let loadedClient
@@ -1176,55 +1010,20 @@ let loadedClient
  * not to `globalThis`. Tests flip this before a click that must be cancelled.
  */
 let harnessConfirm = () => true
+/** Load the built bundle once; `active` binds hooks to the mounting host. */
 function clientEntry() {
   if (loadedClient !== undefined) return loadedClient
-  const loaded = []
-  const fakeWindow = {
-    __ModuleLoader__: {
-      load(spec) {
-        loaded.push(spec)
-      },
-    },
-    confirm: (message) => harnessConfirm(message),
-  }
   // The bundle is plain CJS wrapped by the loader; it is evaluated, not
-  // imported, because `require("react")` is what the web client resolves.
-  new Function('window', CLIENT_SOURCE)(fakeWindow)
-  assert.equal(loaded.length, 1, 'the client bundle must register exactly one factory')
-  assert.equal(loaded[0].id, 'dsh-image-forge')
-  const active = { runtime: undefined }
-  const react = {
-    createElement(type, props, ...children) {
-      const flat = []
-      for (const child of children) collectChildren(child, flat)
-      return { type, props: props === null || props === undefined ? {} : props, children: flat }
-    },
-    useState(initial) {
-      return active.runtime.useState(initial)
-    },
-    useRef(initial) {
-      return active.runtime.useRef(initial)
-    },
-    useMemo(factory, deps) {
-      return active.runtime.useMemo(factory, deps)
-    },
-    useCallback(callback, deps) {
-      return active.runtime.useCallback(callback, deps)
-    },
-    useEffect(effect, deps) {
-      active.runtime.useEffect(effect, deps)
-    },
-  }
-  const exports = loaded[0].factory((name) => {
-    if (name === 'react') return react
-    throw new Error('lib/client.js requested an unexpected module: ' + name)
-  })
-  loadedClient = { exports, active }
+  // imported, because `require("react")` is what the web client resolves. The
+  // loader also hands it a `window` — that is where `confirm` comes from, since
+  // the bundle is evaluated with a *parameter* named `window` and never touches
+  // `globalThis` for it.
+  loadedClient = loadClientBundle(CLIENT_SOURCE, { confirm: (message) => harnessConfirm(message) })
   return loadedClient
 }
 
 /** Run `apply` and return the component seated in the `main` keyed slot. */
-function studioPanelComponent(exports) {
+function seatedPanelComponent(exports) {
   const events = []
   const slots = {
     inject(name, register) {
@@ -1246,8 +1045,42 @@ function studioPanelComponent(exports) {
 }
 
 /**
- * Stub the two globals the panel reaches for: `fetch` (capability snapshot
- * only; the board list is empty in this harness) and `EventSource`.
+ * The open-canvas tab the shell is told about, and the throwaway project it
+ * needs when a case never had one.
+ *
+ * Since U03 the panel is the tabbed shell: it lands on the projects tab and only
+ * renders the studio **inside a canvas tab** (§3.2, §11.1). These tests all drive
+ * the studio, so the harness stubs `workspace-get` with one open canvas tab. The
+ * cases that never had a board fixture get this empty project to open — without
+ * it there is no tab, hence no studio, hence nothing to assert about. Nothing
+ * about the studio's own fixture changes: it still sees `activeBoard: null` and
+ * an empty canvas, exactly as before.
+ */
+const PROBE_BOARD = {
+  id: 'cbrdprobe',
+  name: '测试画板',
+  itemCount: 0,
+  cover: null,
+  createdAt: '2026-11-17T00:00:00.000Z',
+  updatedAt: '2026-11-17T00:00:00.000Z',
+  sessionId: null,
+}
+
+/** The workspace document `workspace-get` answers with (§4.2). */
+function openCanvasWorkspace(boardId) {
+  return {
+    version: 1,
+    openProjects: [boardId],
+    activeTab: { kind: 'canvas', boardId },
+    nodeDetailTabs: [],
+    tabOrder: ['projects', `canvas:${boardId}`],
+    recentProjects: [],
+  }
+}
+
+/**
+ * Stub the two globals the panel reaches for: `fetch` (capability snapshot,
+ * workspace and boards) and `EventSource`.
  */
 function installFakeNetwork(options) {
   const previousFetch = globalThis.fetch
@@ -1267,7 +1100,7 @@ function installFakeNetwork(options) {
   const assetItems = options === undefined || options.assets === undefined ? [] : options.assets
   let copiedItems = 0
   const baseConfig = board === undefined
-    ? HARNESS_CONFIG
+    ? { ...HARNESS_CONFIG, boards: [PROBE_BOARD] }
     : {
       ...HARNESS_CONFIG,
       boards: [{
@@ -1282,6 +1115,12 @@ function installFakeNetwork(options) {
   // T22: tests need snapshots that are *not* ready (stepper failure states).
   const overrides = options === undefined ? undefined : options.configOverrides
   const config = overrides === undefined ? baseConfig : { ...baseConfig, ...overrides }
+  // The tab has to name a board the shell will accept: it validates the
+  // workspace against the library before opening anything (§4.3), so an id the
+  // `configOverrides` removed would be dropped and the studio would never render.
+  const libraryIds = Array.isArray(config.boards) ? config.boards.map((entry) => entry.id) : []
+  const tabBoardId = libraryIds.length > 0 ? libraryIds[0] : PROBE_BOARD.id
+  const workspace = openCanvasWorkspace(tabBoardId)
   // P2: the environment line is its own route. A test owns the answer, so the
   // start/stop/owned cases are deterministic; the default is a plain read.
   const environment = options === undefined ? undefined : options.environment
@@ -1335,6 +1174,16 @@ function installFakeNetwork(options) {
           action = JSON.parse(init.body)
         } catch {
           action = undefined
+        }
+        if (action !== undefined && action.action === 'workspace-get') {
+          // U03: the shell reads the workspace before it decides which tab to
+          // show. One open canvas tab is what puts the studio on screen.
+          return fakeResponse({ ok: true, workspace }, 200)
+        }
+        if (action !== undefined && action.action === 'workspace-set') {
+          // Accepted, never inspected: the shell's own persistence is asserted in
+          // `test/workbench-shell.test.mjs`; these tests are about the studio.
+          return fakeResponse({ ok: true }, 200)
         }
         if (action !== undefined && (action.action === 'copy-item' || action.action === 'move-item')) {
           // G28: the picker's write, echoed the way the route does it — a new id,
@@ -1473,12 +1322,18 @@ function progressFillWidth(panel) {
   return fill === undefined ? undefined : fill.props.style.width
 }
 
-/** Mount a fresh workbench against a fresh network stub. */
+/**
+ * Mount a fresh workbench against a fresh network stub.
+ *
+ * Since U03 the seated component is the tabbed shell, so "mount the workbench"
+ * means: seat the shell, and let the workspace stub give it one open canvas tab
+ * — the studio is what these tests assert on, and it lives in that tab.
+ */
 async function mountWorkbench(networkOptions) {
   const harness = clientEntry()
   const network = installFakeNetwork(networkOptions)
-  const panel = createHookRuntime(harness.active)
-  panel.mount(studioPanelComponent(harness.exports))
+  const panel = createPanel(harness.active)
+  panel.mount(seatedPanelComponent(harness.exports))
   await settle(panel)
   return { network, panel }
 }
