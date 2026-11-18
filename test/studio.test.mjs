@@ -53,8 +53,18 @@
  *   - copy/move to another board from the node menu     (S3 — 保持原样,仍待人工验收)
  *   - the lightbox (G22) and its arrow keys             (S2 — 双击经 `onOpen` 接线,覆盖层
  *                                                        与 ←/→ 待人工验收)
- *   - the task node: clientId binding, retry, interrupt (S4)
- *   - the layout node: rebuild, create, generate, save  (S4)
+ *   - the task node: clientId binding, retry, interrupt (S4 — 已接线,待人工验收: 状态→按钮集合由
+ *                                                        `taskNodeActions` 纯函数断言，四颗按钮到
+ *                                                        studio 回调的桥接由 `U04 S4` 用例断言；
+ *                                                        引擎里的实际点击待人工)
+ *   - the layout node: rebuild, create, generate, save  (S4 — 半自动: 重建后的尺寸与草稿一致性由
+ *                                                        `canvas-flow-model.test.mjs` 断言，编辑→
+ *                                                        `save-layout-node` 的接线由 `U04 S4`
+ *                                                        断言，内嵌编辑器在引擎容器里的手感待人工)
+ *   - the camera a board reopens at, and 居中揭示        (S4 — 半自动: `initialFlowView` /
+ *                                                        `flowViewportProps` / `planReveal` 三个纯函数
+ *                                                        断言了"恢复 xor 取景"与揭示目标，引擎里真的
+ *                                                        不闪、真的居中待人工)
  *
  * Their replacements are, in order: `test/canvas-flow-model.test.mjs` for the
  * board→flow mapping (geometry, kinds, edges, selection — the part that *is*
@@ -91,6 +101,21 @@
  *      节点 —— 四者都**不建节点、不入撤销栈**;后两者给一句提示。
  *   5. 平移/缩放到 40% 后再拖:预览线终点仍贴着指针(这条最容易暴露坐标系错误)。
  *   6. 菜单打开后按 Esc:卡片关闭,画布上不多任何节点。
+ *
+ * ## U04 step 4 的人工验收清单(相机、任务节点、布局节点)
+ *
+ * 1. 相机恢复:把画布平移到一块空白处并缩放到 ~150%,切到另一个页签再切回来 ——
+ *    视野**就是离开时的那一块**,不是"全部节点被框住";关掉页签重开(重新读盘)也一样。
+ *    新建一个没有存过相机的空画板 —— 它**被框住**(fitView),而不是跳到某个角落。
+ * 2. 居中揭示:素材页点一张图"在画布中显示" —— 该节点**出现在视口中央**且缩放不变;
+ *    同一动作在引擎里只移动一次,没有"先框住再跳过去"的两段位移。
+ * 3. 任务节点:发起一次生成,节点从 待开始 → 排队中 → 生成中 且进度条随流推进;
+ *    期间画布其它节点**不闪烁**(含被拖动中的节点不回弹);中断任务后出现 重试,
+ *    点 重试 复用同一份参数原地重跑;失败后点 编辑参数 表单被回填、下次生成替换该节点;
+ *    移除不删文件。
+ * 4. 布局节点:拖入/新建一个布局节点,拖动里面任何一个框 —— 画布不跟着平移(手势被隔离);
+ *    改完刷新页面,草稿与显示框都还在;拉宽节点,高度按草稿比例走,草稿不变;
+ *    在 50% 与 200% 缩放下各拖一次框,框的位移与指针**一致**(不出现双倍/半速)。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -3151,6 +3176,129 @@ test('U04 S3: the pane’s side of the wire ships with a preview and a three-way
   assert.ok(CLIENT_SOURCE.includes('canStartConnection(props.kind)'))
   assert.ok(CLIENT_SOURCE.includes('canAcceptConnection(props.kind)'))
 })
+
+// ---------------------------------------------------------------------------
+// U04 step 4: what a board opens at, 居中揭示, and the two node behaviours.
+//
+// The engine's half of each needs a measured container — `onInit`, `setCenter`,
+// the rendered button list — which this harness cannot produce (see the note at
+// the top of this file). What *is* provable here is the bridge: the props the
+// studio hands the engine, the dispatcher `revealNodeId` became, and the fact that
+// a task's buttons land on the studio callbacks that already own those actions.
+// The decisions themselves — which viewport, which camera, which buttons — are
+// pure, and asserted in `canvas-flow-model.test.mjs`.
+// ---------------------------------------------------------------------------
+
+test('U04 S4: a board reopens at the camera it stored instead of being framed again', () => {
+  // The studio always knew the stored view (`board.camera`); the engine never
+  // asked for it, so every reopen was a fresh fit. Two props carry it now.
+  assert.ok(CLIENT_SOURCE.includes('initialCamera: boardView.camera'), 'the engine must be given the stored view')
+  assert.ok(CLIENT_SOURCE.includes('boardLoaded: boardView.loaded'), 'and must wait until a read has finished')
+  // What the pane does with them is the tested decision, not an unconditional fit.
+  assert.ok(CLIENT_SOURCE.includes('flowViewportProps(initialView)'), 'one decision, spread onto the flow')
+  assert.ok(CLIENT_SOURCE.includes('initialFlowView('), 'and the decision is the pure function')
+  assert.equal(
+    CLIENT_SOURCE.includes('fitViewOptions: { padding: 0.2, maxZoom: 1 }'),
+    false,
+    'the unconditional fit must be gone: the fit lives in the decision now',
+  )
+
+  // The stored camera comes from the board read, never from the live mirror — a
+  // mirror that moves while the user pans cannot say where the board was left.
+  const read = sourceBlock('openBoard')
+  assert.ok(read.includes('setBoardView('), 'a board read must record the stored view')
+  assert.ok(read.includes('board.camera'), 'from `board.camera` itself')
+})
+
+test('U04 S4: 居中揭示 moves the mounted engine’s viewport, and still falls back to the DOM camera', () => {
+  const reveal = sourceBlock('revealNodeId')
+  // The classification is the tested planner: which canvas, which point.
+  assert.ok(reveal.includes('planReveal('), 'the reveal must be classified by the pure planner')
+  assert.ok(reveal.includes("'flow'"), 'the engine branch must exist')
+  assert.ok(reveal.includes('.reveal(plan.center, plan.zoom)'), 'and land on the engine handle')
+  // The DOM fallback is unchanged: same centre, its own camera arithmetic.
+  assert.ok(reveal.includes('centerOn('), 'the DOM canvas still gets its camera')
+  assert.ok(reveal.includes('setCamera('), '…as a camera, not a viewport')
+  // And the handle's implementation is a real camera move on the engine.
+  assert.ok(CLIENT_SOURCE.includes('setCenter('), 'the engine must call React Flow’s setCenter')
+  assert.ok(CLIENT_SOURCE.includes('reveal: (center, zoom)'), 'with the zoom the caller kept')
+})
+
+test('U04 S4: a task node’s buttons reach the studio callbacks that own them', () => {
+  // The four actions the pure mapping can return, each onto the callback the DOM
+  // canvas already drives. This is the bridge step 1b was missing: a button that
+  // renders and does nothing.
+  for (const [marker, label] of [
+    ['onRetry: retryTask', '重试'],
+    ['onEditParams: editTaskParams', '编辑参数'],
+    ['onCancel: cancelTask', '取消'],
+    ['onRemove: removeNode', '移除'],
+  ]) {
+    assert.ok(CLIENT_SOURCE.includes(marker), `${label} must be wired to the studio`)
+  }
+  // The pane's side: the set comes from the tested mapping, and every id it can
+  // return has a handler path of its own.
+  assert.ok(CLIENT_SOURCE.includes('taskNodeActions(status'), 'the buttons come from the pure mapping')
+  assert.ok(CLIENT_SOURCE.includes('data-task-action'), 'and each is addressable in the DOM')
+  for (const call of [
+    'actions.onRetry?.(nodeId)',
+    'actions.onEditParams?.(nodeId)',
+    'actions.onCancel?.(nodeId)',
+    'actions.onRemove?.(nodeId)',
+  ]) {
+    assert.ok(CLIENT_SOURCE.includes(call), call + ' must exist')
+  }
+  // Each one really is the existing studio action, not a second implementation.
+  assert.ok(sourceBlock('retryTask').includes('startGeneration('), '重试 re-submits through the run path')
+  const edit = sourceBlock('editTaskParams')
+  assert.ok(edit.includes('setPrompt('), '编辑参数 refills the form')
+  assert.ok(edit.includes('pendingReplaceRef.current'), 'and the next run replaces the failed node')
+  assert.ok(sourceBlock('cancelTask').includes('.abort()'), '取消 aborts that run')
+  // 移除 takes the entry off the board; it never deletes the file (that is the
+  // separate, explicit delete path) — and it goes through the same local drop
+  // every other removal uses, undo step included.
+  const remove = sourceBlock('removeNodes')
+  assert.ok(remove.includes("'remove-item'"), '移除 takes the entry off the board')
+  assert.ok(remove.includes('dropNodesLocally('), 'through the shared local removal')
+  assert.ok(remove.includes('deleteFile &&'), 'and only an explicit delete asks for the file')
+})
+
+test('U04 S4: a layout node saves its draft, and its box is the box its editor is mounted in', () => {
+  // 编辑后保存: the editor's change is one coalesced undo step plus the debounced
+  // `save-layout-node` write — which is what makes the draft survive a reload.
+  const draft = sourceBlock('updateLayoutDraft')
+  assert.ok(draft.includes('scheduleLayoutPersist(id)'), 'the edit must be persisted')
+  assert.ok(draft.includes('snapshotCommand('), 'and undoable')
+  assert.ok(draft.includes('layoutNodeHeight('), 'the node height follows the draft')
+  assert.ok(draft.includes('clampLayoutNodeWidth('), 'and the width stays inside the band')
+  assert.ok(CLIENT_SOURCE.includes('onDraft: updateLayoutDraft'), 'the embedded editor reports into it')
+
+  // 尺寸与 zoom 来源: the editor measures its own box with `getBoundingClientRect`
+  // *inside* the zoomed viewport, so the zoom is already in that measurement and
+  // `pointerScale` must stay at its default of 1 in both renderers — passing it
+  // would apply the canvas zoom twice. Nothing shipped may set the hook.
+  assert.equal(CLIENT_SOURCE.includes('pointerScale:'), false, 'the canvas must not double-apply the engine zoom')
+  // And the one zoom a node publishes for its screen-sized affordances is the
+  // engine's own transform, not a second copy of the camera.
+  assert.ok(CLIENT_SOURCE.includes('state.transform[2]'), 'a node’s screen size reads the engine zoom')
+})
+
+test('U04 S4: a progress tick reuses every node it did not change', () => {
+  // Step 2's reseed was fine until the stream arrived: the model is rebuilt per
+  // frame, so the array handed to the engine was all-new objects and the whole
+  // board repainted once per step. The fix has to be in the shipped pane; the
+  // behaviour itself is asserted in `canvas-flow-model.test.mjs`.
+  assert.ok(CLIENT_SOURCE.includes('reuseFlowNodes('), 'the pane must reuse unchanged nodes')
+  assert.ok(CLIENT_SOURCE.includes('seedRef'), 'against what it handed out last time')
+  // And the action bundle is one stable object, or nothing could ever be reused:
+  // a fresh closure per render makes every node look changed.
+  const actionsAt = CLIENT_SOURCE.indexOf('const actions = ')
+  assert.ok(actionsAt > 0, 'the pane must build one action bundle')
+  const declaration = CLIENT_SOURCE.slice(actionsAt, actionsAt + 1600)
+  assert.ok(declaration.startsWith('const actions = (0, react.useMemo)'), 'built once, not per render')
+  assert.ok(declaration.includes('}), []);'), 'with no dependencies, so its identity never changes')
+})
+
 
 
 

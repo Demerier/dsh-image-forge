@@ -122,6 +122,7 @@ import {
   type ConnectNode,
   type ConnectionState,
 } from './canvas-connections.ts'
+import { planReveal, type FlowRevealCanvas } from './canvas-flow-model.ts'
 import type { FlowConnectionEvent } from './canvas-flow-model.ts'
 import {
   DEFAULT_LAYOUT_HEIGHT,
@@ -1217,7 +1218,40 @@ export interface CanvasEngine {
   fitView(): { readonly clamped: boolean }
   /** Multiply the zoom around the viewport centre. */
   zoomBy(factor: number): void
+  /**
+   * Put a world point in the middle of the viewport, keeping `zoom` (§7.4).
+   *
+   * U04 step 4: "居中揭示" used to move this file's `camera` state, which under
+   * the engine is only a mirror — the reveal did nothing on screen. The point is
+   * decided by `planReveal`; this is the call that makes it visible.
+   */
+  reveal(center: Point, zoom: number): void
 }
+
+/**
+ * What the studio knows about the view the board was stored at (U04 step 4).
+ *
+ * Kept apart from `camera` on purpose. `camera` is the **live** mirror of
+ * whatever the mounted engine is showing — it changes on every pan, and the
+ * board write reads it. The engine's opening viewport is a different question
+ * with a different answer ("what did this board look like when it was closed"),
+ * and it can only be answered once a read has actually completed. `loaded` is
+ * what tells the canvas it may mount at all: mounting earlier would force the
+ * "frame it" answer for a board whose camera simply had not arrived yet, and the
+ * stored view would then be lost on the first paint.
+ */
+interface BoardView {
+  /** Whether a board read has finished — successfully, or with an error. */
+  readonly loaded: boolean
+  /** The camera the board stored; absent when it never stored one. */
+  readonly camera?: Camera
+}
+
+/** Before the first read: nothing is known and the canvas must wait. */
+const BOARD_VIEW_UNREAD: BoardView = { loaded: false }
+
+/** A finished read that found no stored camera (the board opens framed). */
+const BOARD_VIEW_EMPTY: BoardView = { loaded: true }
 
 /**
  * What a host may hand the panel (U04 step 1b).
@@ -1285,6 +1319,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const [view, setView] = useState<'canvas' | 'list' | 'assets'>('canvas')
   const [nodes, setNodes] = useState<CanvasNode[]>([])
   const [camera, setCamera] = useState<Camera>({ x: -28, y: -28, zoom: 1 })
+  // U04 step 4: the view the board itself stored, and whether a read has
+  // finished. The engine opens at that view instead of framing the board.
+  const [boardView, setBoardView] = useState<BoardView>(BOARD_VIEW_UNREAD)
   // Measured size of the canvas element. {0,0} until the first measurement,
   // which `visibleWorldRect` treats as "unbounded" — see the culling note below.
   const [viewport, setViewport] = useState<Viewport>({ width: 0, height: 0 })
@@ -1446,9 +1483,18 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       // ids this board no longer has once another one is open).
       historyRef.current.clear()
       nudgeRef.current = undefined
+      // No board is a finished read with nothing to restore: the canvas may
+      // mount and frame itself.
+      setBoardView(BOARD_VIEW_EMPTY)
       return
     }
     setBoardBusy(true)
+    // U04 step 4: a different board's canvas must not inherit this one's
+    // viewport. Closing the gate unmounts the flow, so the engine remounts once
+    // the *new* board's stored camera is known — the same one-shot mount path the
+    // first open uses, instead of a second way to move a live viewport. A re-read
+    // of the board that is already open keeps the canvas (and the user's view).
+    if (id !== boardIdRef.current) setBoardView(BOARD_VIEW_UNREAD)
     try {
       const response = await fetch(`${STUDIO_BOARD_ROUTE}?board=${encodeURIComponent(id)}`, {
         credentials: 'same-origin',
@@ -1457,6 +1503,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       const payload = await readJson(response)
       if (!response.ok || payload === undefined || !Array.isArray(payload.items)) {
         setBoardError(typeof payload?.error === 'string' ? payload.error : '画板读取失败')
+        setBoardView(BOARD_VIEW_EMPTY)
         return
       }
       const board = payload as unknown as BoardDetail
@@ -1484,9 +1531,15 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       historyRef.current.clear()
       nudgeRef.current = undefined
       setCamera(board.camera ?? { x: -28, y: -28, zoom: 1 })
+      // U04 step 4: and the *engine* is told the same thing, once, so it opens
+      // at the stored viewport rather than framing the board and then jumping.
+      setBoardView(board.camera === undefined ? BOARD_VIEW_EMPTY : { loaded: true, camera: board.camera })
       setBoardError(undefined)
     } catch (cause) {
       if (signal?.aborted !== true) setBoardError(cause instanceof Error ? cause.message : String(cause))
+      // A read that failed still finished: the canvas must mount (empty, with the
+      // banner above it) instead of waiting for a camera that is never coming.
+      setBoardView(BOARD_VIEW_EMPTY)
     } finally {
       setBoardBusy(false)
     }
@@ -1514,6 +1567,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       const payload = await readJson(response)
       if (!response.ok || payload === undefined || !('ready' in payload)) {
         setConfigError(typeof payload?.error === 'string' ? payload.error : `工作台不可用（HTTP ${String(response.status)}）`)
+        // Without a config snapshot no board is ever read, so the canvas must not
+        // sit waiting for one: it opens empty, with the banner above it.
+        setBoardView(BOARD_VIEW_EMPTY)
         return
       }
       const snapshot = payload as unknown as StudioConfigResponse
@@ -1531,6 +1587,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     } catch (cause) {
       if (signal?.aborted === true) return
       setConfigError(cause instanceof Error ? cause.message : String(cause))
+      // Same reason as the HTTP branch above: no snapshot means no board read, so
+      // the canvas opens empty instead of waiting for a camera that never arrives.
+      setBoardView(BOARD_VIEW_EMPTY)
     }
   }, [loadEnvironment, openBoard, preferredBoardId])
 
@@ -3208,26 +3267,50 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   /* ------------------------------------------------------------------------ */
 
   /**
-   * Centre the camera on one node (§7.4).
+   * Centre the canvas on one node (§7.4).
    *
-   * If the canvas is not mounted yet (the panel was on the list/asset view),
-   * the id is remembered and the effect below reveals it as soon as the canvas
-   * exists — "wait for the board data, then compute the coordinates".
+   * If the canvas is not mounted yet (the panel was on the list/asset view), or
+   * the node is not on the board yet, the id is remembered and the effect below
+   * reveals it as soon as both exist — "wait for the board data, then compute
+   * the coordinates".
+   *
+   * U04 step 4: with the engine mounted, `setCamera` moves a mirror and nothing
+   * on screen. `planReveal` decides which camera is the real one and hands the
+   * same world centre to both — the engine's viewport via its handle, the DOM
+   * fallback via its own camera maths, which is unchanged.
    */
   const revealNodeId = useCallback((id: string) => {
     const node = nodesRef.current.find((entry) => entry.id === id)
-    const element = canvasRef.current
-    if (node === undefined || element === null) {
+    // The engine is the camera whenever it is mounted; the DOM canvas only when
+    // its element exists; otherwise there is nothing to move and the request
+    // waits (the `pendingRevealRef` path this function has always had).
+    const canvas: FlowRevealCanvas = flowEngineRef.current !== undefined
+      ? 'flow'
+      : (canvasRef.current === null ? 'none' : 'dom')
+    const plan = planReveal({
+      ...(node === undefined ? {} : { rect: nodeRect(node) }),
+      canvas,
+      zoom: cameraRef.current.zoom,
+    })
+    if (plan.kind === 'pending') {
       pendingRevealRef.current = id
       return
     }
     pendingRevealRef.current = undefined
+    if (plan.kind === 'flow') {
+      flowEngineRef.current?.reveal(plan.center, plan.zoom)
+      return
+    }
+    const element = canvasRef.current
+    if (element === null) {
+      pendingRevealRef.current = id
+      return
+    }
     const box = element.getBoundingClientRect()
-    const rect = nodeRect(node)
     setCamera(centerOn(
-      { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+      plan.center,
       { width: box.width, height: box.height },
-      cameraRef.current.zoom,
+      plan.zoom,
     ))
   }, [])
 
@@ -3236,7 +3319,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     const pending = pendingRevealRef.current
     if (pending === undefined) return
     revealNodeId(pending)
-  }, [boardId, revealNodeId, view])
+    // `boardView.loaded` is a dependency because the engine mounts only once the
+    // board has been read (U04 step 4): a reveal requested *during* that window
+    // finds no camera to move, and would otherwise stay pending until the user
+    // switched tabs again.
+  }, [boardId, revealNodeId, view, boardView.loaded])
 
   /**
    * Put one item returned by the host onto the canvas at its stored spot.
@@ -5197,6 +5284,10 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 onSelect: (ids: readonly string[]) => { setSelection(new Set(ids)) },
                 onDraft: updateLayoutDraft,
                 onRetry: retryTask,
+                // U04 step 4: §4.5's edit-and-resend, which the DOM canvas has
+                // always offered and the engine was missing — a failed task on the
+                // flow canvas had no way back to its own parameters.
+                onEditParams: editTaskParams,
                 onCancel: cancelTask,
                 onRemove: removeNode,
                 onOpen: openLightbox,
@@ -5210,6 +5301,12 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 onKeyUp: onCanvasKeyUp,
                 onCameraChange: adoptEngineCamera,
                 onApi: adoptEngineApi,
+                // U04 step 4: what the board opens at, and when it may open.
+                // `initialCamera` is the *stored* view, never the live mirror;
+                // `boardLoaded` is what keeps the engine from framing a board
+                // whose camera has not been read yet.
+                initialCamera: boardView.camera,
+                boardLoaded: boardView.loaded,
                 panMode: panHeld || handMode,
                 // §7.1/§7.3: the engine is what covers the canvas now, so it is
                 // also what has to accept a dropped file or library card.

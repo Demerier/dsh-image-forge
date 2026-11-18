@@ -93,17 +93,24 @@ import {
   fitWouldClamp,
   flowInteractionProps,
   flowNodeRects,
+  flowViewportProps,
   foldDragChanges,
+  initialFlowView,
   judgeConnection,
   planConnectionDrop,
   reseedFlowNodes,
+  reuseFlowNodes,
+  taskNodeActions,
   toFlowModel,
   type FlowConnectNode,
   type FlowConnectPlan,
   type FlowConnectionEvent,
   type FlowDragState,
+  type FlowInitialView,
   type FlowNodeSpec,
   type FlowSourceNode,
+  type FlowTaskAction,
+  type FlowTaskStatus,
 } from './canvas-flow-model.ts'
 import { connectionAnchor, nodeUnderPoint, previewPath, type ConnectionState } from './canvas-connections.ts'
 import {
@@ -184,6 +191,14 @@ export interface FlowCanvasApi {
   readonly fitView: () => { readonly clamped: boolean }
   /** Multiply the zoom around the viewport centre. */
   readonly zoomBy: (factor: number) => void
+  /**
+   * Put a world point in the middle of the viewport, keeping `zoom` (§7.4).
+   *
+   * The one camera move the studio cannot express by changing state: since step
+   * 1b React Flow owns the viewport, so "居中揭示" is a call on the instance and
+   * nothing else. `revealNodeId` reaches this through the handle.
+   */
+  readonly reveal: (center: Point, zoom: number) => void
   /** The camera React Flow is currently using, in the studio's convention. */
   readonly camera: () => Camera
   /** A viewport-relative point in world space. */
@@ -202,6 +217,8 @@ export interface FlowCanvasProps {
   readonly onDraft?: (nodeId: string, draft: BoardLayoutDraft) => void
   /** Re-submit a failed task with the parameters it kept (§4.5). */
   readonly onRetry?: (nodeId: string) => void
+  /** Refill the form with a failed task's snapshot (§4.5 edit-and-resend). */
+  readonly onEditParams?: (nodeId: string) => void
   /** Interrupt a task in flight. */
   readonly onCancel?: (nodeId: string) => void
   /** Drop a node from the canvas (never deletes a file). */
@@ -259,6 +276,26 @@ export interface FlowCanvasProps {
   readonly onCameraChange?: (camera: Camera) => void
   /** Handed the imperative handle once React Flow is live, `undefined` on unmount. */
   readonly onApi?: (api: FlowCanvasApi | undefined) => void
+
+  /* ---- U04 step 4: what a board opens at, and a task's own buttons --------- */
+
+  /**
+   * The view the **board** was stored at (`board.camera`), not the live camera.
+   *
+   * Read once, when the flow mounts, and only to decide the opening viewport:
+   * passing the studio's camera mirror here instead would make every pan a
+   * remount-shaped question, and passing it *late* would fit the board first and
+   * then jump to the stored view — two moves for one open.
+   */
+  readonly initialCamera?: Camera
+  /**
+   * Whether the board has been read yet. `false` holds the flow back, which is
+   * what makes {@link FlowCanvasProps.initialCamera} reliable: the studio mounts
+   * its canvas before the board arrives, so a flow mounted any earlier would
+   * open on a camera nobody had read yet. Absent means "the caller has nothing
+   * to wait for" (the pre-step-4 behaviour).
+   */
+  readonly boardLoaded?: boolean
 
   /* ---- U04 step 3: the wire (G26's gesture, on the engine) ---------------- */
 
@@ -508,22 +545,36 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     [props.onSelect, props.panMode],
   )
 
-  const actions = {
-    onDraft: props.onDraft,
-    onRetry: props.onRetry,
-    onCancel: props.onCancel,
-    onRemove: props.onRemove,
-    onOpen: props.onOpen,
-    onGenerateLayout: props.onGenerateLayout,
-  }
-
   // The model is pure data; the handlers ride along in `data` because React
   // Flow keeps `data` opaque and a node component is the only reader.
-  const flowNodes = useMemo(
-    () => reseedFlowNodes(model, live, dragRef.current.dragging)
-      .map((node) => ({ ...node, data: { ...node.data, actions } })),
-    [model, live, actions],
-  )
+  //
+  // The bundle is **one stable object**, and its members read the latest props
+  // off the ref rather than capturing them. Identity matters twice over: it keeps
+  // the node array from being rebuilt on every studio render, and it is what lets
+  // `reuseFlowNodes` keep an untouched node's object — and therefore skip its
+  // repaint — when a progress tick arrives. A fresh closure per render would make
+  // every node look changed, which is the flicker this stage is here to remove.
+  const actions = useMemo<FlowNodeActions>(() => ({
+    onDraft: (nodeId, draft) => { latest.current.onDraft?.(nodeId, draft) },
+    onRetry: (nodeId) => { latest.current.onRetry?.(nodeId) },
+    onEditParams: (nodeId) => { latest.current.onEditParams?.(nodeId) },
+    onCancel: (nodeId) => { latest.current.onCancel?.(nodeId) },
+    onRemove: (nodeId) => { latest.current.onRemove?.(nodeId) },
+    onOpen: (nodeId) => { latest.current.onOpen?.(nodeId) },
+    onGenerateLayout: (nodeId) => { latest.current.onGenerateLayout?.(nodeId) },
+  }), [])
+
+  // What was handed to React Flow last time. A reseed that changes one node's
+  // progress must not hand it forty new objects (see `reuseFlowNodes`).
+  const seedRef = useRef<readonly FlowNodeSpec[]>([])
+
+  const flowNodes = useMemo(() => {
+    const next = reseedFlowNodes(model, live, dragRef.current.dragging)
+      .map((node) => ({ ...node, data: { ...node.data, actions } }))
+    const stable = reuseFlowNodes(seedRef.current, next)
+    seedRef.current = stable
+    return stable
+  }, [model, live, actions])
 
   /**
    * One batch of React Flow's change stream.
@@ -586,6 +637,14 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
         latest.current.onCameraChange?.(cameraFromFlow(instance.getViewport()))
       },
       camera: () => cameraFromFlow(instance.getViewport()),
+      reveal: (center: Point, zoom: number) => {
+        // `setCenter` is the engine's own "put this world point in the middle".
+        // The zoom is the caller's (the camera's current one), because a reveal
+        // that also zoomed would land the node at a scale nobody asked for.
+        const target = Number.isFinite(zoom) && zoom > 0 ? clampZoom(zoom) : clampZoom(instance.getZoom())
+        void instance.setCenter(center.x, center.y, { zoom: target, duration: 0 })
+        latest.current.onCameraChange?.(cameraFromFlow(instance.getViewport()))
+      },
       screenToWorld: (point: Point) => instance.screenToFlowPosition({ x: point.x, y: point.y }),
     }
     latest.current.onApi?.(api)
@@ -913,6 +972,37 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
 
   const measured = size.width > 0 && size.height > 0
 
+  /**
+   * How this canvas opens, decided **once** — a restored viewport, or a fit.
+   *
+   * React Flow reads `defaultViewport` and `fitView` at init and nothing after,
+   * so re-deciding them on a later render would be ignored at best (a board that
+   * opens framed and then never moves) and re-frame the board at worst. The ref
+   * freezes the first answer; `initialFlowView` is what makes the two exclusive,
+   * and it is only asked when the studio says the board is there
+   * ({@link FlowCanvasProps.boardLoaded}) — asking earlier would answer "frame
+   * it" for a board whose camera had simply not been read yet.
+   */
+  const initialViewRef = useRef<FlowInitialView | undefined>(undefined)
+  if (props.boardLoaded === false) {
+    // The gate is closed, so the flow is unmounted: nothing is being drawn with
+    // this decision any more, and the next mount (another board, another read)
+    // must take its own.
+    initialViewRef.current = undefined
+  } else if (initialViewRef.current === undefined) {
+    initialViewRef.current = initialFlowView(props.initialCamera)
+  }
+  const initialView = initialViewRef.current
+  // Nothing on screen means nothing to command: a closed gate (or an unmeasured
+  // container) unmounts the flow, and the studio must stop holding a handle that
+  // points at a viewport nobody can see.
+  const flowLive = measured && initialView !== undefined
+  useEffect(() => {
+    if (flowLive) return
+    flowRef.current = undefined
+    latest.current.onApi?.(undefined)
+  }, [flowLive])
+
   return createElement(
     'div',
     {
@@ -931,7 +1021,7 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
       ...(props.onDragOver === undefined ? {} : { onDragOver: (event: ReactDragEvent<HTMLDivElement>) => { latest.current.onDragOver?.(event) } }),
       ...(props.onDrop === undefined ? {} : { onDrop: (event: ReactDragEvent<HTMLDivElement>) => { latest.current.onDrop?.(event) } }),
     },
-    measured
+    measured && initialView !== undefined
       ? createElement(
           ReactFlow,
           {
@@ -940,6 +1030,10 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             nodeTypes: FLOW_NODE_TYPES,
             edgeTypes: FLOW_EDGE_TYPES,
             ...interaction,
+            // U04 step 4: exactly one of `defaultViewport` / `fitView`, from the
+            // board's stored camera (see `flowViewportProps`). Both at once would
+            // be the board opening twice, in two places.
+            ...flowViewportProps(initialView),
             onInit,
             onNodesChange,
             onNodeClick,
@@ -956,7 +1050,6 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             onConnectStart,
             onConnectEnd,
             zoomOnScroll: true,
-            fitViewOptions: { padding: 0.2, maxZoom: 1 },
             proOptions: { hideAttribution: true },
           },
           createElement(CanvasBackground),
@@ -1014,6 +1107,7 @@ function useFlowZoom(): number {
 interface FlowNodeActions {
   readonly onDraft?: (nodeId: string, draft: BoardLayoutDraft) => void
   readonly onRetry?: (nodeId: string) => void
+  readonly onEditParams?: (nodeId: string) => void
   readonly onCancel?: (nodeId: string) => void
   readonly onRemove?: (nodeId: string) => void
   readonly onOpen?: (nodeId: string) => void
@@ -1114,7 +1208,49 @@ export function ImageFlowNode(props: NodeProps): ReactNode {
 }
 
 /**
- * A generation task: state, parameters, progress and the two actions its state
+ * How each task button reads. The set *which* buttons exist is
+ * `taskNodeActions`; this is only their copy, so the two cannot drift.
+ */
+const TASK_BUTTON_LOOK: Readonly<Record<FlowTaskAction, { readonly label: string; readonly title: string; readonly danger?: true }>> = {
+  retry: { label: '重试', title: '用相同的参数重新提交' },
+  edit: { label: '编辑参数', title: '把参数回填表单，改完再生成' },
+  cancel: { label: '取消', title: '中断这次生成' },
+  remove: { label: '移除', title: '从画布移除（不会删文件）', danger: true },
+}
+
+/**
+ * One task button, wired to the studio callback its action names.
+ *
+ * U04 step 4: the mapping is a switch over {@link FlowTaskAction} rather than
+ * four inline `onClick`s, so the set the pure function decides and the handlers a
+ * node actually carries are the same list — a state that gains a button cannot
+ * leave that button dead, and a click handler cannot appear for a button the
+ * state never shows.
+ */
+function taskButton(action: FlowTaskAction, nodeId: string, actions: FlowNodeActions): ReactNode {
+  const look = TASK_BUTTON_LOOK[action]
+  const fire = (): void => {
+    if (action === 'retry') actions.onRetry?.(nodeId)
+    else if (action === 'edit') actions.onEditParams?.(nodeId)
+    else if (action === 'cancel') actions.onCancel?.(nodeId)
+    else actions.onRemove?.(nodeId)
+  }
+  return createElement(
+    'button',
+    {
+      key: action,
+      type: 'button',
+      className: look.danger === true ? 'dsh-forge-flow-btn is-danger' : 'dsh-forge-flow-btn',
+      'data-task-action': action,
+      title: look.title,
+      onClick: fire,
+    },
+    look.label,
+  )
+}
+
+/**
+ * A generation task: state, parameters, progress and the buttons its state
  * justifies (§4.2/§4.5 — retry for a failure, cancel for one in flight).
  */
 export function TaskFlowNode(props: NodeProps): ReactNode {
@@ -1123,8 +1259,6 @@ export function TaskFlowNode(props: NodeProps): ReactNode {
   const zoom = useFlowZoom()
   const status = String(data['status'] ?? 'idle')
   const percent = typeof data['percent'] === 'number' ? Math.round(data['percent']) : 0
-  const failed = status === 'failed' || status === 'interrupted'
-  const running = status === 'idle' || status === 'queued' || status === 'running'
   const nodeId = String(data['nodeId'] ?? props.id)
   return createElement(
     'div',
@@ -1166,18 +1300,10 @@ export function TaskFlowNode(props: NodeProps): ReactNode {
     createElement(
       'div',
       { className: 'dsh-forge-flow-actions nodrag nopan' },
-      failed ? createElement('button', { type: 'button', className: 'dsh-forge-flow-btn', onClick: () => { actions.onRetry?.(nodeId) } }, '重试') : null,
-      running ? createElement('button', { type: 'button', className: 'dsh-forge-flow-btn', onClick: () => { actions.onCancel?.(nodeId) } }, '取消') : null,
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: 'dsh-forge-flow-btn is-danger',
-          title: '从画布移除（不会删文件）',
-          onClick: () => { actions.onRemove?.(nodeId) },
-        },
-        '移除',
-      ),
+      // The buttons each state justifies, from the pure mapping: failed and
+      // interrupted offer 重试 + 编辑参数, a live task offers 取消, and 移除 is
+      // always there because "take it off the canvas" is never about the state.
+      ...taskNodeActions(status as FlowTaskStatus).map((action) => taskButton(action, nodeId, actions)),
     ),
     createElement(NodeHandles, { kind: 'task' }),
   )

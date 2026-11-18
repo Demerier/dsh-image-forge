@@ -27,7 +27,9 @@ import {
   CANVAS_NODE_WIDTH,
   MAX_NODE_WIDTH,
   MIN_NODE_WIDTH,
+  centerOn,
   screenToWorld,
+  worldToScreen,
 } from '../src/studio-canvas.ts'
 import { CONNECT_THRESHOLD, linkParents } from '../src/canvas-connections.ts'
 import {
@@ -41,11 +43,15 @@ import {
   LAYOUT_NODE_DEFAULT_WIDTH,
   LAYOUT_NODE_MAX_WIDTH,
   LAYOUT_NODE_MIN_WIDTH,
+  clampLayoutNodeWidth,
+  draftToEditorState,
   layoutNodeHeight,
+  stateToDraft,
 } from '../src/layout-editor.ts'
 import {
   EMPTY_FLOW_DRAG,
   FLOW_EDGE_TYPE_LINEAGE,
+  FLOW_FIT_OPTIONS,
   FLOW_NODE_TYPE_DRAFT,
   FLOW_NODE_TYPE_IMAGE,
   FLOW_NODE_TYPE_LAYOUT,
@@ -64,14 +70,20 @@ import {
   flowInteractionProps,
   flowModelFingerprint,
   flowNodeRects,
+  flowViewportOf,
+  flowViewportProps,
   foldDragChanges,
   imageMeta,
   imageTitle,
+  initialFlowView,
   judgeConnection,
   nodeSizeOf,
   nodeTypeOf,
   planConnectionDrop,
+  planReveal,
   reseedFlowNodes,
+  reuseFlowNodes,
+  taskNodeActions,
   taskParamsText,
   taskPercent,
   taskPromptLine,
@@ -809,3 +821,223 @@ test('the edge a drop makes is the edge the model draws, with no request in betw
   const again = linkParents(linked[1].parents, 'a')
   assert.equal(again, linked[1].parents, 'a duplicate drop must not mint a second command')
 })
+
+/* -------------------------------------------------------------------------- */
+/* U04 step 4: the opening view, 居中揭示, a task’s buttons (no DOM)           */
+/* -------------------------------------------------------------------------- */
+//
+// Three behaviours this stage had to add, and all three are decided before a
+// pixel exists: what viewport a board opens at, which camera a reveal moves, and
+// which buttons a task state offers. The engine's half of each (React Flow's
+// `defaultViewport` vs `fitView`, `instance.setCenter`, the `<button>` list) needs
+// a browser and stays on the manual checklist; what it *decides* is here.
+
+test('a board opens at the camera it was stored with, not at a fresh fit', () => {
+  // The studio stores "the world point at the viewport's top-left, plus the
+  // zoom"; React Flow wants `screen = world * zoom + translate`. Converting is
+  // the inverse of what the pane already reports back (`cameraFromFlow`).
+  const stored = { x: -28, y: -28, zoom: 1 }
+  assert.deepEqual(flowViewportOf(stored), { x: 28, y: 28, zoom: 1 })
+  const zoomed = { x: 120, y: 40, zoom: 2 }
+  assert.deepEqual(cameraFromFlow(flowViewportOf(zoomed)), zoomed, 'a stored view survives the round trip')
+  assert.deepEqual(cameraFromFlow(flowViewportOf(stored)), stored)
+
+  // A camera that cannot project is *no* stored view, never a viewport at
+  // infinity: a board whose zoom was written as 0 opens framed, not blank.
+  for (const camera of [
+    undefined,
+    null,
+    { x: 0, y: 0, zoom: 0 },
+    { x: 0, y: 0, zoom: Number.NEGATIVE_INFINITY },
+    { x: Number.NaN, y: 0, zoom: 1 },
+    { x: 0, y: 0, zoom: Number.NaN },
+  ]) {
+    assert.equal(flowViewportOf(camera), undefined)
+    assert.deepEqual(initialFlowView(camera), { kind: 'fit' })
+  }
+
+  // A view stored outside the canvas's zoom band reopens at the band's edge —
+  // and the *world point* is still the stored one, so x/y scale with the clamped
+  // zoom (the two constants are the DOM canvas's own band, restated).
+  assert.deepEqual(flowViewportOf({ x: -100, y: -50, zoom: 0.01 }), { x: 10, y: 5, zoom: CANVAS_MIN_ZOOM })
+  assert.deepEqual(flowViewportOf({ x: -10, y: -10, zoom: 99 }), { x: 80, y: 80, zoom: CANVAS_MAX_ZOOM })
+
+  // And a board that *did* store a view opens exactly there.
+  assert.deepEqual(initialFlowView(stored), { kind: 'viewport', viewport: { x: 28, y: 28, zoom: 1 } })
+})
+
+test('restoring the view and framing the board are one decision, never both', () => {
+  // React Flow applies `defaultViewport` and `fitView` on init and the later one
+  // wins, so a board handed both opens twice — first where it was left, then
+  // framed. The props are the exclusion: each branch carries one key and not the
+  // other, not even a `false`.
+  const restored = flowViewportProps(initialFlowView({ x: -28, y: -28, zoom: 1 }))
+  assert.deepEqual(restored, { defaultViewport: { x: 28, y: 28, zoom: 1 } })
+  assert.equal('fitView' in restored, false, 'a restored board must not also be framed')
+  assert.equal('fitViewOptions' in restored, false)
+
+  const framed = flowViewportProps(initialFlowView(undefined))
+  assert.deepEqual(framed, { fitView: true, fitViewOptions: { ...FLOW_FIT_OPTIONS } })
+  assert.equal('defaultViewport' in framed, false, 'a framed board must not also be restored')
+
+  // A new board is the same answer as an unreadable one: frame it.
+  assert.deepEqual(initialFlowView(undefined), { kind: 'fit' })
+})
+
+test('居中揭示 moves the engine’s camera, and the DOM camera only when that is mounted', () => {
+  const rect = { x: 100, y: 40, width: 208, height: 240 }
+  const center = { x: 204, y: 160 }
+  // The engine is what is on screen since step 1b, so the reveal has to be a call
+  // on it — moving the studio's camera mirror moved nothing.
+  assert.deepEqual(planReveal({ rect, canvas: 'flow', zoom: 0.5 }), { kind: 'flow', center, zoom: 0.5 })
+  // The DOM fallback keeps its own path and gets the same point.
+  assert.deepEqual(planReveal({ rect, canvas: 'dom', zoom: 2 }), { kind: 'dom', center, zoom: 2 })
+  // Nothing mounted, or the node is not on the board yet: remember the id.
+  assert.deepEqual(planReveal({ rect, canvas: 'none', zoom: 1 }), { kind: 'pending' })
+  assert.deepEqual(planReveal({ canvas: 'flow', zoom: 1 }), { kind: 'pending' })
+  // A camera with no usable zoom centres at 1 instead of at `Infinity`.
+  assert.deepEqual(planReveal({ rect, canvas: 'flow', zoom: 0 }), { kind: 'flow', center, zoom: 1 })
+  assert.deepEqual(planReveal({ rect, canvas: 'flow', zoom: Number.NaN }), { kind: 'flow', center, zoom: 1 })
+
+  // The point really is the node's centre: the DOM path's own `centerOn` turns it
+  // into a camera that puts it in the middle of the viewport.
+  const viewport = { width: 800, height: 600 }
+  const plan = planReveal({ rect, canvas: 'dom', zoom: 1 })
+  const camera = centerOn(plan.center, viewport, plan.zoom)
+  assert.deepEqual(worldToScreen(camera, plan.center), { x: 400, y: 300 })
+})
+
+test('a task node’s buttons are decided by its state, and every state is decided', () => {
+  // §4.5: a failure offers a way back (its own snapshot), a run in flight offers
+  // an interrupt, and 移除 — the one button about the board rather than the run —
+  // is never conditional.
+  assert.deepEqual(taskNodeActions('failed'), ['retry', 'edit', 'remove'])
+  assert.deepEqual(taskNodeActions('interrupted'), ['retry', 'edit', 'remove'])
+  assert.deepEqual(taskNodeActions('idle'), ['cancel', 'remove'])
+  assert.deepEqual(taskNodeActions('queued'), ['cancel', 'remove'])
+  assert.deepEqual(taskNodeActions('running'), ['cancel', 'remove'])
+  assert.deepEqual(taskNodeActions('done'), ['remove'])
+
+  // The mapping is total over the painted states, and no state doubles a button.
+  for (const status of Object.keys(FLOW_TASK_BADGES)) {
+    const buttons = taskNodeActions(status)
+    assert.ok(buttons.length > 0, status + ' must offer something')
+    assert.equal(buttons.at(-1), 'remove', status + ' must stay removable')
+    assert.equal(new Set(buttons).size, buttons.length, status + ' must not repeat a button')
+  }
+  // The button the engine lost in step 1b is the one a failure cannot do without.
+  assert.ok(taskNodeActions('failed').includes('edit'), 'a failure can refill the form')
+  assert.equal(taskNodeActions('done').includes('retry'), false, 'a finished task needs no retry')
+})
+
+test('a progress tick repaints the node it is about, and no other', () => {
+  // The stream sends a frame per step. Each one re-derives the whole model, so
+  // the question this asserts is the one that decides whether a large board
+  // stutters once per frame: does the array React Flow receives keep the
+  // *identity* of the nodes the tick said nothing about?
+  //
+  // The board is built once — as the studio does — and a tick replaces only the
+  // node it is about, so the layout node's draft (an object the editor holds)
+  // keeps its identity the way it does in the panel.
+  const board = [
+    imageNode('a', { x: 0, y: 0 }),
+    taskNode('t', { x: 300, y: 0, status: 'running', progress: { percent: 10 } }),
+    layoutNode('l', { x: 0, y: 400 }),
+  ]
+  const tick = (percent) => board.map((node) => (
+    node.id === 't' ? { ...node, progress: { percent } } : node
+  ))
+  const before = reseedFlowNodes(toFlowModel(tick(10)), new Map(), new Set())
+  const after = reseedFlowNodes(toFlowModel(tick(42)), new Map(), new Set())
+  assert.notEqual(before[1], after[1], 'the reseed alone hands back new objects for every node')
+
+  const stable = reuseFlowNodes(before, after)
+  assert.deepEqual(stable.map((node) => node.id), ['a', 't', 'l'], 'the board is still the board')
+  assert.equal(stable[0], before[0], 'an untouched picture keeps its object, so its painter does not run')
+  assert.equal(stable[2], before[2], 'and so does an untouched layout node')
+  assert.notEqual(stable[1], before[1], 'the ticking task is a new node…')
+  assert.equal(stable[1].data.percent, 42, '…carrying the new progress')
+  assert.equal(stable[1].data.statusText, '生成中…', 'and the state it implies')
+
+  // A batch that changed nothing reuses the whole array, object for object.
+  const same = reuseFlowNodes(before, reseedFlowNodes(toFlowModel(tick(10)), new Map(), new Set()))
+  assert.deepEqual(same.map((node, index) => node === before[index]), [true, true, true])
+
+  // What is *not* payload still counts: a selection or a drag is a repaint.
+  const selected = reseedFlowNodes(toFlowModel(tick(10), { selected: new Set(['a']) }), new Map(), new Set())
+  const withSelection = reuseFlowNodes(before, selected)
+  assert.notEqual(withSelection[0], before[0], 'a newly selected node repaints')
+  assert.equal(withSelection[1], before[1], 'and its neighbours do not')
+
+  // A node that left the board is simply gone; a dragged one carries its live
+  // position forward (the S2 rule `reseedFlowNodes` already owns).
+  const moved = reseedFlowNodes(toFlowModel(tick(10)), new Map([['t', { x: 900, y: 50 }]]), new Set(['t']))
+  assert.equal(reuseFlowNodes(before, moved)[1].position.x, 900)
+  assert.deepEqual(reuseFlowNodes(before, moved.slice(1)).map((node) => node.id), ['t', 'l'])
+})
+
+test('a reloaded layout node keeps its draft and the box its editor is mounted in', () => {
+  // What `nodesFromBoard` does with a stored v2 layout entry (§8.1, C13): clamp
+  // the stored width into the band and keep the stored height when there is one.
+  const stored = {
+    id: 'l1',
+    x: 40,
+    y: 80,
+    parents: [],
+    w: 700,
+    h: 512,
+    draft: {
+      width: 1536,
+      height: 1024,
+      bbox_coord_space: 'abs',
+      bbox_format: 'xyxy',
+      summary: { caption: '黄昏的山谷' },
+      items: [{ label: 'object', caption: '山', bbox: [10, 20, 300, 400] }],
+    },
+  }
+  const rebuild = (entry) => {
+    const width = clampLayoutNodeWidth(entry.w ?? LAYOUT_NODE_DEFAULT_WIDTH)
+    return {
+      kind: 'layout',
+      id: entry.id,
+      x: entry.x,
+      y: entry.y,
+      parents: entry.parents,
+      w: width,
+      h: entry.h ?? layoutNodeHeight(width, entry.draft),
+      draft: entry.draft,
+    }
+  }
+
+  const node = rebuild(stored)
+  assert.equal(nodeSizeOf(node).width, 700)
+  assert.equal(nodeSizeOf(node).height, 512, 'a stored height is the box the user left the node in')
+
+  // "刷新后草稿还在" at byte level: the draft round-trips through the embedded
+  // editor's own import/export pair, which is what a remount does.
+  assert.deepEqual(stateToDraft(draftToEditorState(node.draft)), stored.draft)
+
+  // And the box the canvas paints is the box that editor is mounted in — the same
+  // number, from one function. That is why `pointerScale` stays at its default of
+  // 1 (see `src/canvas-pane.ts`): the editor measures this box with
+  // `getBoundingClientRect` inside the zoomed viewport, so the measurement
+  // already contains the zoom and passing it again would apply it twice.
+  const [painted] = toFlowModel([node]).nodes
+  assert.equal(painted.width, nodeSizeOf(node).width)
+  assert.equal(painted.height, nodeSizeOf(node).height)
+  assert.equal(painted.width, clampLayoutNodeWidth(node.w))
+
+  // A resize is a width alone: the height follows the draft's proportion and the
+  // draft — therefore the compiled layout a generation would send — is untouched.
+  const compiled = JSON.stringify(stored.draft)
+  for (const width of [LAYOUT_NODE_MIN_WIDTH, LAYOUT_NODE_DEFAULT_WIDTH, LAYOUT_NODE_MAX_WIDTH]) {
+    const resized = rebuild({ ...stored, w: width, h: undefined })
+    assert.equal(nodeSizeOf(resized).width, width)
+    assert.equal(nodeSizeOf(resized).height, layoutNodeHeight(width, stored.draft))
+    assert.equal(JSON.stringify(resized.draft), compiled, 'resizing must not touch the draft')
+  }
+  // A junk stored width lands in the band rather than on a 0-wide node.
+  assert.equal(nodeSizeOf(rebuild({ ...stored, w: Number.NaN })).width, LAYOUT_NODE_DEFAULT_WIDTH)
+})
+
+

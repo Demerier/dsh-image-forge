@@ -173,6 +173,41 @@ export function taskPercent(task: FlowTaskSource): number {
   return Math.min(100, Math.max(0, Math.round(percent as number)))
 }
 
+/**
+ * The buttons a task node's state justifies, in the order the painter draws them.
+ *
+ * U04 step 4: the set used to be an `if` chain inside the painter, where the only
+ * way to check it was to render a node. It is the *same* chain — failed and
+ * interrupted get 重试 + 编辑参数, anything still coming 取消, and 移除 always,
+ * because "take it off the canvas" is never about the state — but as data it can
+ * be asserted for all six states in `test/canvas-flow-model.test.mjs`, and the
+ * painter's job becomes mapping four ids onto four handlers.
+ *
+ * `编辑参数` is the §4.5 edit-and-resend the DOM canvas has always offered: refill
+ * the form with the failed task's own snapshot. The engine shipped without it in
+ * step 1b, so a failure on the flow canvas had no way back to the prompt.
+ */
+export function taskNodeActions(status: FlowTaskStatus): readonly FlowTaskAction[] {
+  switch (status) {
+    case 'failed':
+    case 'interrupted':
+      return ['retry', 'edit', 'remove']
+    case 'idle':
+    case 'queued':
+    case 'running':
+      return ['cancel', 'remove']
+    case 'done':
+      return ['remove']
+    default:
+      // An unknown status is not a reason to offer a destructive action only by
+      // accident: 移除 stays (the node is not going anywhere) and nothing else.
+      return ['remove']
+  }
+}
+
+/** One button a task node offers; the painter maps these onto its actions. */
+export type FlowTaskAction = 'retry' | 'edit' | 'cancel' | 'remove'
+
 /** First line of the prompt, which is the only name an unfinished task has. */
 export function taskPromptLine(params: BoardTaskParams): string {
   const line = params.prompt.split('\n')[0]?.trim() ?? ''
@@ -635,6 +670,55 @@ export function reseedFlowNodes(
 }
 
 /**
+ * The node array React Flow should draw right now, with unchanged nodes reused.
+ *
+ * A progress tick re-derives the whole model (one task's `percent`/`statusText`
+ * changed), and `reseedFlowNodes` faithfully returns *new objects* for every
+ * node. React Flow keys its repaint on the node object, so that array means "the
+ * whole board changed": every painter re-renders, every `img` re-checks its
+ * `src`, and on a large board the canvas visibly stutters once per stream frame.
+ *
+ * So the reseed is followed by this: a node whose every drawn field is equal to
+ * the one on screen keeps its **identity**, and only the node the tick was about
+ * is new. `data` is compared key by key because that is what a painter reads —
+ * the studio's action bundle is one stable object (see `FlowCanvas`), so a tick
+ * that changes nothing about a node changes nothing about its `data` either.
+ *
+ * Only the array and the node objects are shared; nothing is mutated, so a caller
+ * holding the previous array still sees the previous board.
+ */
+export function reuseFlowNodes(
+  previous: readonly FlowNodeSpec[],
+  next: readonly FlowNodeSpec[],
+): FlowNodeSpec[] {
+  if (previous.length === 0) return [...next]
+  const known = new Map<string, FlowNodeSpec>()
+  for (const node of previous) known.set(node.id, node)
+  return next.map((node) => {
+    const before = known.get(node.id)
+    return before !== undefined && sameFlowNode(before, node) ? before : node
+  })
+}
+
+/** Whether two node specs would paint the same pixels. */
+function sameFlowNode(left: FlowNodeSpec, right: FlowNodeSpec): boolean {
+  if (left === right) return true
+  if (left.type !== right.type) return false
+  if (left.position.x !== right.position.x || left.position.y !== right.position.y) return false
+  if (left.width !== right.width || left.height !== right.height) return false
+  if (left.selected !== right.selected || left.draggable !== right.draggable) return false
+  const leftData = left.data as Record<string, unknown>
+  const rightData = right.data as Record<string, unknown>
+  if (leftData === rightData) return true
+  const keys = Object.keys(leftData)
+  if (keys.length !== Object.keys(rightData).length) return false
+  for (const key of keys) {
+    if (!Object.is(leftData[key], rightData[key])) return false
+  }
+  return true
+}
+
+/**
  * The props React Flow is configured with, as data.
  *
  * Kept here rather than inline in the JSX because these are the knobs whose
@@ -773,6 +857,129 @@ export function fitWouldClamp(
   if (bounds === undefined) return false
   if (!Number.isFinite(minZoom) || minZoom <= 0) return false
   return fitZoomFor(bounds, viewport, padding) < minZoom
+}
+
+/* -------------------------------------------------------------------------- */
+/* Where the canvas opens, and where 居中揭示 lands (U04 step 4)               */
+/* -------------------------------------------------------------------------- */
+//
+// Two camera questions the engine owns but cannot answer alone, because both
+// start from something only the studio knows:
+//
+// 1. **What a board opens at.** Step 1b mounted the flow with `fitView`, so a
+//    board reopened framed instead of where it was left: the camera was being
+//    *saved* on every pan and never read back. The stored camera is the studio's
+//    (`board.camera`), so "restore that view, or frame instead" is decided here
+//    as data and the pane hands the answer to React Flow's two — mutually
+//    exclusive — props. That exclusion is the whole point of the shape: one
+//    branch carries `defaultViewport` and the other carries `fitView`, never
+//    both, because React Flow applies both on init and the second one wins, which
+//    is a board opening twice in two places.
+// 2. **Where 居中揭示 lands.** `revealNodeId` moved the studio's camera mirror,
+//    and under the engine that mirror moves nothing — React Flow's viewport is
+//    the only camera there is. The coordinates are the same arithmetic either
+//    way (the centre of the node's box), so which camera to drive is a decision
+//    and belongs here; the DOM fallback keeps driving its own.
+
+/** One padding for every fit this canvas performs (10 % on each side). */
+export const FLOW_FIT_OPTIONS = { padding: 0.2, maxZoom: 1 } as const
+
+/**
+ * A studio camera as React Flow's viewport transform — the inverse of
+ * {@link cameraFromFlow}.
+ *
+ * `undefined` means "this camera cannot project": a non-finite offset, or a zoom
+ * that is not positive. The caller must treat that as *no* stored view rather
+ * than as a broken one — dividing by it or handing it to React Flow would put
+ * every node at infinity. The zoom is clamped into the canvas's own band, so a
+ * board stored at 0.02 reopens at the floor that can still be seen.
+ */
+export function flowViewportOf(
+  camera: Camera | undefined | null,
+): { readonly x: number; readonly y: number; readonly zoom: number } | undefined {
+  if (camera === undefined || camera === null) return undefined
+  const { x, y } = camera
+  const zoom = camera.zoom
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined
+  if (!Number.isFinite(zoom) || zoom <= 0) return undefined
+  const clamped = Math.min(FLOW_MAX_ZOOM, Math.max(FLOW_MIN_ZOOM, zoom))
+  return { x: -x * clamped, y: -y * clamped, zoom: clamped }
+}
+
+/** How a board's canvas opens: at the view it was stored with, or framed. */
+export type FlowInitialView =
+  | { readonly kind: 'viewport'; readonly viewport: { readonly x: number; readonly y: number; readonly zoom: number } }
+  | { readonly kind: 'fit' }
+
+/**
+ * The opening view for a stored camera.
+ *
+ * `undefined` (a board that never stored one, or a camera that cannot project)
+ * is "frame the board"; anything else is "put the viewport back". The two are
+ * exhaustive by construction — there is no third state, and no state in which
+ * both happen.
+ */
+export function initialFlowView(camera: Camera | undefined | null): FlowInitialView {
+  const viewport = flowViewportOf(camera)
+  return viewport === undefined ? { kind: 'fit' } : { kind: 'viewport', viewport }
+}
+
+/**
+ * The viewport half of React Flow's props for one opening view.
+ *
+ * Spread onto `<ReactFlow>`; the keys that are absent are the decision — a
+ * restored board has no `fitView`, and a framed one has no `defaultViewport`.
+ */
+export interface FlowViewportProps {
+  readonly fitView?: true
+  readonly fitViewOptions?: { readonly padding: number; readonly maxZoom: number }
+  readonly defaultViewport?: { readonly x: number; readonly y: number; readonly zoom: number }
+}
+
+/** {@link FlowViewportProps} for one opening view (see {@link initialFlowView}). */
+export function flowViewportProps(view: FlowInitialView): FlowViewportProps {
+  if (view.kind === 'fit') return { fitView: true, fitViewOptions: { ...FLOW_FIT_OPTIONS } }
+  return { defaultViewport: { ...view.viewport } }
+}
+
+/** Which canvas a reveal request has to move. */
+export type FlowRevealCanvas = 'flow' | 'dom' | 'none'
+
+/** What a request to centre the canvas on one node resolves to. */
+export type FlowRevealPlan =
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'flow'; readonly center: Point; readonly zoom: number }
+  | { readonly kind: 'dom'; readonly center: Point; readonly zoom: number }
+
+/** What the studio knows when `revealNodeId` runs. */
+export interface FlowRevealInput {
+  /** The node's world rectangle; absent when the id is not on this board. */
+  readonly rect?: Rect | undefined
+  /** The mounted canvas: the engine, the DOM fallback, or neither yet. */
+  readonly canvas: FlowRevealCanvas
+  /** The zoom to keep while centring — the camera's current one. */
+  readonly zoom: number
+}
+
+/**
+ * Decide what "centre on this node" means right now (§7.4).
+ *
+ * `pending` is the state the studio already handles by remembering the id: the
+ * node is not on the board yet, or the canvas has not mounted, and revealing it
+ * later must still work. Otherwise the answer names the canvas to drive and the
+ * world point to put in the middle, which is the same point for both engines: a
+ * non-positive zoom falls back to 1 instead of centring at an unreadable scale.
+ */
+export function planReveal(input: FlowRevealInput): FlowRevealPlan {
+  const rect = input.rect
+  if (rect === undefined) return { kind: 'pending' }
+  if (input.canvas === 'none') return { kind: 'pending' }
+  const zoom = Number.isFinite(input.zoom) && input.zoom > 0 ? input.zoom : 1
+  return {
+    kind: input.canvas,
+    center: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+    zoom,
+  }
 }
 
 /* -------------------------------------------------------------------------- */
