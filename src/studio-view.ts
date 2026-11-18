@@ -122,6 +122,7 @@ import {
   type ConnectNode,
   type ConnectionState,
 } from './canvas-connections.ts'
+import type { FlowConnectionEvent } from './canvas-flow-model.ts'
 import {
   DEFAULT_LAYOUT_HEIGHT,
   DEFAULT_LAYOUT_WIDTH,
@@ -2822,8 +2823,66 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
 
   /** Release a wire on blank canvas: ask what to build there (G26). */
   const openWireMenu = useCallback((world: Point, sourceId: string, screen: Point) => {
+    // The card the drop opens and the right-click menu are alternatives, not
+    // neighbours: whichever gesture just ran, only its own card may be open
+    // (the DOM canvas clears these at handle-press; the flow canvas reports the
+    // press through `beginEngineConnection` instead).
+    setMenu(undefined)
+    setTransfer(undefined)
     setWireMenu({ x: screen.x, y: screen.y, world, sourceId })
   }, [])
+
+  /**
+   * A wire left a handle on the React Flow canvas (U04 step 3).
+   *
+   * Only the transient cards are cleared: the wire is about to decide where the
+   * next node goes, and a menu left open behind it would be one click away from
+   * acting on the wrong spot.
+   */
+  const beginEngineConnection = useCallback(() => {
+    setMenu(undefined)
+    setTransfer(undefined)
+    setWireMenu(undefined)
+    setAssetPick(undefined)
+  }, [])
+
+  /**
+   * Execute what a released wire means (U04 step 3).
+   *
+   * The engine has already decided *which* of the three things happened
+   * (`planConnectionDrop`), so this is a dispatch and nothing else — and it
+   * dispatches onto the **same** callbacks the hand-rolled canvas uses, which is
+   * what keeps one behaviour behind two renderers:
+   *
+   * - `edge` → `commitWireEdge`: `parents += source`, one debounced board write,
+   *   one undo step. **No request is made** — recording lineage must not cost a
+   *   generation (G26's whole point).
+   * - `menu` → the same node-type card, at the release point, in container
+   *   pixels so it does not scale with the zoom.
+   * - `cancel` → nothing built, nothing saved, nothing on the undo stack. The
+   *   two refusals a user cannot see the reason for (a cycle, a target that is
+   *   not a picture) say why; the rest are silent by design.
+   */
+  const endEngineConnection = useCallback((event: FlowConnectionEvent) => {
+    const plan = event.plan
+    if (plan.kind === 'edge') {
+      commitWireEdge(plan.sourceId, plan.toId)
+      return
+    }
+    if (plan.kind === 'menu') {
+      openWireMenu(plan.worldPoint, plan.sourceId, event.screen)
+      return
+    }
+    if (plan.reason === 'cycle') {
+      setNote('这条线会绕回去：血缘只能是单向的派生，不能成环。')
+      return
+    }
+    if (plan.reason === 'kind') {
+      setNote('只能连到图片节点：参考关系要有文件可指。')
+      return
+    }
+    // `idle` / `returned` / `escaped` / `missing`: the user withdrew the wire.
+  }, [commitWireEdge, openWireMenu])
 
   /**
    * Pointer-down on a node's output handle (G26 §1).
@@ -5156,6 +5215,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 // also what has to accept a dropped file or library card.
                 onDragOver: onCanvasDragOver,
                 onDrop: onCanvasDrop,
+                // U04 step 3: the wire. The drop is classified by the engine's
+                // own pure planner and executed by the callbacks above, so both
+                // canvases write lineage and open the same card.
+                onConnectStart: beginEngineConnection,
+                onConnectEnd: endEngineConnection,
               }),
             canvasSlot === undefined
               ? createElement(

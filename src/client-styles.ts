@@ -403,6 +403,17 @@ export const CANVAS_FLOW_CSS = `
 .dsh-forge-flow-edge{stroke:rgba(127,127,127,.55);stroke-width:1.5;fill:none}
 .react-flow__edge.selected .dsh-forge-flow-edge{stroke:#3b82f6;stroke-width:2}
 .dsh-forge-flow-edge-label{position:absolute;padding:1px 5px;border-radius:4px;background:color-mix(in srgb,Canvas 88%,transparent);color:inherit;font-size:10px;line-height:1.4;opacity:.8;white-space:nowrap;pointer-events:none;box-shadow:0 0 0 1px rgba(127,127,127,.24)}
+/* U04 step 3: the wire. Painted by the pane in container pixels (see paintWire
+   in canvas-pane.ts), so the engine's own line is off: one wire, one coordinate
+   space, and the preview's cubic is the committed edge's. */
+.react-flow__connectionline{display:none}
+.dsh-forge-flow-wire{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:5}
+.dsh-forge-flow-wire-path{fill:none;stroke:rgba(59,130,246,.92);stroke-width:2.5;stroke-dasharray:4 4;stroke-linecap:round}
+.dsh-forge-flow-wire[data-connect-preview="valid"] .dsh-forge-flow-wire-path{stroke:#3b82f6;stroke-width:2.8}
+.dsh-forge-flow-wire[data-connect-preview="refused"] .dsh-forge-flow-wire-path{stroke:rgba(220,38,38,.85);stroke-dasharray:2 4}
+.dsh-forge-flow-handle.is-out{cursor:crosshair}
+.dsh-forge-flow-handle:hover{opacity:1}
+.react-flow__handle.valid{background:#16a34a;opacity:1}
 `
 
 /** The stylesheet text, exported so tests can pin the rules without a DOM. */

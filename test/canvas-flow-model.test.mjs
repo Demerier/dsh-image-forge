@@ -29,6 +29,7 @@ import {
   MIN_NODE_WIDTH,
   screenToWorld,
 } from '../src/studio-canvas.ts'
+import { CONNECT_THRESHOLD, linkParents } from '../src/canvas-connections.ts'
 import {
   CommandStack,
   marqueeSelection,
@@ -52,7 +53,12 @@ import {
   FLOW_SOURCE_HANDLE,
   FLOW_TARGET_HANDLE,
   FLOW_TASK_BADGES,
+  CONNECT_SOURCE_KINDS,
+  canAcceptConnection,
+  canStartConnection,
   cameraFromFlow,
+  connectionIsValid,
+  connectionNodesOf,
   fitWouldClamp,
   fitZoomFor,
   flowInteractionProps,
@@ -61,8 +67,10 @@ import {
   foldDragChanges,
   imageMeta,
   imageTitle,
+  judgeConnection,
   nodeSizeOf,
   nodeTypeOf,
+  planConnectionDrop,
   reseedFlowNodes,
   taskParamsText,
   taskPercent,
@@ -598,9 +606,16 @@ test('flowInteractionProps turns off every key the library would handle itself',
   const props = flowInteractionProps({ selectable: true })
   // Dragging is the library's, and it is the gesture whose result is written back.
   assert.equal(props.nodesDraggable, true)
-  // A wire is S3: a handle you can drag out of, that connects nothing, is worse
-  // than a handle that is plainly not yet a gesture.
-  assert.equal(props.nodesConnectable, false, 'nodesConnectable must stay false until S3')
+  // A wire *is* the library's now (U04 step 3): the drag lives in `XYHandle`, so
+  // the handles must be live or the gesture has nowhere to start.
+  assert.equal(props.nodesConnectable, true, 'nodesConnectable opens with the wire (S3)')
+  // …and the "a click is not a drag" rule is the same number the pure state
+  // machine uses, so a 2-px twitch never opens a menu on top of the node.
+  assert.equal(props.connectionDragThreshold, CONNECT_THRESHOLD)
+  assert.equal(CONNECT_THRESHOLD, 4, 'the threshold the wire is measured against')
+  // One gesture, one path: a click on a handle must not build an edge through
+  // the library's own click-to-connect, which never reaches the drop planner.
+  assert.equal(props.connectOnClick, false)
   // The three bindings this canvas implements itself (§6.1 selection, §6.3 the
   // shortcut table). Two handlers for one key is the bug this asserts against.
   assert.equal(props.deleteKeyCode, null, 'Delete belongs to resolveShortcut')
@@ -635,4 +650,162 @@ test('the fit question G15 asked is asked again for the new engine', () => {
   // Nothing to frame is never a clamp: the camera must not jump on an empty board.
   assert.equal(fitWouldClamp(undefined, viewport), false)
   assert.equal(fitZoomFor(undefined, viewport), Number.POSITIVE_INFINITY)
+})
+
+/* -------------------------------------------------------------------------- */
+/* U04 step 3: the wire — what a drag out of a handle decides                 */
+/* -------------------------------------------------------------------------- */
+//
+// The gesture itself (pointer capture, the engine's own drag) needs a browser.
+// What it *decides* does not: a release is classified by `planConnectionDrop`
+// from three inputs — the source, the release point and the board — and the
+// three answers are the whole feature: an edge, a menu, or nothing at all.
+//
+//   drop on blank canvas   → the node-type menu (image / layout / asset)
+//   drop on a picture      → lineage only: `parents += source`, no request
+//   drop back on the source, or on something that cannot be referenced,
+//   or a path that would close a cycle, or a click that never moved → cancel
+
+test('which nodes can start and accept a wire is one list, read by every layer', () => {
+  // Which kinds carry an output dot, and which can be landed on. The pane
+  // renders handles from these two predicates, `isValidConnection` refuses by
+  // them and `planConnectionDrop` cancels by them, so an affordance cannot
+  // disagree with the rule behind it.
+  assert.deepEqual([...CONNECT_SOURCE_KINDS], ['image', 'layout'])
+  assert.deepEqual(
+    [imageNode('i'), taskNode('t'), layoutNode('l'), draftNode('d')].map((node) => canStartConnection(node.kind)),
+    [true, false, true, false],
+    'a picture and a layout draft can be a provenance',
+  )
+  assert.deepEqual(
+    [imageNode('i'), taskNode('t'), layoutNode('l'), draftNode('d')].map((node) => canAcceptConnection(node.kind)),
+    [true, false, false, false],
+    'only a picture has a file a reference can point at',
+  )
+})
+
+test('the connection layer sees each node’s painted box, lineage and kind', () => {
+  const nodes = connectionNodesOf([
+    imageNode('a', { x: 10, y: 20, parents: ['z'] }),
+    layoutNode('l', { x: 300, y: 0 }),
+    taskNode('t', { x: 0, y: 400 }),
+    draftNode('d', ['t']),
+  ])
+  assert.deepEqual(nodes.map((node) => node.id), ['a', 'l', 't', 'd'], 'board order is preserved')
+  assert.deepEqual(nodes[0], {
+    id: 'a',
+    x: 10,
+    y: 20,
+    // The *painted* size, not the 1024-px file: the pointer lands on what is drawn.
+    width: nodeSizeOf(imageNode('a')).width,
+    height: nodeSizeOf(imageNode('a')).height,
+    parents: ['z'],
+    kind: 'image',
+  })
+  assert.equal(nodes[1].kind, 'layout')
+  assert.deepEqual(nodes[3].parents, ['t'])
+})
+
+test('a wire lands on a picture and nowhere else', () => {
+  const nodes = connectionNodesOf([
+    imageNode('a', { x: 0, y: 0 }),
+    imageNode('b', { x: 400, y: 0 }),
+    layoutNode('l', { x: 800, y: 0 }),
+    taskNode('t', { x: 0, y: 400 }),
+  ])
+  const judge = (sourceId, targetId) => judgeConnection({ sourceId, targetId, nodes })
+
+  assert.equal(judge('a', 'b'), 'ok', 'a picture may reference another picture')
+  assert.equal(judge('a', 'a'), 'self', 'and never itself')
+  assert.equal(judge('a', 'l'), 'kind', 'a layout draft has no file to reference')
+  assert.equal(judge('a', 't'), 'kind', 'a task in flight has no file either')
+  assert.equal(judge('l', 'a'), 'ok', 'a layout draft may be the provenance of a picture')
+  assert.equal(judge('t', 'a'), 'kind', 'a task cannot start a wire')
+  assert.equal(judge('a', 'nobody'), 'missing', 'an id this board does not hold cannot be joined')
+  // The boolean React Flow asks for is the same judgement.
+  assert.equal(connectionIsValid({ sourceId: 'a', targetId: 'b', nodes }), true)
+  assert.equal(connectionIsValid({ sourceId: 'a', targetId: 'l', nodes }), false)
+})
+
+test('lineage refuses to close a cycle', () => {
+  // a → b → c already recorded; wiring c → a would make c its own ancestor.
+  const nodes = connectionNodesOf([
+    imageNode('a', { x: 0, y: 0 }),
+    imageNode('b', { x: 0, y: 200, parents: ['a'] }),
+    imageNode('c', { x: 0, y: 400, parents: ['b'] }),
+  ])
+  assert.equal(judgeConnection({ sourceId: 'c', targetId: 'a', nodes }), 'cycle')
+  assert.equal(judgeConnection({ sourceId: 'b', targetId: 'a', nodes }), 'cycle')
+  // Downstream is the legal direction: a → c adds a second, already-implied
+  // parent to c, which is a DAG (a shortcut edge), not a loop.
+  assert.equal(judgeConnection({ sourceId: 'a', targetId: 'c', nodes }), 'ok')
+})
+
+test('a release on blank canvas asks what to build, at the point released', () => {
+  const nodes = connectionNodesOf([imageNode('a', { x: 0, y: 0 }), imageNode('b', { x: 600, y: 0 })])
+  const plan = planConnectionDrop({ sourceId: 'a', point: { x: 400, y: 300 }, travelled: true, nodes })
+  assert.deepEqual(plan, {
+    kind: 'menu',
+    sourceId: 'a',
+    worldPoint: { x: 400, y: 300 },
+  })
+})
+
+test('a release on a picture records lineage and nothing else', () => {
+  const nodes = connectionNodesOf([imageNode('a', { x: 0, y: 0 }), imageNode('b', { x: 600, y: 0 })])
+  const plan = planConnectionDrop({ sourceId: 'a', point: { x: 620, y: 40 }, travelled: true, nodes })
+  assert.deepEqual(plan, { kind: 'edge', sourceId: 'a', toId: 'b' })
+})
+
+test('every way of putting the wire back builds nothing', () => {
+  const nodes = connectionNodesOf([
+    imageNode('a', { x: 0, y: 0 }),
+    imageNode('b', { x: 600, y: 0, parents: ['a'] }),
+    layoutNode('l', { x: 0, y: 600 }),
+  ])
+  const drop = (sourceId, point, travelled = true) =>
+    planConnectionDrop({ sourceId, point, travelled, nodes })
+
+  // A click on the handle (React Flow applies the same threshold before it even
+  // reports a connection; the DOM canvas passes its own distance here).
+  assert.deepEqual(drop('a', { x: 10, y: 10 }, false), { kind: 'cancel', sourceId: 'a', reason: 'idle' })
+  // Put back inside the node it came from — checked against the source's own
+  // box, not as blank canvas, so no menu opens on top of it.
+  assert.deepEqual(drop('a', { x: 100, y: 100 }), { kind: 'cancel', sourceId: 'a', reason: 'returned' })
+  // A node that cannot take a reference.
+  assert.deepEqual(drop('a', { x: 10, y: 620 }), { kind: 'cancel', sourceId: 'a', reason: 'kind' })
+  // A path that would close the loop: b already descends from a.
+  assert.deepEqual(drop('b', { x: 20, y: 20 }), { kind: 'cancel', sourceId: 'b', reason: 'cycle' })
+  // The source itself is gone (a stale gesture): nothing to join.
+  assert.deepEqual(drop('ghost', { x: 700, y: 10 }), { kind: 'cancel', sourceId: 'ghost', reason: 'missing' })
+})
+
+test('the edge a drop makes is the edge the model draws, with no request in between', () => {
+  // The whole machine-readable path of "drop on a picture": plan → the target's
+  // parents → the model's edge list. Nothing here can start a generation — the
+  // value that comes out is a *parent id*, and the one write it causes is the
+  // board's position+lineage flush.
+  const board = [imageNode('a', { x: 0, y: 0 }), imageNode('b', { x: 600, y: 0 })]
+  const plan = planConnectionDrop({
+    sourceId: 'a',
+    point: { x: 620, y: 40 },
+    travelled: true,
+    nodes: connectionNodesOf(board),
+  })
+  assert.equal(plan.kind, 'edge')
+
+  const before = toFlowModel(board)
+  assert.deepEqual(before.edges, [], 'two unrelated pictures draw no wire')
+
+  const linked = board.map((node) => (
+    node.id === plan.toId ? { ...node, parents: linkParents(node.parents, plan.sourceId) } : node
+  ))
+  const after = toFlowModel(linked)
+  assert.deepEqual(after.edges.map((edge) => [edge.source, edge.target]), [['a', 'b']])
+  assert.deepEqual(after.danglingParents, [], 'and it resolves, because both ends are on this board')
+
+  // Re-dropping the same wire is a no-op by identity, which is how the studio
+  // keeps it out of the undo stack.
+  const again = linkParents(linked[1].parents, 'a')
+  assert.equal(again, linked[1].parents, 'a duplicate drop must not mint a second command')
 })

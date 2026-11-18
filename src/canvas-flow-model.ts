@@ -34,6 +34,8 @@
  */
 import { CANVAS_NODE_HEIGHT, CANVAS_NODE_WIDTH, nodeDisplaySize } from './studio-canvas.ts'
 import type { Camera, Point, Rect } from './studio-canvas.ts'
+import { CONNECT_THRESHOLD, nodeUnderPoint, reaches } from './canvas-connections.ts'
+import type { ConnectNode } from './canvas-connections.ts'
 import { clampLayoutNodeWidth, layoutNodeHeight } from './layout-editor.ts'
 import {
   STUDIO_NODE_THUMB_WIDTH,
@@ -638,8 +640,12 @@ export function reseedFlowNodes(
  * Kept here rather than inline in the JSX because these are the knobs whose
  * *absence* is invisible in a browser until it is a bug:
  *
- * - `nodesConnectable: false` — drawing a wire is S3's gesture; until the drop is
- *   wired, a draggable handle that connects nothing is worse than a dead one.
+ * - `nodesConnectable` — on since S3, and `connectionDragThreshold` set to the
+ *   same {@link CONNECT_THRESHOLD} the pure state machine uses, so a click on a
+ *   handle (or a twitch shorter than that) never becomes a wire. The rule lives
+ *   in the library's own pointer-down path (`XYHandle`), which starts a
+ *   connection only once the pointer has travelled further than this, so the
+ *   "a click builds nothing" half of the cancel semantics is the library's.
  * - `deleteKeyCode` / `multiSelectionKeyCode` / `selectionKeyCode`: `null`.
  *   React Flow binds these itself (`Backspace` deletes, `Shift` marquees,
  *   `Ctrl`-click toggles) and this canvas has its own implementation of all
@@ -667,6 +673,17 @@ export interface FlowInteractionOptions {
 export interface FlowInteractionProps {
   readonly nodesDraggable: boolean
   readonly nodesConnectable: boolean
+  /** Screen pixels the pointer must travel before a handle press is a wire. */
+  readonly connectionDragThreshold: number
+  /**
+   * Whether a *click* on a handle starts a wire too.
+   *
+   * Off: the gesture this canvas ships is a drag ("grab the dot, drag, let go"),
+   * and React Flow's click-to-connect would be a second half-wired path — it
+   * reports `onConnect` without the `onConnectStart`/`onConnectEnd` pair this
+   * canvas plans the drop in, so a click-built edge would slip past the planner.
+   */
+  readonly connectOnClick: false
   readonly elementsSelectable: boolean
   readonly deleteKeyCode: null
   readonly multiSelectionKeyCode: null
@@ -698,7 +715,9 @@ export function flowInteractionProps(options: FlowInteractionOptions = {}): Flow
   const maxZoom = Number.isFinite(options.maxZoom) ? (options.maxZoom as number) : FLOW_MAX_ZOOM
   return {
     nodesDraggable: true,
-    nodesConnectable: false,
+    nodesConnectable: true,
+    connectionDragThreshold: CONNECT_THRESHOLD,
+    connectOnClick: false,
     elementsSelectable: options.selectable === true,
     deleteKeyCode: null,
     multiSelectionKeyCode: null,
@@ -754,4 +773,207 @@ export function fitWouldClamp(
   if (bounds === undefined) return false
   if (!Number.isFinite(minZoom) || minZoom <= 0) return false
   return fitZoomFor(bounds, viewport, padding) < minZoom
+}
+
+/* -------------------------------------------------------------------------- */
+/* Connection planning (U04 step 3)                                           */
+/* -------------------------------------------------------------------------- */
+//
+// The gesture this section decides is the one the canvas never had on the
+// engine: grab the output dot, drag, let go. Where it lands is the whole of the
+// rule —
+//
+//   over a picture          → the picture gains the source as a parent (an edge,
+//                            and *nothing else*: no request, no new node)
+//   over blank canvas       → ask which node kind to grow there
+//   back over the source,   → cancel: nothing is built and nothing is undone
+//   itself, or not a picture
+//
+// and the *decision* stays a pure function for the same reason every other
+// gesture here does: React Flow's drag needs a real DOM, so what the drop means
+// is extracted and asserted without one (`test/canvas-flow-model.test.mjs`).
+// `src/canvas-pane.ts` owns only the coordinates (screen → flow) and the paint.
+//
+// The target rule is narrower than the DOM canvas's: a wire lands on a
+// **picture** only. A lineage edge means "this was made from that picture", and
+// a task, a layout draft or the placeholder a previous drop created have no file
+// to be that picture — a target that cannot be referenced is a target that
+// should not accept the wire.
+
+/**
+ * A board node as the connection layer needs it: box, lineage and kind.
+ *
+ * `parents` is what the cycle check walks and `kind` is what the "pictures only"
+ * rule reads; the box is the same one the marquee hit-tests against, so a drop
+ * lands on exactly the node the user sees.
+ */
+export interface FlowConnectNode extends ConnectNode {
+  readonly parents: readonly string[]
+  readonly kind: FlowSourceNode['kind']
+}
+
+/**
+ * Every node in the shape a connection gesture needs.
+ *
+ * Sizes come from {@link nodeSizeOf} — the painted box, not the picture's pixel
+ * size — for the same reason {@link flowNodeRects} does: the pointer lands on
+ * what is drawn.
+ */
+export function connectionNodesOf(nodes: readonly FlowSourceNode[]): FlowConnectNode[] {
+  return nodes.map((node) => {
+    const size = nodeSizeOf(node)
+    return {
+      id: node.id,
+      x: node.x,
+      y: node.y,
+      width: size.width,
+      height: size.height,
+      parents: node.parents,
+      kind: node.kind,
+    }
+  })
+}
+
+/** The node kinds that can start a wire: a picture, or a layout draft. */
+export const CONNECT_SOURCE_KINDS: readonly FlowSourceNode['kind'][] = ['image', 'layout']
+
+/**
+ * Whether a node kind may start a wire out of its output handle.
+ *
+ * A task in flight has no file yet and the placeholder is a promise about a
+ * picture that does not exist, so neither can be a *provenance* of anything: the
+ * handle is not rendered on them at all (see `NodeHandles` in `canvas-pane.ts`),
+ * and this is the same list the tests assert.
+ */
+export function canStartConnection(kind: FlowSourceNode['kind']): boolean {
+  return CONNECT_SOURCE_KINDS.includes(kind)
+}
+
+/** The kinds a wire may land on: a picture, and only a picture. */
+export function canAcceptConnection(kind: FlowSourceNode['kind']): boolean {
+  return kind === 'image'
+}
+
+/** Why a connection was refused; `ok` means it may be drawn. */
+export type FlowConnectVerdict = 'ok' | 'missing' | 'self' | 'kind' | 'cycle'
+
+/**
+ * Whether `sourceId → targetId` is a legal lineage edge, and why not when it is
+ * not.
+ *
+ * The two ids must both be on this board: a board's `parents` may name a node
+ * that lives elsewhere (a cross-board reference is legal data), but a *wire* is
+ * drawn between two things the user can see, and an id the model no longer holds
+ * cannot be one of them. (The cycle walk itself only sees this board's parents,
+ * so a cycle that runs through another board's node is out of scope for both the
+ * check and the edge — the same limit `reaches` documents.)
+ *
+ * A cycle is refused rather than drawn: lineage is "this came from that", and a
+ * loop makes every picture its own ancestor.
+ */
+export function judgeConnection(input: {
+  readonly sourceId: string
+  readonly targetId: string
+  readonly nodes: readonly FlowConnectNode[]
+}): FlowConnectVerdict {
+  const source = input.nodes.find((node) => node.id === input.sourceId)
+  const target = input.nodes.find((node) => node.id === input.targetId)
+  if (source === undefined || target === undefined) return 'missing'
+  if (source.id === target.id) return 'self'
+  if (!canStartConnection(source.kind)) return 'kind'
+  if (!canAcceptConnection(target.kind)) return 'kind'
+  if (reaches(input.nodes, input.sourceId, input.targetId)) return 'cycle'
+  return 'ok'
+}
+
+/**
+ * The `isValidConnection` answer, as a boolean.
+ *
+ * React Flow asks this while the pointer is over a handle to decide whether the
+ * wire looks valid, and it asks again on release before it reports `onConnect`.
+ * Keeping one function behind both means the colour of the preview and the
+ * legality of the drop cannot disagree.
+ */
+export function connectionIsValid(input: {
+  readonly sourceId: string
+  readonly targetId: string
+  readonly nodes: readonly FlowConnectNode[]
+}): boolean {
+  return judgeConnection(input) === 'ok'
+}
+
+/** Why a release built nothing. */
+export type FlowConnectCancel =
+  /** The pointer never travelled {@link CONNECT_THRESHOLD}: a click, not a drag. */
+  | 'idle'
+  /** Released back over the node the wire came from: the user put it back. */
+  | 'returned'
+  /** Escape while the wire was in flight. */
+  | 'escaped'
+  | 'missing'
+  | 'self'
+  | 'kind'
+  | 'cycle'
+
+/** What releasing a wire means, decided without a browser. */
+export type FlowConnectPlan =
+  /** Draw `sourceId → toId` as lineage. No request is made. */
+  | { readonly kind: 'edge'; readonly sourceId: string; readonly toId: string }
+  /** Blank canvas: ask which node kind to grow at `worldPoint` (flow units). */
+  | { readonly kind: 'menu'; readonly sourceId: string; readonly worldPoint: Point }
+  /** Nothing is built, nothing is saved, nothing enters the undo stack. */
+  | { readonly kind: 'cancel'; readonly sourceId: string; readonly reason: FlowConnectCancel }
+
+/**
+ * Decide what a released wire means.
+ *
+ * `point` is the release position **in flow units** — the caller converts the
+ * browser's client coordinates with the engine's own `screenToFlowPosition`, so
+ * this function never needs the camera. `travelled` is the threshold test; the
+ * pane passes `true` because React Flow applies the very same threshold
+ * (`connectionDragThreshold`) before it reports a connection at all, but the DOM
+ * canvas calls this with its own pointer distance and gets the same rule.
+ *
+ * The order matters and is the cancel semantics:
+ *
+ * 1. a release that never moved is `idle` — a click on the handle;
+ * 2. a release inside the **source's own box** is `returned`, checked before any
+ *    hit test because `nodeUnderPoint` deliberately excludes the source and
+ *    would otherwise call the same spot blank canvas and open a menu on top of
+ *    the node the user just dragged from;
+ * 3. no node under the point at all is `menu`;
+ * 4. a node that fails {@link judgeConnection} is a cancel with its reason.
+ */
+export function planConnectionDrop(input: {
+  readonly sourceId: string
+  readonly point: Point
+  readonly travelled: boolean
+  readonly nodes: readonly FlowConnectNode[]
+}): FlowConnectPlan {
+  if (!input.travelled) return { kind: 'cancel', sourceId: input.sourceId, reason: 'idle' }
+  const source = input.nodes.find((node) => node.id === input.sourceId)
+  if (source === undefined) return { kind: 'cancel', sourceId: input.sourceId, reason: 'missing' }
+  if (nodeUnderPoint([source], input.point) !== undefined) {
+    return { kind: 'cancel', sourceId: input.sourceId, reason: 'returned' }
+  }
+  const target = nodeUnderPoint(input.nodes, input.point, input.sourceId)
+  if (target === undefined) {
+    return { kind: 'menu', sourceId: input.sourceId, worldPoint: { x: input.point.x, y: input.point.y } }
+  }
+  const verdict = judgeConnection({ sourceId: input.sourceId, targetId: target.id, nodes: input.nodes })
+  if (verdict !== 'ok') return { kind: 'cancel', sourceId: input.sourceId, reason: verdict }
+  return { kind: 'edge', sourceId: input.sourceId, toId: target.id }
+}
+
+/**
+ * What the engine reports to the studio when a wire is released.
+ *
+ * `screen` is the release point **relative to the canvas container** — the same
+ * origin the studio positions its cards in (`.dsh-forge-context`), because the
+ * menu a blank drop opens has to appear under the pointer and must not scale
+ * with the zoom. The plan itself carries flow units for the node it builds.
+ */
+export interface FlowConnectionEvent {
+  readonly plan: FlowConnectPlan
+  readonly screen: Point
 }

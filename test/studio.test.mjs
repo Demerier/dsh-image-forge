@@ -43,9 +43,14 @@
  *                                                        真实指针拖动待人工/ego-browser)
  *   - fit (`F` / 适应) 与缩放下限提示                    (S2 — 半自动: `fitWouldClamp` 已断言,
  *                                                        React Flow 的实际取景待人工)
- *   - the output handle, its screen size and the wire   (S3)
- *   - drop-to-create: draft / 布局 / 素材 picker         (S3)
- *   - copy/move to another board from the node menu     (S3)
+ *   - the output handle, its screen size and the wire   (S3 — 已接线,待人工验收: 判据见下方
+ *                                                        "U04 step 3" 清单；纯函数
+ *                                                        `planConnectionDrop`/`judgeConnection` 由
+ *                                                        `canvas-flow-model.test.mjs` 断言)
+ *   - drop-to-create: draft / 布局 / 素材 picker         (S3 — 已接线,待人工验收: 菜单数据与三条
+ *                                                        动作的映射由 `canvas-connections.test.mjs`
+ *                                                        断言,卡片由 `runConnectTarget` 复用)
+ *   - copy/move to another board from the node menu     (S3 — 保持原样,仍待人工验收)
  *   - the lightbox (G22) and its arrow keys             (S2 — 双击经 `onOpen` 接线,覆盖层
  *                                                        与 ←/→ 待人工验收)
  *   - the task node: clientId binding, retry, interrupt (S4)
@@ -66,7 +71,26 @@
  * What remains here about the canvas is what a Node process can still prove:
  * the copy the bundle ships (`dsh-forge-canvas` strings), the pure geometry
  * (zoom floor, thumbnails), the board writers' validation, and — since step 2 —
- * the keyboard the flow canvas forwards to the studio's shortcut table.
+ * the keyboard the flow canvas forwards to the studio's shortcut table, plus the
+ * `U04 S3` case for the wire's wiring and its "no generation" guarantee.
+ *
+ * ## U04 step 3 的人工验收清单(拖线)
+ *
+ * React Flow's drag needs a measured viewport, `XYHandle`'s document listeners
+ * and pointer capture — none of which this renderer produces — so the gesture
+ * itself is a browser check. What to look at, in order:
+ *
+ *   1. 悬停任意图片/布局节点,右侧出现输出点;按住拖动,出现**蓝色虚线**,终点跟着指针;
+ *      越过图片节点时线**吸附到该节点左侧输入点**并转蓝,越过任务/草稿节点转红。
+ *   2. 松手在**空白画布**:弹"在这里新建(血缘指向来源)"卡片,原地建节点
+ *      (图片生成 → 草稿节点 + 表单参考图预填 + 焦点进 prompt;布局 → 布局节点即时落库;
+ *      放入素材 → 卡片内长出素材列表)。三种都不发 `/studio/generate`。
+ *   3. 松手在**已有图片节点**上:只多一条血缘线,节点数不变,网络面板里**没有任何
+ *      `/studio/generate`**;Ctrl+Z 撤掉这一条边。重复拖同一条线不再产生撤销步。
+ *   4. 取消:拖回源节点松手 / 按下不动(<4 px)/ 拖动中按 Esc / 拖到会成环或到非图片
+ *      节点 —— 四者都**不建节点、不入撤销栈**;后两者给一句提示。
+ *   5. 平移/缩放到 40% 后再拖:预览线终点仍贴着指针(这条最容易暴露坐标系错误)。
+ *   6. 菜单打开后按 Esc:卡片关闭,画布上不多任何节点。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -3021,6 +3045,111 @@ test('U04 S2: the engine wiring ships in the artifact, one call per gesture', ()
   assert.ok(CLIENT_SOURCE.includes('openContextMenuAt'), 'both engines must share one menu builder')
   // Drag write-back is one commit per gesture: the reducer is in the bundle.
   assert.ok(CLIENT_SOURCE.includes('foldDragChanges'), 'the drag reducer must ship')
+})
+
+// ---------------------------------------------------------------------------
+// U04 step 3: the wire, from the studio's side.
+//
+// The gesture needs a browser (see the checklist at the top), and the engine's
+// props only exist inside a measured container, which this harness never
+// produces. What *is* provable here is the half that is this file's: the two
+// callbacks the studio hands the engine, what each plan does, and — the promise
+// the whole feature is judged on — that recording lineage cannot reach a
+// generation route.
+// ---------------------------------------------------------------------------
+
+/**
+ * The text of one `const name = useCallback(…)` block, up to its dependency list.
+ *
+ * The shipped bundle calls it as `(0, react.useCallback)(…)` (the bundler's
+ * import-inlining form) and prints strings with double quotes, so the slice is
+ * quoted back to the source spelling before any `includes` runs: what is being
+ * asserted is the shape of the code, not the build's punctuation.
+ */
+function sourceBlock(name) {
+  const start = CLIENT_SOURCE.indexOf(`const ${name} = `)
+  assert.ok(start >= 0, `${name} must be a const in the shipped source`)
+  const head = CLIENT_SOURCE.slice(start, start + 120)
+  assert.ok(head.includes('useCallback'), `${name} must be wrapped in useCallback`)
+  const end = CLIENT_SOURCE.indexOf('}, [', start)
+  assert.ok(end > start, `${name} must close with a dependency array`)
+  return CLIENT_SOURCE.slice(start, end).replace(/"/g, "'")
+}
+
+test('U04 S3: a released wire is executed by the studio, through one dispatcher', () => {
+  // The contract between the engine and this file: the wire's start closes the
+  // cards behind it, its release lands on `endEngineConnection`.
+  assert.ok(CLIENT_SOURCE.includes('onConnectStart: beginEngineConnection'))
+  assert.ok(CLIENT_SOURCE.includes('onConnectEnd: endEngineConnection'))
+
+  const dispatch = sourceBlock('endEngineConnection')
+  // The three outcomes, each on the callback the DOM canvas already uses.
+  assert.ok(dispatch.includes("plan.kind === 'edge'"), 'the edge branch must exist')
+  assert.ok(dispatch.includes('commitWireEdge(plan.sourceId, plan.toId)'), 'and go through the tested lineage writer')
+  assert.ok(dispatch.includes("plan.kind === 'menu'"), 'the blank branch must exist')
+  assert.ok(dispatch.includes('openWireMenu(plan.worldPoint, plan.sourceId, event.screen)'), 'at the release point, in container pixels')
+  // The two refusals a user cannot see the reason for say why; the rest are silent.
+  assert.ok(dispatch.includes("plan.reason === 'cycle'"))
+  assert.ok(dispatch.includes("plan.reason === 'kind'"))
+
+  // **The zero-generation guarantee.** Dragging a wire onto a picture records
+  // lineage: no request of any kind is made by the dispatcher, and none by the
+  // writer it calls. This is asserted on the shipped source because the branch
+  // is a side effect, not a return value — a behavioural test would need the
+  // engine's props, which no Node harness can reach.
+  for (const forbidden of ['STUDIO_GENERATE_ROUTE', 'fetch(', 'postBoardRaw(', '/studio/generate']) {
+    assert.ok(!dispatch.includes(forbidden), `a wire drop must never ${forbidden}`)
+  }
+  const lineage = sourceBlock('commitWireEdge')
+  for (const forbidden of ['STUDIO_GENERATE_ROUTE', 'fetch(', 'postBoardRaw(', '/studio/generate']) {
+    assert.ok(!lineage.includes(forbidden), `recording lineage must never ${forbidden}`)
+  }
+  // What it *does* do: one undo step and one debounced board write.
+  assert.ok(lineage.includes("snapshotCommand('connect-edge'"))
+  assert.ok(lineage.includes('markDirty([toId])'))
+  assert.ok(lineage.includes('scheduleLayout()'))
+})
+
+test('U04 S3: the three menu entries are the three node kinds, each on its own writer', () => {
+  const run = sourceBlock('runConnectTarget')
+  // The mapping is by `ConnectTarget`, so the labels live in `connectMenuItems`
+  // (`canvas-connections.test.mjs` pins their ids and order) and this switch
+  // decides what each id builds.
+  assert.ok(run.includes("target === 'image'"), '图片生成 must have its own branch')
+  assert.ok(run.includes('referenceNode(source)'), 'and pre-fill the form with the source as a reference')
+  assert.ok(run.includes('addDraftNode(open.world, open.sourceId)'), 'at the release point, parented to the source')
+  assert.ok(run.includes('pendingReplaceRef.current = { id: draft.id }'), 'the next generation lands in place')
+  assert.ok(run.includes("target === 'layout'"), '布局 must have its own branch')
+  assert.ok(run.includes('addLayoutNode({'), 'built immediately (a layout draft is cheap)')
+  assert.ok(run.includes('spot: open.world'), 'at the release point')
+  assert.ok(run.includes('parents: [open.sourceId]'), 'with the lineage it was dragged from')
+  assert.ok(run.includes("setAssetPick("), '放入素材 grows the picker instead of building')
+  // Building never generates: the draft is a promise, the layout is a draft, the
+  // asset is a copy. A generation happens only when the user presses 生成.
+  for (const forbidden of ['STUDIO_GENERATE_ROUTE', '/studio/generate', 'fetch(']) {
+    assert.ok(!run.includes(forbidden), `choosing a node kind must never ${forbidden}`)
+  }
+  // The card that offers them is the shipped one, from the shipped data.
+  assert.ok(CLIENT_SOURCE.includes('connectMenuItems()'), 'the card renders the data the unit tests pin')
+  assert.ok(CLIENT_SOURCE.includes('data-connect-menu'), 'and keeps its addressable marker')
+})
+
+test('U04 S3: the pane’s side of the wire ships with a preview and a three-way planner', () => {
+  // The engine's half: the drop is decided by the pure planner, not re-decided in
+  // the renderer.
+  assert.ok(CLIENT_SOURCE.includes('planConnectionDrop('), 'the pane must classify with the tested planner')
+  assert.ok(CLIENT_SOURCE.includes('connectionNodesOf('), 'and hit-test against the painted boxes')
+  // The preview, in container pixels, with the committed edge's cubic.
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-flow-wire'))
+  assert.ok(CLIENT_SOURCE.includes('data-connect-preview'))
+  assert.ok(CLIENT_SOURCE.includes('previewPath('), 'the preview and the edge share one cubic')
+  // Escape abandons the wire without building anything (the engine has no Esc).
+  assert.ok(CLIENT_SOURCE.includes('onDocumentKeyDown'), 'the pane listens for the abandon key itself')
+  assert.ok(CLIENT_SOURCE.includes('Escape'), 'Esc must cancel an in-flight wire')
+  assert.ok(CLIENT_SOURCE.includes('escapedRef'), 'and the release that follows must be ignored')
+  // Only the kinds that can do something carry a handle.
+  assert.ok(CLIENT_SOURCE.includes('canStartConnection(props.kind)'))
+  assert.ok(CLIENT_SOURCE.includes('canAcceptConnection(props.kind)'))
 })
 
 

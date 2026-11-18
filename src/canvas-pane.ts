@@ -32,14 +32,18 @@
  *
  * ## Where interactions went
  *
- * Step 1b ships **rendering**: nodes, handles, edges, the background, and React
- * Flow's own pan/zoom/fit. Marquee selection, node dragging, wire dragging and
- * the keyboard table are S2/S3 work — the pure state machines behind them
- * (`src/canvas-interactions.ts`, `src/canvas-connections.ts`) are untouched and
- * still unit-tested, so the behaviour is not being rewritten, only re-attached.
- * Concretely, this file does **not** yet: persist node positions, open a node
- * on double click, or start a connection from a handle (`nodesConnectable` is
- * off, so the handle is a visible affordance instead of a half-wired gesture).
+ * Step 1b shipped **rendering** only: nodes, handles, edges, the background, and
+ * React Flow's own pan/zoom/fit. The gestures came back in two stages, each
+ * re-attaching the *same* pure state machine rather than rewriting it:
+ *
+ * - **S2** — selection (click / Ctrl-toggle / blank click / marquee), the drag
+ *   write-back, the right-click menu, the keyboard table, the lightbox and fit.
+ * - **S3** — the wire: dragging out of a node's output handle and letting go.
+ *   Where it lands decides what happens (`planConnectionDrop`), the preview is
+ *   painted here in container pixels, and `onConnectEnd` hands the decision to
+ *   the studio, which executes it through the callbacks the hand-rolled canvas
+ *   already used. See the wire section below for what the engine does and what
+ *   this file has to do itself.
  *
  * @module canvas-pane
  */
@@ -81,17 +85,27 @@ import {
   FLOW_NODE_TYPE_TASK,
   FLOW_SOURCE_HANDLE,
   FLOW_TARGET_HANDLE,
+  canAcceptConnection,
+  canStartConnection,
   cameraFromFlow,
+  connectionIsValid,
+  connectionNodesOf,
   fitWouldClamp,
   flowInteractionProps,
   flowNodeRects,
   foldDragChanges,
+  judgeConnection,
+  planConnectionDrop,
   reseedFlowNodes,
   toFlowModel,
+  type FlowConnectNode,
+  type FlowConnectPlan,
+  type FlowConnectionEvent,
   type FlowDragState,
   type FlowNodeSpec,
   type FlowSourceNode,
 } from './canvas-flow-model.ts'
+import { connectionAnchor, nodeUnderPoint, previewPath, type ConnectionState } from './canvas-connections.ts'
 import {
   marqueeSelection,
   marqueeWorldRect,
@@ -245,6 +259,27 @@ export interface FlowCanvasProps {
   readonly onCameraChange?: (camera: Camera) => void
   /** Handed the imperative handle once React Flow is live, `undefined` on unmount. */
   readonly onApi?: (api: FlowCanvasApi | undefined) => void
+
+  /* ---- U04 step 3: the wire (G26's gesture, on the engine) ---------------- */
+
+  /**
+   * A wire has left a node's output handle.
+   *
+   * Forwarded so the studio can close whatever card is open (a menu left behind
+   * by an earlier gesture must not sit under the one this wire is about to
+   * open) and so the gesture has one entry point instead of two.
+   */
+  readonly onConnectStart?: (sourceId: string) => void
+  /**
+   * A wire was released. The pane has already decided **what the drop means**
+   * (`planConnectionDrop`); this is where the studio executes it, through the
+   * very callbacks the DOM canvas uses.
+   *
+   * `plan.kind` is the three-way answer: `edge` (draw lineage — no request),
+   * `menu` (ask which node to grow at the release point) or `cancel` (Esc, a
+   * release back on the source, a click, a refused target).
+   */
+  readonly onConnectEnd?: (event: FlowConnectionEvent) => void
 }
 
 /* -------------------------------------------------------------------------- */
@@ -266,6 +301,9 @@ export interface MarqueeBox {
   readonly width: number
   readonly height: number
 }
+
+/** How the dragged wire reads: open canvas, a legal target, or a refused one. */
+type WireLook = 'blank' | 'valid' | 'refused'
 
 /** Whether a pointer target is somewhere a keystroke should type, not act. */
 function isTypingTarget(target: Element | null | undefined): boolean {
@@ -303,6 +341,66 @@ function paneElementOf(target: EventTarget | null): Element | undefined {
   const pane = element.closest('.react-flow__pane')
   // Only the pane itself is blank: a node, a handle or a control lives inside it.
   return pane !== null && pane === element ? pane : undefined
+}
+
+/* -------------------------------------------------------------------------- */
+/* The wire's coordinates                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** A box in the browser's client space; only its origin is ever used here. */
+interface ClientBox {
+  readonly left: number
+  readonly top: number
+}
+
+/** The canvas container's client-space box, or a zero origin before it mounts. */
+function clientBoxOf(host: Element | null): ClientBox {
+  if (host === null || typeof host.getBoundingClientRect !== 'function') return { left: 0, top: 0 }
+  const box = host.getBoundingClientRect()
+  return { left: box.left, top: box.top }
+}
+
+/** A client point in the container's own coordinates — where a card goes. */
+function containerPoint(box: ClientBox, client: Point): Point {
+  return { x: client.x - box.left, y: client.y - box.top }
+}
+
+/**
+ * The release point of a finished connection, in **client** coordinates.
+ *
+ * A mouse offers `clientX`/`clientY`; a touch ends with an empty `touches` list
+ * and the point in `changedTouches`; and a synthetic release can carry neither,
+ * in which case the engine's own last pointer position is the answer (it is
+ * relative to the container, which is why the box is added back). `undefined`
+ * means "nobody knows where this landed", and a drop that cannot be located
+ * builds nothing rather than guessing a spot.
+ */
+function releaseClientPoint(
+  event: unknown,
+  pointer: Point | null | undefined,
+  box: ClientBox,
+): Point | undefined {
+  const source = (event ?? {}) as {
+    readonly clientX?: unknown
+    readonly clientY?: unknown
+    readonly changedTouches?: { readonly [index: number]: { readonly clientX?: unknown; readonly clientY?: unknown } }
+  }
+  const x = source.clientX
+  const y = source.clientY
+  if (typeof x === 'number' && Number.isFinite(x) && typeof y === 'number' && Number.isFinite(y)) {
+    return { x, y }
+  }
+  const touch = source.changedTouches?.[0]
+  if (touch !== undefined) {
+    const touchX = touch.clientX
+    const touchY = touch.clientY
+    if (typeof touchX === 'number' && Number.isFinite(touchX) && typeof touchY === 'number' && Number.isFinite(touchY)) {
+      return { x: touchX, y: touchY }
+    }
+  }
+  if (pointer === null || pointer === undefined) return undefined
+  if (!Number.isFinite(pointer.x) || !Number.isFinite(pointer.y)) return undefined
+  return { x: pointer.x + box.left, y: pointer.y + box.top }
 }
 
 /**
@@ -348,6 +446,18 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
   // studio must not see a board write per frame (see the props' `onMoveNodes`).
   const [live, setLive] = useState<ReadonlyMap<string, Point>>(() => new Map<string, Point>())
   const [marqueeBox, setMarqueeBox] = useState<MarqueeBox | undefined>(undefined)
+  // The wire being dragged: its `<path d>` and how it reads (a valid target, a
+  // refused one, or open canvas). Screen-space on purpose — see `paintWire`.
+  const [wire, setWire] = useState<{ readonly path: string; readonly look: WireLook } | undefined>(undefined)
+  const wireRef = useRef<{
+    readonly sourceId: string
+    /** The output dot, in **flow** units; projected on every paint. */
+    readonly anchorFlow: Point
+    readonly nodes: readonly FlowConnectNode[]
+  } | undefined>(undefined)
+  // Escape arrived while a wire was in flight: the release that follows (the
+  // engine still reports one) must build nothing.
+  const escapedRef = useRef(false)
   const dragRef = useRef<FlowDragState>(EMPTY_FLOW_DRAG)
   const marqueeRef = useRef<{ readonly start: Point; readonly left: number; readonly top: number } | undefined>(undefined)
   // A marquee ends with the browser's own `click`; without this the pane's click
@@ -481,6 +591,185 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     latest.current.onApi?.(api)
   }
 
+  /* ---- the wire (G26 on the engine) --------------------------------------- */
+  //
+  // React Flow owns the *gesture*: it starts a connection from the output handle
+  // once the pointer has travelled `connectionDragThreshold` (the state
+  // machine's own `CONNECT_THRESHOLD`), keeps it alive across the document,
+  // auto-pans at the edge, and tells us where it ended.
+  //
+  // What it does not do faithfully is the *paint*: the shipped connection line
+  // lays out endpoints in the flow space of the transformed viewport but feeds
+  // them the pointer in container pixels (`XYHandle`'s `to` is
+  // `getEventPosition`), so under a zoom or a pan the preview and the pointer
+  // part company. Rather than inherit that, the wire is painted here in
+  // **container pixels** — the space a card lives in — with the same cubic the
+  // committed edge uses (`previewPath`), which is the one thing the preview has
+  // to promise: what it looks like is what it becomes. The engine's own line is
+  // switched off in the stylesheet.
+
+  /**
+   * Paint the wire under the pointer.
+   *
+   * The end of the wire is the **input dot of the node under the pointer**
+   * whenever that node can take the edge, and the pointer itself otherwise — so
+   * the drop is visible before it happens. The wire is red over a node that
+   * cannot take it (a task, a layout draft, its own source), which is the same
+   * refusal `judgeConnection` will make on release.
+   */
+  const paintWire = (clientX: number, clientY: number): void => {
+    const gesture = wireRef.current
+    const instance = flowRef.current
+    if (gesture === undefined || instance === undefined) return
+    const box = clientBoxOf(hostRef.current)
+    const pointer = containerPoint(box, { x: clientX, y: clientY })
+    // The anchor is kept in **flow** units and projected on every paint, not
+    // frozen in pixels at the start: the engine auto-pans while a connection is
+    // in flight, and a wire pinned to where the dot used to be would detach from
+    // the node exactly when the canvas chases the pointer.
+    const anchor = containerPoint(box, instance.flowToScreenPosition(gesture.anchorFlow))
+    const world = instance.screenToFlowPosition({ x: clientX, y: clientY })
+    // The target is the board's own hit test — the one the drop uses, topmost
+    // node first and the source excluded — so the wire snaps where the release
+    // will land, not where a second copy of the rule thinks it would.
+    const target = nodeUnderPoint(gesture.nodes, world, gesture.sourceId)
+    const verdict = target === undefined
+      ? undefined
+      : judgeConnection({ sourceId: gesture.sourceId, targetId: target.id, nodes: gesture.nodes })
+    const accepted = verdict === 'ok'
+    const end = accepted && target !== undefined
+      ? containerPoint(box, instance.flowToScreenPosition({ x: target.x, y: target.y + target.height / 2 }))
+      : pointer
+    const state: ConnectionState = {
+      phase: 'blank',
+      sourceId: gesture.sourceId,
+      anchor,
+      originScreen: anchor,
+      point: end,
+    }
+    const path = previewPath(state, gesture.nodes)
+    if (path === undefined) return
+    setWire({
+      path,
+      look: target === undefined ? 'blank' : accepted ? 'valid' : 'refused',
+    })
+  }
+
+  /** The pointer has moved while a wire is in flight. */
+  const onDocumentPointerMove = (event: PointerEvent): void => {
+    if (wireRef.current === undefined) return
+    paintWire(event.clientX, event.clientY)
+  }
+
+  /**
+   * Escape abandons the wire.
+   *
+   * The engine has no Escape of its own (`XYHandle` listens to the pointer and
+   * nothing else), and the release that follows will still be reported — so this
+   * clears the paint, remembers that the gesture was abandoned, and takes the
+   * key before the studio's shortcut table sees it (dropping a wire must not
+   * also clear the selection).
+   */
+  const onDocumentKeyDown = (event: KeyboardEvent): void => {
+    if (wireRef.current === undefined) return
+    if (event.key !== 'Escape') return
+    escapedRef.current = true
+    wireRef.current = undefined
+    setWire(undefined)
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  useEffect(() => {
+    // No document (a DOM-less renderer, an SSR pass): the wire cannot be dragged
+    // there, so there is nothing to listen for.
+    if (typeof document === 'undefined') return undefined
+    // Capture phase, so the studio's own `Escape` (selection clear) does not run
+    // on the same key, and document-level, because the wire leaves the container.
+    document.addEventListener('pointermove', onDocumentPointerMove, true)
+    document.addEventListener('keydown', onDocumentKeyDown, true)
+    return () => {
+      document.removeEventListener('pointermove', onDocumentPointerMove, true)
+      document.removeEventListener('keydown', onDocumentKeyDown, true)
+    }
+  }, [])
+
+  /**
+   * A wire left a node's output handle.
+   *
+   * The anchor is the node's **right-edge midpoint** — the dot the user grabbed,
+   * computed from the model (`connectionAnchor`) rather than measured off the
+   * DOM, so a node whose handle CSS moves is still wired from where the board
+   * says its output is. Nothing is painted here: the engine only reports this
+   * once the pointer has passed the threshold, and until it moves the wire has
+   * no direction to show.
+   */
+  const onConnectStart = (
+    _event: unknown,
+    params: { readonly nodeId?: string | null },
+  ): void => {
+    const instance = flowRef.current
+    const sourceId = params.nodeId
+    if (instance === undefined || typeof sourceId !== 'string' || sourceId.length === 0) return
+    const nodes = connectionNodesOf(latest.current.nodes)
+    const source = nodes.find((node) => node.id === sourceId)
+    if (source === undefined) return
+    wireRef.current = { sourceId, anchorFlow: connectionAnchor(source), nodes }
+    escapedRef.current = false
+    setWire(undefined)
+    latest.current.onConnectStart?.(sourceId)
+  }
+
+  /**
+   * The wire was released: classify it, then hand the plan to the studio.
+   *
+   * `travelled: true` is not an assumption — React Flow reports a connection at
+   * all only after the pointer crossed `connectionDragThreshold`, which is the
+   * same number. The release point comes from the event when the browser gives
+   * one and from the engine's last pointer position otherwise.
+   */
+  const onConnectEnd = (event: unknown, connectionState: unknown): void => {
+    const gesture = wireRef.current
+    const escaped = escapedRef.current
+    wireRef.current = undefined
+    escapedRef.current = false
+    setWire(undefined)
+    const state = (connectionState ?? {}) as {
+      readonly fromNode?: { readonly id?: unknown } | null
+      readonly pointer?: Point | null
+    }
+    const fromNodeId = state.fromNode?.id
+    const sourceId = gesture === undefined
+      ? (typeof fromNodeId === 'string' ? fromNodeId : undefined)
+      : gesture.sourceId
+    if (sourceId === undefined || sourceId.length === 0) return
+    const instance = flowRef.current
+    if (instance === undefined) return
+    const box = clientBoxOf(hostRef.current)
+    const client = releaseClientPoint(event, state.pointer, box)
+    const screen = client === undefined
+      ? (gesture === undefined
+          ? { x: 0, y: 0 }
+          : containerPoint(box, instance.flowToScreenPosition(gesture.anchorFlow)))
+      : containerPoint(box, client)
+    if (escaped) {
+      latest.current.onConnectEnd?.({
+        plan: { kind: 'cancel', sourceId, reason: 'escaped' },
+        screen,
+      })
+      return
+    }
+    if (client === undefined) return
+    const world = instance.screenToFlowPosition({ x: client.x, y: client.y })
+    const plan: FlowConnectPlan = planConnectionDrop({
+      sourceId,
+      point: world,
+      travelled: true,
+      nodes: connectionNodesOf(latest.current.nodes),
+    })
+    latest.current.onConnectEnd?.({ plan, screen })
+  }
+
   /* ---- pointer: marquee, focus and the click that follows it --------------- */
 
   const onContainerPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
@@ -590,6 +879,25 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     latest.current.onOpen?.(node.id)
   }
 
+  /**
+   * Whether the engine may draw `source → target` as a legal connection.
+   *
+   * Asked by React Flow while the pointer sits on a handle, and consulted again
+   * on release. It is the same `judgeConnection` the drop uses, so a wire that
+   * looks valid is a wire that will be drawn — a preview that can lie is worse
+   * than no preview.
+   */
+  const isValidConnection = (connection: { readonly source?: unknown; readonly target?: unknown }): boolean => {
+    const sourceId = connection.source
+    const targetId = connection.target
+    if (typeof sourceId !== 'string' || typeof targetId !== 'string') return false
+    return connectionIsValid({
+      sourceId,
+      targetId,
+      nodes: connectionNodesOf(latest.current.nodes),
+    })
+  }
+
   /* ---- right-click -------------------------------------------------------- */
 
   const openContextMenu = (event: { readonly clientX: number; readonly clientY: number; preventDefault?: () => void }, nodeId?: string): void => {
@@ -642,6 +950,11 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             onMoveEnd: (_event: unknown, viewport: { readonly x: number; readonly y: number; readonly zoom: number }) => {
               latest.current.onCameraChange?.(cameraFromFlow(viewport))
             },
+            // U04 step 3: the wire. `isValidConnection` is the same rule the drop
+            // uses; the two callbacks bracket the gesture.
+            isValidConnection,
+            onConnectStart,
+            onConnectEnd,
             zoomOnScroll: true,
             fitViewOptions: { padding: 0.2, maxZoom: 1 },
             proOptions: { hideAttribution: true },
@@ -656,6 +969,18 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             : null,
         )
       : createElement('p', { className: 'dsh-forge-flow-note', role: 'status' }, '画布准备中…'),
+    // The wire, in container pixels above the nodes and below the studio's cards.
+    wire === undefined
+      ? null
+      : createElement(
+          'svg',
+          {
+            className: 'dsh-forge-flow-wire',
+            'data-connect-preview': wire.look,
+            'aria-hidden': true,
+          },
+          createElement('path', { className: 'dsh-forge-flow-wire-path', d: wire.path }),
+        ),
     marqueeBox === undefined
       ? null
       : createElement('div', {
@@ -707,29 +1032,45 @@ function nodeClassName(kind: string, selected: boolean): string {
 }
 
 /**
- * The two handles every node carries: output on the right, input on the left.
+ * The handles a node carries: output on the right, input on the left — the ones
+ * its kind can actually use.
  *
  * A handle is drawn inside the zoomed viewport, so its pixel size is divided by
  * the zoom through `--dsh-forge-zoom` — the same trick the previous renderer used
  * (`G27`), kept because a 10-px dot at the 10 % floor is not a target.
+ *
+ * Which ones exist is the connection rule made visible (U04 step 3): a picture
+ * has both (it can be referenced and it can reference another), a layout draft
+ * has an output only (a later generation can descend from it, but nothing can
+ * descend *into* a draft — a reference needs a file), and a task or the
+ * placeholder a drop created have neither, because neither can be a provenance
+ * and neither can be referenced. `canAcceptConnection`/`canStartConnection` are
+ * the same predicates the drop and `isValidConnection` consult, so an
+ * affordance can never disagree with the rule behind it.
  */
-function NodeHandles(): ReactNode {
-  return [
-    createElement(Handle, {
+function NodeHandles(props: { readonly kind: FlowSourceNode['kind'] }): ReactNode {
+  const handles: ReactNode[] = []
+  if (canAcceptConnection(props.kind)) {
+    handles.push(createElement(Handle, {
       key: 'in',
       id: FLOW_TARGET_HANDLE,
       type: 'target',
       position: Position.Left,
-      className: 'dsh-forge-flow-handle',
-    }),
-    createElement(Handle, {
+      className: 'dsh-forge-flow-handle is-in',
+      isConnectableStart: false,
+    }))
+  }
+  if (canStartConnection(props.kind)) {
+    handles.push(createElement(Handle, {
       key: 'out',
       id: FLOW_SOURCE_HANDLE,
       type: 'source',
       position: Position.Right,
-      className: 'dsh-forge-flow-handle',
-    }),
-  ]
+      className: 'dsh-forge-flow-handle is-out',
+      isConnectableEnd: false,
+    }))
+  }
+  return handles
 }
 
 /**
@@ -768,7 +1109,7 @@ export function ImageFlowNode(props: NodeProps): ReactNode {
     }),
     createElement('div', { className: 'dsh-forge-flow-title' }, String(data['title'] ?? '')),
     createElement('div', { className: 'dsh-forge-flow-meta' }, String(data['meta'] ?? '')),
-    createElement(NodeHandles),
+    createElement(NodeHandles, { kind: 'image' }),
   )
 }
 
@@ -838,7 +1179,7 @@ export function TaskFlowNode(props: NodeProps): ReactNode {
         '移除',
       ),
     ),
-    createElement(NodeHandles),
+    createElement(NodeHandles, { kind: 'task' }),
   )
 }
 
@@ -962,7 +1303,7 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
       { className: 'dsh-forge-flow-layout-foot' },
       `${String(boxes)} 框 · ${String(width)}×${String(height)}`,
     ),
-    createElement(NodeHandles),
+    createElement(NodeHandles, { kind: 'layout' }),
   )
 }
 
@@ -980,7 +1321,7 @@ export function DraftFlowNode(props: NodeProps): ReactNode {
     },
     createElement('div', { className: 'dsh-forge-flow-draft-title' }, '待生成'),
     createElement('div', { className: 'dsh-forge-flow-draft-body' }, '写下提示词，图会落在这个位置'),
-    createElement(NodeHandles),
+    createElement(NodeHandles, { kind: 'draft' }),
   )
 }
 

@@ -206,9 +206,19 @@ test('the artifact stays inside the size budget the pane was measured at', (t) =
  */
 test('the interaction config ships with the library’s own bindings switched off', () => {
   // Read from the bundle, not from the source: this is what the browser gets.
+  // U04 step 3 flipped this line: the wire *is* the library's gesture now, and a
+  // handle you can see but cannot drag is the bug this used to prevent.
   assert.ok(
-    BUNDLE.includes('nodesConnectable: false'),
-    'nodesConnectable must stay false until the wire gesture lands (S3)',
+    BUNDLE.includes('nodesConnectable: true'),
+    'nodesConnectable must be on: the wire is the gesture S3 shipped',
+  )
+  assert.ok(
+    BUNDLE.includes('connectionDragThreshold: 4'),
+    'a click on a handle must not become a wire: the threshold is the state machine’s own 4 px',
+  )
+  assert.ok(
+    BUNDLE.includes('connectOnClick: false'),
+    'click-to-connect is off: this canvas plans drags, and a click-built edge would skip the planner',
   )
   assert.ok(BUNDLE.includes('nodesDraggable: true'), 'dragging is the gesture whose positions are written back')
   for (const key of ['deleteKeyCode', 'multiSelectionKeyCode', 'selectionKeyCode']) {
@@ -227,4 +237,51 @@ test('the interaction config ships with the library’s own bindings switched of
   // The keyboard and the drag write-back must be in the shipped bundle.
   assert.ok(BUNDLE.includes('foldDragChanges'), 'the one-commit-per-drag reducer must ship')
   assert.ok(BUNDLE.includes('marqueeWorldRect'), 'the marquee must reuse the tested screen→world conversion')
+})
+
+/**
+ * U04 step 3: the wire, on the shipped artifact.
+ *
+ * The gesture cannot be driven here (it needs a measured viewport, pointer
+ * capture and the library's own drag — see the manual list at the top of
+ * `test/studio.test.mjs`), so what an artifact test *can* prove is that every
+ * piece the gesture needs is in the file a browser evaluates: the three-way drop
+ * planner, the preview it paints, the two engine callbacks, and the menu data
+ * behind the three node kinds. A missing one of these is a dead handle in the
+ * browser and nothing in `src/` would say so.
+ */
+test('the wire ships: planner, preview, engine callbacks and the three menu entries', () => {
+  // The decision layer, whole.
+  assert.ok(BUNDLE.includes('planConnectionDrop'), 'the drop planner must ship')
+  assert.ok(BUNDLE.includes('judgeConnection'), 'the target rule must ship (the preview colours itself from it)')
+  assert.ok(BUNDLE.includes('connectionNodesOf'), 'the hit-test takes the board’s own boxes')
+  assert.ok(BUNDLE.includes('nodeUnderPoint'), 'dropping on a node is the tested hit test, not a second copy')
+  assert.ok(BUNDLE.includes('reaches'), 'cycle refusal is the tested walk, not a second copy')
+
+  // The preview: the pane paints it in container pixels (the engine's own line is
+  // switched off in the sheet, because `XYHandle` mixes flow and screen space).
+  assert.ok(BUNDLE.includes('dsh-forge-flow-wire'), 'the wire overlay must ship')
+  assert.ok(BUNDLE.includes('data-connect-preview'), 'and must say which of the three looks it has')
+  assert.ok(BUNDLE.includes('.react-flow__connectionline{display:none}'), 'the engine’s line is off')
+  assert.ok(BUNDLE.includes('previewPath'), 'the preview is the committed edge’s own cubic')
+
+  // The wiring: one callback in, one plan out, straight onto the studio's own
+  // lineage/menu callbacks.
+  assert.ok(BUNDLE.includes('isValidConnection,'), 'the engine must be told the validity rule')
+  assert.ok(BUNDLE.includes('onConnectStart: beginEngineConnection'), 'a wire closes the cards behind it')
+  assert.ok(BUNDLE.includes('onConnectEnd: endEngineConnection'), 'a release is executed by the studio')
+  assert.ok(BUNDLE.includes('connectionIsValid'), 'the boolean the engine asks for ships too')
+
+  // The three things a blank drop can become, in the shipped menu data.
+  for (const label of ['图片生成', '布局', '放入素材']) {
+    assert.ok(BUNDLE.includes(label), `the node-type menu must still offer ${label}`)
+  }
+  // And each of the three lands through the route that already exists for it:
+  // the lineage/menu commands on the undo stack, the layout node's own writer,
+  // and the copy verb the asset picker uses (a copy, never a move).
+  for (const command of ['connect-edge', 'add-draft', 'add-layout', 'place-asset']) {
+    assert.ok(BUNDLE.includes(command), `the ${command} undo step must ship`)
+  }
+  assert.ok(BUNDLE.includes('save-layout-node'), 'the layout branch persists through the layout writer')
+  assert.ok(BUNDLE.includes('copy-item'), 'and the asset branch through the copy verb')
 })
