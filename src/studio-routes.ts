@@ -92,7 +92,9 @@ import {
   saveTaskItem,
   setActiveBoard,
 } from './boards.ts'
+import { readWorkspaceFile, writeWorkspaceFile } from './boards.ts'
 import { parseMossLayout } from './model-profiles.ts'
+import { stateFromWorkspace, toWorkspaceJson } from './workbench-tabs.ts'
 import { sanitizePrefix, writeImages } from './output.ts'
 import { probeImageSize } from './refs.ts'
 import {
@@ -404,6 +406,30 @@ export function registerStudioRoutes(
         }
 
         switch (action.action) {
+          case 'workspace-get': {
+            // Read-only by contract (§4.3 point 1): a stale or legacy document
+            // is normalised in memory and never written back here.
+            const raw = await readWorkspaceFile(outputDir)
+            if (raw === undefined) return json(res, 200, { ok: true, workspace: null })
+            const known = await listBoards(outputDir)
+            const state = stateFromWorkspace(raw, { boardIds: known.map((board) => board.id) })
+            return json(res, 200, { ok: true, workspace: toWorkspaceJson(state) })
+          }
+          case 'workspace-set': {
+            if (typeof action.workspace !== 'object' || action.workspace === null) {
+              return jsonError(res, 400, '缺少 workspace 参数')
+            }
+            const known = await listBoards(outputDir)
+            const state = stateFromWorkspace(action.workspace, { boardIds: known.map((board) => board.id) })
+            const normalized = toWorkspaceJson(state)
+            if (!(await writeWorkspaceFile(outputDir, normalized))) {
+              return jsonError(res, 500, '工作区记录写入失败')
+            }
+            // §4.4: `state.json` stays a mirror of the active canvas tab.
+            const active = normalized.activeTab.kind === 'projects' ? null : normalized.activeTab.boardId ?? null
+            await setActiveBoard(outputDir, active)
+            return json(res, 200, { ok: true })
+          }
           case 'create': {
             const board = await createBoard(outputDir, action.name)
             await setActiveBoard(outputDir, board.id)
@@ -811,6 +837,8 @@ const BOARD_ACTIONS = [
   'move-item',
   'save-task',
   'save-layout-node',
+  'workspace-get',
+  'workspace-set',
 ] as const
 
 /**
@@ -853,6 +881,7 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
   const parents = parseParentIds(body.parents)
   const task = body.task === undefined ? undefined : parseBoardTask(body.task)
   const draft = body.draft === undefined ? undefined : parseBoardDraft(body.draft)
+  const workspace = body.workspace
   const w = parseCoordinate(body.w)
   const h = parseCoordinate(body.h)
   // C14's two terminal writers: a stored failure must not be a running task
@@ -864,6 +893,7 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
   }
   return {
     action: action as StudioBoardRequest['action'],
+    ...(action === 'workspace-set' && typeof workspace === 'object' && workspace !== null ? { workspace } : {}),
     ...(board === undefined ? {} : { board }),
     ...(name === undefined ? {} : { name }),
     ...(item === undefined ? {} : { item }),

@@ -687,6 +687,8 @@ export interface StudioBoardRequest {
     | 'move-item'
     | 'save-task'
     | 'save-layout-node'
+    | 'workspace-get'
+    | 'workspace-set'
   /** Target board; absent means the active board. */
   board?: string
   /** New name, for `create` and `rename`. */
@@ -695,6 +697,8 @@ export interface StudioBoardRequest {
   items?: Array<{ id: string; x: number; y: number }>
   /** Camera to persist, for `layout`. */
   camera?: { x: number; y: number; zoom: number }
+  /** Whole `workspace.json` document, for `workspace-set` (U02, shell design §4.5). */
+  workspace?: unknown
   /** Item to drop (`remove-item`) or to copy/move across boards. */
   item?: string
   /** Also delete the PNG, for `remove-item`; the default only unplaces it. */

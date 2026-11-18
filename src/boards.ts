@@ -531,6 +531,55 @@ export async function setActiveBoard(outputDir: string, id: string | null): Prom
     }
   })
 }
+/**
+ * Path of the workbench's `workspace.json` (U02, shell design §4.2).
+ *
+ * A sibling of `state.json`, not a replacement: `state.json` keeps its `active`
+ * meaning for the server's default-board logic (§4.4, WD4).
+ */
+function workspaceFile(outputDir: string): string {
+  return join(boardsRoot(outputDir), 'workspace.json')
+}
+
+/**
+ * Read `workspace.json` verbatim, or `undefined` when there is none.
+ *
+ * Deliberately untyped and unnormalised: the codec in `workbench-tabs.ts` owns
+ * every degradation rule (§4.3), and a read must never write — the workspace is
+ * only rewritten after the user actually changes a tab (§4.3 point 1).
+ *
+ * @param outputDir - the configured output directory.
+ * @returns the parsed document, or `undefined` for missing/unreadable/broken.
+ */
+export async function readWorkspaceFile(outputDir: string): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(workspaceFile(outputDir), 'utf8')) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Replace `workspace.json` atomically, serialised against the other writers.
+ *
+ * Best-effort like {@link setActiveBoard}: a read-only output directory must not
+ * break the shell, so a failed write is reported as `false` rather than thrown.
+ *
+ * @param outputDir - the configured output directory.
+ * @param workspace - the already-normalised document (§4.2).
+ * @returns whether the file was written.
+ */
+export async function writeWorkspaceFile(outputDir: string, workspace: unknown): Promise<boolean> {
+  return serialized(boardsRoot(outputDir), async () => {
+    try {
+      await mkdir(boardsRoot(outputDir), { recursive: true })
+      await writeAtomic(workspaceFile(outputDir), JSON.stringify(workspace))
+      return true
+    } catch {
+      return false
+    }
+  })
+}
 
 // ---------------------------------------------------------------------------
 // Writing
