@@ -49,6 +49,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
 import {
@@ -59,22 +62,45 @@ import {
   Handle,
   Position,
   ReactFlow,
+  applyNodeChanges,
   getBezierPath,
   useStore,
   type EdgeProps,
+  type NodeChange,
   type NodeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react'
 import {
+  EMPTY_FLOW_DRAG,
   FLOW_EDGE_TYPE_LINEAGE,
+  FLOW_MAX_ZOOM,
+  FLOW_MIN_ZOOM,
   FLOW_NODE_TYPE_DRAFT,
   FLOW_NODE_TYPE_IMAGE,
   FLOW_NODE_TYPE_LAYOUT,
   FLOW_NODE_TYPE_TASK,
   FLOW_SOURCE_HANDLE,
   FLOW_TARGET_HANDLE,
+  cameraFromFlow,
+  fitWouldClamp,
+  flowInteractionProps,
+  flowNodeRects,
+  foldDragChanges,
+  reseedFlowNodes,
   toFlowModel,
+  type FlowDragState,
+  type FlowNodeSpec,
   type FlowSourceNode,
 } from './canvas-flow-model.ts'
+import {
+  marqueeSelection,
+  marqueeWorldRect,
+  nodesInRect,
+  selectionBounds,
+  toggleSelection,
+} from './canvas-interactions.ts'
+import { clampZoom } from './studio-canvas.ts'
+import type { Camera, Point } from './studio-canvas.ts'
 import {
   draftToEditorState,
   mountLayoutEditor,
@@ -121,6 +147,35 @@ export function CanvasPane(props: CanvasPaneProps): ReactNode {
 /* The flow surface                                                           */
 /* -------------------------------------------------------------------------- */
 
+/** What a right-click landed on, in the pane's own screen coordinates. */
+export interface FlowContextRequest {
+  /** Pixels from the canvas container's left edge. */
+  readonly x: number
+  /** Pixels from the canvas container's top edge. */
+  readonly y: number
+  /** The node under the pointer, or absent for the blank canvas. */
+  readonly nodeId?: string
+}
+
+/**
+ * What the studio can ask the canvas to do imperatively.
+ *
+ * The toolbar's 适应 / + / − buttons and the `F` shortcut used to drive the
+ * studio's own camera state. React Flow owns the camera now, so those three
+ * calls have exactly one implementation — here — and the studio reaches it
+ * through this handle instead of mutating `camera` state nothing reads.
+ */
+export interface FlowCanvasApi {
+  /** Frame every node; reports whether the zoom floor clipped the fit (G15). */
+  readonly fitView: () => { readonly clamped: boolean }
+  /** Multiply the zoom around the viewport centre. */
+  readonly zoomBy: (factor: number) => void
+  /** The camera React Flow is currently using, in the studio's convention. */
+  readonly camera: () => Camera
+  /** A viewport-relative point in world space. */
+  readonly screenToWorld: (point: Point) => Point
+}
+
 /** What the studio hands its canvas slot, and what {@link FlowCanvas} accepts. */
 export interface FlowCanvasProps {
   /** The board's nodes, in board order (see `FlowSourceNode`). */
@@ -143,26 +198,164 @@ export interface FlowCanvasProps {
   readonly onGenerateLayout?: (nodeId: string) => void
   /** Ids that may not be dragged yet (a task in flight stays put). */
   readonly locked?: ReadonlySet<string>
+
+  /* ---- U04 step 2: the gestures the hand-rolled canvas had --------------- */
+
+  /**
+   * Called **once per finished drag** with where the moved nodes ended up.
+   *
+   * Never per frame: React Flow emits a `position` change on every pointer move,
+   * and the studio's write path is debounced at 700 ms for a reason. An empty map
+   * means the gesture ended where it started, and nothing is written at all.
+   */
+  readonly onMoveNodes?: (positions: ReadonlyMap<string, Point>) => void
+  /** Called on a right-click, with the node hit (if any) and where it happened. */
+  readonly onContextMenu?: (request: FlowContextRequest) => void
+  /**
+   * The keyboard belongs to the studio's shortcut table (§6.3).
+   *
+   * Forwarded rather than reimplemented: `resolveShortcut` + the input/editor
+   * yielding rule already live there, and a second copy in the pane is exactly
+   * the double-handling this stage is meant to remove.
+   */
+  readonly onKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void
+  /** Space is a *held* modifier; releasing it hands the pointer back. */
+  readonly onKeyUp?: (event: ReactKeyboardEvent<HTMLDivElement>) => void
+  /** Screen-space overlays (menu, board picker, lightbox) the studio owns. */
+  readonly overlay?: ReactNode
+  /** Sticky hand mode: a left-drag pans instead of drawing a marquee. */
+  readonly panMode?: boolean
+  /**
+   * An OS file or a library card dragged over the canvas (§7.1/§7.3).
+   *
+   * Forwarded for the same reason the keyboard is: the studio owns the import
+   * route and the board it lands on, so the pane only has to keep offering the
+   * canvas as a drop target now that it is the thing covering it.
+   */
+  readonly onDragOver?: (event: ReactDragEvent<HTMLDivElement>) => void
+  /** The drop that ends that drag. */
+  readonly onDrop?: (event: ReactDragEvent<HTMLDivElement>) => void
+  /**
+   * The camera React Flow is now showing, after a pan or a zoom.
+   *
+   * The studio keeps the camera in its own state — the toolbar's zoom label and
+   * the board's stored `camera` both read it — so the engine reports it rather
+   * than leaving a second camera in the studio that nothing updates.
+   */
+  readonly onCameraChange?: (camera: Camera) => void
+  /** Handed the imperative handle once React Flow is live, `undefined` on unmount. */
+  readonly onApi?: (api: FlowCanvasApi | undefined) => void
+}
+
+/* -------------------------------------------------------------------------- */
+/* Gesture plumbing                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * How far the pointer must travel before a press becomes a marquee.
+ *
+ * A click that moves one pixel is still a click (and a click on blank canvas
+ * means "clear the selection"), so the box only arms past a few pixels.
+ */
+export const MARQUEE_CLICK_SLOP = 3
+
+/** The box a marquee paints, in screen pixels relative to the container. */
+export interface MarqueeBox {
+  readonly left: number
+  readonly top: number
+  readonly width: number
+  readonly height: number
+}
+
+/** Whether a pointer target is somewhere a keystroke should type, not act. */
+function isTypingTarget(target: Element | null | undefined): boolean {
+  if (target === null || target === undefined) return false
+  if (typeof (target as Element).closest !== 'function') return false
+  return target.closest('input, textarea, select, [contenteditable="true"], [data-dsh-layout-editor], .dsh-forge-flow-layout-host') !== null
+}
+
+/**
+ * The board node id under a pointer target, if any.
+ *
+ * Two channels on purpose: the painters stamp `data-node-id` on the node's inner
+ * element (the model's own id), and React Flow stamps `data-id` on the wrapper it
+ * owns. The inner one is preferred because it is the id the studio knows; the
+ * wrapper is the fallback for a click that landed on React Flow's chrome.
+ */
+function nodeIdUnder(target: EventTarget | null): string | undefined {
+  if (target === null || target === undefined) return undefined
+  const element = target as Element
+  if (typeof element.closest !== 'function') return undefined
+  const inner = element.closest('[data-node-id]') as HTMLElement | null
+  if (inner !== null && typeof inner.dataset?.['nodeId'] === 'string' && inner.dataset['nodeId'].length > 0) {
+    return inner.dataset['nodeId']
+  }
+  const wrapper = element.closest('.react-flow__node') as HTMLElement | null
+  const id = wrapper === null ? undefined : wrapper.getAttribute('data-id')
+  return typeof id === 'string' && id.length > 0 ? id : undefined
+}
+
+/** The React Flow pane element, when the pointer went down on blank canvas. */
+function paneElementOf(target: EventTarget | null): Element | undefined {
+  if (target === null || target === undefined) return undefined
+  const element = target as Element
+  if (typeof element.closest !== 'function') return undefined
+  const pane = element.closest('.react-flow__pane')
+  // Only the pane itself is blank: a node, a handle or a control lives inside it.
+  return pane !== null && pane === element ? pane : undefined
 }
 
 /**
  * The canvas: one React Flow instance over the board's nodes.
  *
  * The container is **measured** before the flow is mounted, and that is not a
- * detail: React Flow needs a viewport with a size to project the camera into,
- * and mounting it into an unsized element makes it render at 0×0 and then jump
- * when the first resize arrives. The placeholder below is what a user sees for
- * one frame; it is also what a DOM-less renderer sees, because there is nothing
- * to measure there (which is why the pane's own structure is asserted against
- * the model, not against this subtree — see the test note in
+ * detail: React Flow needs a viewport with a size to project the camera into, and
+ * mounting it into an unsized element makes it render at 0×0 and then jump when
+ * the first resize arrives. The placeholder below is what a user sees for one
+ * frame; it is also what a DOM-less renderer sees, because there is nothing to
+ * measure there (which is why the pane's own structure is asserted against the
+ * model, and the *handlers* against this container — see
  * `test/canvas-flow-model.test.mjs`).
  *
- * @param props - nodes, selection and the callbacks a node may fire.
+ * ## Controlled, and who owns what
+ *
+ * The board's positions are the studio's: a drag paints from a local override
+ * ({@link FlowCanvasProps.onMoveNodes} fires once, when the gesture ends) and the
+ * studio writes them back after its own 700 ms debounce. Selection is the
+ * studio's too: this component reports which ids a gesture picked
+ * ({@link FlowCanvasProps.onSelect}) and paints whatever comes back, so the two
+ * can never disagree about what is selected.
+ *
+ * The gestures themselves are in three places, and none of them is React Flow's:
+ *
+ * - **dragging** is the library's (`nodesDraggable`), because it is the one
+ *   gesture whose feel is the library's whole point; the positions it produces
+ *   are folded by {@link foldDragChanges} and committed once per gesture.
+ * - **selection** (click, Ctrl/Cmd toggle, blank click, marquee, Shift-union) is
+ *   this file's, using `src/canvas-interactions.ts` — the same state machine the
+ *   DOM canvas used, not a second implementation.
+ * - **the keyboard** is forwarded to the studio ({@link FlowCanvasProps.onKeyDown}),
+ *   which owns `resolveShortcut` and the "yield inside a text field" rule.
+ *
+ * @param props - nodes, selection, the callbacks a gesture fires.
  * @returns the flow container.
  */
 export function FlowCanvas(props: FlowCanvasProps): ReactNode {
   const hostRef = useRef<HTMLElement | null>(null)
+  const flowRef = useRef<ReactFlowInstance | undefined>(undefined)
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 })
+  // Positions of nodes a gesture is currently moving. Local on purpose: the
+  // studio must not see a board write per frame (see the props' `onMoveNodes`).
+  const [live, setLive] = useState<ReadonlyMap<string, Point>>(() => new Map<string, Point>())
+  const [marqueeBox, setMarqueeBox] = useState<MarqueeBox | undefined>(undefined)
+  const dragRef = useRef<FlowDragState>(EMPTY_FLOW_DRAG)
+  const marqueeRef = useRef<{ readonly start: Point; readonly left: number; readonly top: number } | undefined>(undefined)
+  // A marquee ends with the browser's own `click`; without this the pane's click
+  // handler would immediately clear the selection the marquee just made.
+  const suppressClickRef = useRef(false)
+  // Latest props for the handlers React Flow keeps across renders.
+  const latest = useRef(props)
+  latest.current = props
 
   useEffect(() => {
     const host = hostRef.current
@@ -181,11 +374,28 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     }
   }, [])
 
+  // The imperative handle dies with the flow: a studio that keeps calling it
+  // after unmount must be a no-op, not a throw.
+  useEffect(() => () => {
+    flowRef.current = undefined
+    latest.current.onApi?.(undefined)
+  }, [])
+
   const selection = props.selection
   const locked = props.locked
   const model = useMemo(
     () => toFlowModel(props.nodes, selection === undefined ? {} : { selected: selection, locked }),
     [props.nodes, selection, locked],
+  )
+
+  const interaction = useMemo(
+    () => flowInteractionProps({
+      selectable: props.onSelect !== undefined,
+      panMode: props.panMode === true,
+      minZoom: FLOW_MIN_ZOOM,
+      maxZoom: FLOW_MAX_ZOOM,
+    }),
+    [props.onSelect, props.panMode],
   )
 
   const actions = {
@@ -200,9 +410,198 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
   // The model is pure data; the handlers ride along in `data` because React
   // Flow keeps `data` opaque and a node component is the only reader.
   const flowNodes = useMemo(
-    () => model.nodes.map((node) => ({ ...node, data: { ...node.data, actions } })),
-    [model, actions],
+    () => reseedFlowNodes(model, live, dragRef.current.dragging)
+      .map((node) => ({ ...node, data: { ...node.data, actions } })),
+    [model, live, actions],
   )
+
+  /**
+   * One batch of React Flow's change stream.
+   *
+   * Per frame this only moves pixels: the positions are folded through the
+   * library's own `applyNodeChanges` and kept in local state. The **commit** is
+   * decided by {@link foldDragChanges}: it fires `onMoveNodes` exactly once, on
+   * the change that carries `dragging: false`, and only if something moved. That
+   * separation is the whole of the "no write per frame" rule.
+   */
+  const onNodesChange = (changes: NodeChange[]): void => {
+    const touched = new Set<string>()
+    for (const change of changes) {
+      if (change.type === 'position' && change.position !== undefined) touched.add(change.id)
+    }
+    const base = new Map<string, Point>()
+    for (const node of model.nodes) base.set(node.id, { x: node.position.x, y: node.position.y })
+    const step = foldDragChanges(dragRef.current, base, changes as never)
+    dragRef.current = step.state
+
+    if (touched.size > 0) {
+      // The library's fold, then only the positions are kept: the array it
+      // returns is the node shape React Flow expects, and its positions are what
+      // is painted until the studio's write comes back.
+      const applied = applyNodeChanges(changes, flowNodes as never) as unknown as readonly FlowNodeSpec[]
+      const index = new Map(applied.map((node) => [node.id, node.position]))
+      const next = new Map<string, Point>()
+      for (const [id, point] of step.state.live) {
+        const position = index.get(id)
+        next.set(id, position === undefined ? point : { x: position.x, y: position.y })
+      }
+      setLive(next)
+    }
+
+    if (step.moved.size > 0) latest.current.onMoveNodes?.(step.moved)
+  }
+
+  const onInit = (instance: ReactFlowInstance): void => {
+    flowRef.current = instance
+    const api: FlowCanvasApi = {
+      fitView: () => {
+        const bounds = selectionBounds(flowNodeRects(latest.current.nodes))
+        const host = hostRef.current
+        const viewport = {
+          width: host === null ? 0 : (typeof host.clientWidth === 'number' ? host.clientWidth : 0),
+          height: host === null ? 0 : (typeof host.clientHeight === 'number' ? host.clientHeight : 0),
+        }
+        // G15 re-asked for the new engine: React Flow clamps at `minZoom` too,
+        // and "framed at 10 % with the far nodes still off-screen" must still be
+        // reported rather than silently accepted.
+        const clamped = fitWouldClamp(bounds, viewport, FLOW_MIN_ZOOM)
+        void instance.fitView({ padding: 0.2, maxZoom: 1, duration: 0 })
+        latest.current.onCameraChange?.(cameraFromFlow(instance.getViewport()))
+        return { clamped }
+      },
+      zoomBy: (factor: number) => {
+        const current = instance.getZoom()
+        const target = clampZoom((Number.isFinite(current) && current > 0 ? current : 1) * factor)
+        void instance.zoomTo(target, { duration: 0 })
+        latest.current.onCameraChange?.(cameraFromFlow(instance.getViewport()))
+      },
+      camera: () => cameraFromFlow(instance.getViewport()),
+      screenToWorld: (point: Point) => instance.screenToFlowPosition({ x: point.x, y: point.y }),
+    }
+    latest.current.onApi?.(api)
+  }
+
+  /* ---- pointer: marquee, focus and the click that follows it --------------- */
+
+  const onContainerPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const host = hostRef.current
+    const target = event.target as Element | null
+    if (host !== null && !isTypingTarget(target)) {
+      // The keyboard belongs to this container (§6.3's `tabIndex=0`); a click on
+      // a node or on the blank canvas must hand it over, not leave focus on
+      // whatever had it.
+      try {
+        host.focus({ preventScroll: true })
+      } catch {
+        // A focus failure must never swallow the gesture below.
+      }
+    }
+    if (event.button !== 0) return
+    // Hand mode pans instead (React Flow's own gesture), so no marquee.
+    if (latest.current.panMode === true) return
+    const pane = paneElementOf(event.target)
+    if (pane === undefined) return
+    if (typeof pane.getBoundingClientRect !== 'function') return
+    const box = pane.getBoundingClientRect()
+    const left = event.clientX - box.left
+    const top = event.clientY - box.top
+    marqueeRef.current = { start: { x: left, y: top }, left: box.left, top: box.top }
+    suppressClickRef.current = false
+    setMarqueeBox({ left, top, width: 0, height: 0 })
+    const capture = (event.currentTarget as HTMLElement).setPointerCapture
+    if (typeof capture === 'function') {
+      try {
+        capture.call(event.currentTarget, event.pointerId)
+      } catch {
+        // Capture is an optimisation; the container keeps receiving moves anyway.
+      }
+    }
+  }
+
+  const onContainerPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const gesture = marqueeRef.current
+    if (gesture === undefined) return
+    const x = event.clientX - gesture.left
+    const y = event.clientY - gesture.top
+    setMarqueeBox({
+      left: Math.min(gesture.start.x, x),
+      top: Math.min(gesture.start.y, y),
+      width: Math.abs(x - gesture.start.x),
+      height: Math.abs(y - gesture.start.y),
+    })
+  }
+
+  /**
+   * Release: turn the box into a selection, or hand the click back.
+   *
+   * The rectangle goes through `marqueeWorldRect` (the tested screen→world
+   * conversion) and the hits through `nodesInRect`, so the marquee catches what
+   * the *board* says is there, not what the culled render happened to paint.
+   * A `Shift` release unions onto the selection the drag started with (§6.1).
+   */
+  const onContainerPointerUp = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const gesture = marqueeRef.current
+    if (gesture === undefined) return
+    marqueeRef.current = undefined
+    setMarqueeBox(undefined)
+    const release = (event.currentTarget as HTMLElement).releasePointerCapture
+    if (typeof release === 'function') {
+      try {
+        release.call(event.currentTarget, event.pointerId)
+      } catch {
+        // Not captured (a cancelled gesture): nothing to release.
+      }
+    }
+    const x = event.clientX - gesture.left
+    const y = event.clientY - gesture.top
+    const moved = Math.abs(x - gesture.start.x) >= MARQUEE_CLICK_SLOP
+      || Math.abs(y - gesture.start.y) >= MARQUEE_CLICK_SLOP
+    if (!moved) return
+    suppressClickRef.current = true
+    const camera = flowRef.current === undefined ? undefined : cameraFromFlow(flowRef.current.getViewport())
+    if (camera === undefined) return
+    const world = marqueeWorldRect(camera, gesture.start, { x, y })
+    // The whole board, not the culled subset: a marquee that sweeps past the
+    // edge of the viewport must still catch what is there (§6.1).
+    const hits = nodesInRect(flowNodeRects(latest.current.nodes), world)
+    const current = latest.current.selection ?? new Set<string>()
+    latest.current.onSelect?.([...marqueeSelection(current, hits, event.shiftKey === true)])
+  }
+
+  /* ---- selection: click, toggle, clear ------------------------------------ */
+
+  const onPaneClick = (): void => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    latest.current.onSelect?.([])
+  }
+
+  const onNodeClick = (event: { readonly ctrlKey?: boolean; readonly metaKey?: boolean }, node: { readonly id: string }): void => {
+    const current = latest.current.selection ?? new Set<string>()
+    const additive = event.ctrlKey === true || event.metaKey === true
+    latest.current.onSelect?.([...toggleSelection(current, node.id, additive)])
+  }
+
+  const onNodeDoubleClick = (_event: unknown, node: { readonly id: string; readonly data?: Record<string, unknown> }): void => {
+    // G22: only a picture has something to look at.
+    if (node.data?.['kind'] !== 'image') return
+    latest.current.onOpen?.(node.id)
+  }
+
+  /* ---- right-click -------------------------------------------------------- */
+
+  const openContextMenu = (event: { readonly clientX: number; readonly clientY: number; preventDefault?: () => void }, nodeId?: string): void => {
+    event.preventDefault?.()
+    const host = hostRef.current
+    const box = host !== null && typeof host.getBoundingClientRect === 'function' ? host.getBoundingClientRect() : undefined
+    latest.current.onContextMenu?.({
+      x: event.clientX - (box === undefined ? 0 : box.left),
+      y: event.clientY - (box === undefined ? 0 : box.top),
+      ...(nodeId === undefined ? {} : { nodeId }),
+    })
+  }
 
   const measured = size.width > 0 && size.height > 0
 
@@ -211,7 +610,18 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     {
       className: 'dsh-forge-flow',
       ref: hostRef,
+      // §6.3: the container owns the keyboard table, and the studio's handler is
+      // forwarded rather than reimplemented.
+      tabIndex: 0,
       'data-flow-size': `${String(size.width)}x${String(size.height)}`,
+      ...(props.onKeyDown === undefined ? {} : { onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => { latest.current.onKeyDown?.(event) } }),
+      ...(props.onKeyUp === undefined ? {} : { onKeyUp: (event: ReactKeyboardEvent<HTMLDivElement>) => { latest.current.onKeyUp?.(event) } }),
+      onPointerDown: onContainerPointerDown,
+      onPointerMove: onContainerPointerMove,
+      onPointerUp: onContainerPointerUp,
+      onPointerCancel: onContainerPointerUp,
+      ...(props.onDragOver === undefined ? {} : { onDragOver: (event: ReactDragEvent<HTMLDivElement>) => { latest.current.onDragOver?.(event) } }),
+      ...(props.onDrop === undefined ? {} : { onDrop: (event: ReactDragEvent<HTMLDivElement>) => { latest.current.onDrop?.(event) } }),
     },
     measured
       ? createElement(
@@ -221,37 +631,47 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             edges: model.edges,
             nodeTypes: FLOW_NODE_TYPES,
             edgeTypes: FLOW_EDGE_TYPES,
-            // Step 1b renders; S2/S3 attach the gestures. Nothing may move a
-            // node's stored position until the write path exists.
-            nodesDraggable: false,
-            nodesConnectable: false,
-            elementsSelectable: props.onSelect !== undefined,
-            panOnDrag: true,
+            ...interaction,
+            onInit,
+            onNodesChange,
+            onNodeClick,
+            onNodeDoubleClick,
+            onPaneClick,
+            onPaneContextMenu: (event: { readonly clientX: number; readonly clientY: number; preventDefault?: () => void }) => { openContextMenu(event) },
+            onNodeContextMenu: (event: { readonly clientX: number; readonly clientY: number; preventDefault?: () => void }, node: { readonly id: string }) => { openContextMenu(event, node.id) },
+            onMoveEnd: (_event: unknown, viewport: { readonly x: number; readonly y: number; readonly zoom: number }) => {
+              latest.current.onCameraChange?.(cameraFromFlow(viewport))
+            },
             zoomOnScroll: true,
-            zoomOnDoubleClick: false,
-            minZoom: 0.1,
-            maxZoom: 8,
-            fitView: true,
             fitViewOptions: { padding: 0.2, maxZoom: 1 },
             proOptions: { hideAttribution: true },
-            ...(props.onSelect === undefined
-              ? {}
-              : {
-                  onSelectionChange: ({ nodes: picked }: { nodes: readonly { id: string }[] }) => {
-                    props.onSelect?.(picked.map((node) => node.id))
-                  },
-                }),
           },
           createElement(CanvasBackground),
           model.nodes.length === 0
             ? createElement(
                 'p',
                 { className: 'dsh-forge-flow-hint' },
-                '这个画板还是空的。生成的第一张图会落在这里；滚轮缩放，拖空白处平移画布。',
+                '这个画板还是空的。生成的第一张图会落在这里；拖空白处框选，空格或中键平移，滚轮缩放。',
               )
             : null,
         )
       : createElement('p', { className: 'dsh-forge-flow-note', role: 'status' }, '画布准备中…'),
+    marqueeBox === undefined
+      ? null
+      : createElement('div', {
+          className: 'dsh-forge-marquee',
+          'data-flow-marquee': 'on',
+          style: {
+            left: `${String(marqueeBox.left)}px`,
+            top: `${String(marqueeBox.top)}px`,
+            width: `${String(marqueeBox.width)}px`,
+            height: `${String(marqueeBox.height)}px`,
+          },
+        }),
+    // The studio's screen-space overlays (menu, board picker, lightbox) live in
+    // here so they inherit the canvas's own coordinate system: the studio hands
+    // them as one node, and both render paths use the same markup.
+    props.overlay ?? null,
   )
 }
 
@@ -321,16 +741,22 @@ function NodeHandles(): ReactNode {
  */
 export function ImageFlowNode(props: NodeProps): ReactNode {
   const data = props.data as Record<string, unknown>
+  const actions = actionsOf(data)
   const zoom = useFlowZoom()
   const selected = props.selected === true
+  const nodeId = String(data['nodeId'] ?? props.id)
   return createElement(
     'div',
     {
       className: nodeClassName('image', selected),
       'data-node-kind': 'image',
-      'data-node-id': String(data['nodeId'] ?? props.id),
+      'data-node-id': nodeId,
       style: { '--dsh-forge-zoom': String(zoom) },
       title: String(data['title'] ?? ''),
+      // G22: the lightbox opens on the picture itself. Both this and React
+      // Flow's own `onNodeDoubleClick` lead to the same idempotent studio
+      // callback, so a platform where one of the two does not fire still opens.
+      onDoubleClick: () => { actions.onOpen?.(nodeId) },
     },
     createElement('img', {
       className: 'dsh-forge-flow-thumb',

@@ -1203,6 +1203,22 @@ function LayoutEditorMount(props: LayoutEditorMountProps): ReturnType<typeof cre
 }
 
 /**
+ * What a mounted canvas engine can be asked to do imperatively (U04 step 2).
+ *
+ * Structural on purpose: `./canvas-pane.ts` owns the real type, and this file
+ * must not import it (the pane imports *this* module for `StudioPanel`, so a
+ * type import would close a cycle the bundler refuses). Only the two calls the
+ * studio's own toolbar makes are declared — the rest of the engine's handle is
+ * for later phases and stays behind its own module.
+ */
+export interface CanvasEngine {
+  /** Frame every node; `clamped` says the zoom floor left some of them out. */
+  fitView(): { readonly clamped: boolean }
+  /** Multiply the zoom around the viewport centre. */
+  zoomBy(factor: number): void
+}
+
+/**
  * What a host may hand the panel (U04 step 1b).
  *
  * Both props exist to let the tabbed shell own a *board* and the *canvas
@@ -1347,6 +1363,10 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const [handMode, setHandMode] = useState(false)
   // Undo history (§6.5, DD9): in memory, session-scoped, capped by the stack.
   const historyRef = useRef<CommandStack>(new CommandStack())
+  // U04 step 2: the mounted canvas engine's imperative handle, when the shell
+  // supplies one. The toolbar's 适应 / + / − go through it, because React Flow
+  // owns the camera and this component's `camera` state is only a mirror of it.
+  const flowEngineRef = useRef<CanvasEngine | undefined>(undefined)
   const nudgeRef = useRef<NudgeSession | undefined>(undefined)
   // Board state: the library, the one on screen, and its rename editor.
   const [boards, setBoards] = useState<BoardSummary[]>([])
@@ -2487,6 +2507,17 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * leaves whatever the panel was already saying alone.
    */
   const fitView = useCallback(() => {
+    // U04 step 2: with an engine mounted, *it* owns the camera and the fit; the
+    // DOM canvas's camera maths below would otherwise move a camera nothing
+    // draws. The clamp note is still this component's business — G15's promise
+    // is that a fit which cannot frame the board says so.
+    const engine = flowEngineRef.current
+    if (engine !== undefined) {
+      if (engine.fitView().clamped) {
+        setNote('已到最小缩放（10%），还有节点在视口外：用滚轮平移过去，或把这张画布拆成多个画板。')
+      }
+      return
+    }
     const element = canvasRef.current
     if (element === null) return
     const box = element.getBoundingClientRect()
@@ -2561,6 +2592,37 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     pushCommand(moveCommand(label, before, after))
     scheduleLayout()
   }, [applyPositions, moveCommand, positionsOf, pushCommand, scheduleLayout])
+
+  /**
+   * A finished drag from the canvas engine, as one undoable step.
+   *
+   * The engine reports a drag **once**, when the pointer is released, and only
+   * the ids that actually moved (see "no write per frame" in
+   * `./canvas-pane.ts`): nothing arrives mid-gesture, so this is the same path an
+   * alignment takes — one command on the undo stack, one debounced save. An
+   * empty map means the gesture ended where it began and nothing is recorded.
+   */
+  const moveNodesFromGesture = useCallback((positions: ReadonlyMap<string, Point>) => {
+    if (positions.size === 0) return
+    applyPositionsCommand('drag', new Map(positions))
+  }, [applyPositionsCommand])
+
+  /**
+   * Mirror the engine's camera into this component's state.
+   *
+   * Two things read it: the toolbar's zoom label, and the board's stored
+   * `camera`. A camera-only flush is a legitimate save (it is how a board
+   * reopens where it was left), and it rides the same 700 ms debounce.
+   */
+  const adoptEngineCamera = useCallback((camera: Camera) => {
+    setCamera(camera)
+    scheduleLayout()
+  }, [scheduleLayout])
+
+  /** Take the engine's imperative handle, or drop it when that engine unmounts. */
+  const adoptEngineApi = useCallback((engine: CanvasEngine | undefined) => {
+    flowEngineRef.current = engine
+  }, [])
 
   /** Align the selection to its own bounding box (§6.2); needs two nodes. */
   const alignSelection = useCallback((mode: AlignMode) => {
@@ -3719,6 +3781,13 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
 
   /** Zoom around the viewport centre, for the toolbar buttons. */
   const zoomBy = useCallback((factor: number) => {
+    // Same split as `fitView`: with an engine mounted, the engine's camera is the
+    // only camera, and the toolbar's + / − drive it.
+    const engine = flowEngineRef.current
+    if (engine !== undefined) {
+      engine.zoomBy(factor)
+      return
+    }
     const element = canvasRef.current
     if (element === null) {
       setCamera((current) => ({ ...current, zoom: clampZoom(current.zoom * factor) }))
@@ -4008,14 +4077,17 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * right-click on a node outside the selection selects it first — a menu acting
    * on something the user cannot see selected is a trap.
    */
-  const onCanvasContextMenu = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    event.preventDefault()
-    // The element comes off the event, not the ref: this handler has to work
-    // even before the canvas has been measured (and it keeps the DOM inspection
-    // in one shape with the pointer handlers).
-    const box = event.currentTarget.getBoundingClientRect()
-    const hit = (event.target as HTMLElement).closest('.dsh-forge-node')
-    const target = hit === null ? undefined : (hit as HTMLElement).dataset.nodeId
+  /**
+   * Open the §6.4 menu at a point, for one target node (or blank canvas).
+   *
+   * Split out of the DOM adapter below for U04 step 2: the React Flow canvas
+   * knows which node was hit and where the pointer was *relative to its own box*,
+   * but it knows nothing about `.dsh-forge-node` or `currentTarget`. Both engines
+   * therefore call this one function, so the menu a user sees is decided by the
+   * same `contextMenuItems` data — and the same selection rule ("right-clicking a
+   * node outside the selection selects it first") — whichever engine drew it.
+   */
+  const openContextMenuAt = useCallback((x: number, y: number, target: string | undefined) => {
     let size = selection.size
     if (target !== undefined && !selection.has(target)) {
       setSelection(new Set([target]))
@@ -4035,13 +4107,36 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         selectionSize: size,
         ...(taskState === undefined ? {} : { taskState }),
       })
-    setMenu({
-      x: event.clientX - box.left,
-      y: event.clientY - box.top,
-      items,
-      target,
-    })
+    setMenu({ x, y, items, target })
   }, [selection])
+
+  /**
+   * Open the §6.4 menu at the pointer (the DOM canvas's adapter).
+   *
+   * The item list is generated by the pure `contextMenuItems`, so what the menu
+   * offers is unit-testable and the handler below only maps ids to actions. A
+   * right-click on a node outside the selection selects it first — a menu acting
+   * on something the user cannot see selected is a trap.
+   */
+  const onCanvasContextMenu = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    // The element comes off the event, not the ref: this handler has to work
+    // even before the canvas has been measured (and it keeps the DOM inspection
+    // in one shape with the pointer handlers).
+    const box = event.currentTarget.getBoundingClientRect()
+    const hit = (event.target as HTMLElement).closest('.dsh-forge-node')
+    const target = hit === null ? undefined : (hit as HTMLElement).dataset.nodeId
+    openContextMenuAt(event.clientX - box.left, event.clientY - box.top, target)
+  }, [openContextMenuAt])
+
+  /**
+   * The engine's adapter: it already did the hit test and the offset.
+   *
+   * @param request - where the right-click happened, and the node under it.
+   */
+  const openContextMenuFromEngine = useCallback((request: { readonly x: number; readonly y: number; readonly nodeId?: string }) => {
+    openContextMenuAt(request.x, request.y, request.nodeId)
+  }, [openContextMenuAt])
 
   /**
    * Run one menu item (§6.4).
@@ -4981,58 +5076,89 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               view === 'assets' ? `${String(assetsTotal)} 张素材` : `${String(batches.length)} 批`,
             ),
         ),
-        view === 'canvas' && canvasSlot !== undefined
-          // U04 step 1b: the shell supplies the canvas engine (React Flow, via
-          // `./canvas-pane.ts`). Everything below this line is the pre-engine
-          // path — still the fallback when a mount passes no canvas, and the
-          // reference the new painters were ported from.
-          ? createElement(canvasSlot as (input: unknown) => unknown, {
-            boardId,
-            nodes,
-            selection,
-            onSelect: (ids: readonly string[]) => { setSelection(new Set(ids)) },
-            onDraft: updateLayoutDraft,
-            onRetry: retryTask,
-            onCancel: cancelTask,
-            onRemove: removeNode,
-            onOpen: openLightbox,
-            onGenerateLayout: generateLayoutNode,
-          })
-          : view === 'canvas'
+        view === 'canvas'
+          // U04 step 2: **one** canvas container for both engines.
+          //
+          // The container is what the screen-space overlays below (marquee, menu,
+          // board picker, lightbox) are positioned in, and it is what carries the
+          // `is-pan` cursor. Keeping it in place means the React Flow pane
+          // inherits those overlays instead of growing a second copy of them —
+          // which is why the menu a user opens on the flow canvas is the same
+          // markup, the same handlers and the same `contextMenuItems` data as the
+          // one the DOM canvas opens.
+          //
+          // The keyboard and the pointer gestures go to whichever engine is
+          // mounted: the DOM canvas owns them itself (§6.3's `tabIndex=0` and
+          // the gesture refs), the flow canvas owns its own and forwards the keys
+          // back here through `onKeyDown` (see `./canvas-pane.ts`).
           ? createElement(
             'div',
-            {
-              // §6.3: `tabIndex=0` is what makes the canvas container the owner of
-              // the keyboard table; the shortcuts deliberately do not bubble from
-              // the form, which keeps Delete and Ctrl+Z editing text there.
-              className: panHeld || handMode ? 'dsh-forge-canvas is-pan' : 'dsh-forge-canvas',
-              tabIndex: 0,
-              ref: canvasRef,
-              onPointerDown: onCanvasPointerDown,
-              onPointerMove: onCanvasPointerMove,
-              onPointerUp: endGesture,
-              onPointerCancel: endGesture,
-              onPointerLeave: endGesture,
-              onKeyDown: onCanvasKeyDown,
-              onKeyUp: onCanvasKeyUp,
-              onContextMenu: onCanvasContextMenu,
-              // §7.1/§7.3: a library card or an OS file can be dropped here.
-              onDragOver: onCanvasDragOver,
-              onDrop: onCanvasDrop,
-              onBlur: () => {
-                // Focus left with Space still down: the held state must not stick.
-                panRef.current = false
-                setPanHeld(false)
+            canvasSlot === undefined
+              ? {
+                // §6.3: `tabIndex=0` is what makes the canvas container the owner of
+                // the keyboard table; the shortcuts deliberately do not bubble from
+                // the form, which keeps Delete and Ctrl+Z editing text there.
+                className: panHeld || handMode ? 'dsh-forge-canvas is-pan' : 'dsh-forge-canvas',
+                tabIndex: 0,
+                ref: canvasRef,
+                onPointerDown: onCanvasPointerDown,
+                onPointerMove: onCanvasPointerMove,
+                onPointerUp: endGesture,
+                onPointerCancel: endGesture,
+                onPointerLeave: endGesture,
+                onKeyDown: onCanvasKeyDown,
+                onKeyUp: onCanvasKeyUp,
+                onContextMenu: onCanvasContextMenu,
+                // §7.1/§7.3: a library card or an OS file can be dropped here.
+                onDragOver: onCanvasDragOver,
+                onDrop: onCanvasDrop,
+                onBlur: () => {
+                  // Focus left with Space still down: the held state must not stick.
+                  panRef.current = false
+                  setPanHeld(false)
+                },
+              }
+              : {
+                className: panHeld || handMode ? 'dsh-forge-canvas is-flow is-pan' : 'dsh-forge-canvas is-flow',
               },
-            },
-            nodes.length === 0 && view === 'canvas'
+            canvasSlot === undefined
+              ? (nodes.length === 0 && view === 'canvas'
+                ? createElement(
+                  'p',
+                  { className: 'dsh-forge-canvas-hint' },
+                  busy ? '正在生成…' : '这个画板还是空的。生成的第一张图会落在这里；拖空白处框选，Space 或中键平移，滚轮缩放，拖图可改位置。',
+                )
+                : null)
+              // The engine the shell supplies (`FlowCanvas`): it draws the board
+              // and owns every gesture; this object is the whole contract.
+              : createElement(canvasSlot as (input: unknown) => unknown, {
+                boardId,
+                nodes,
+                selection,
+                onSelect: (ids: readonly string[]) => { setSelection(new Set(ids)) },
+                onDraft: updateLayoutDraft,
+                onRetry: retryTask,
+                onCancel: cancelTask,
+                onRemove: removeNode,
+                onOpen: openLightbox,
+                onGenerateLayout: generateLayoutNode,
+                // Step 2: the gestures the DOM canvas had. Each one lands on the
+                // same studio callback the fallback path uses, so the undo stack,
+                // the 700 ms save debounce and the menus cannot diverge.
+                onMoveNodes: moveNodesFromGesture,
+                onContextMenu: openContextMenuFromEngine,
+                onKeyDown: onCanvasKeyDown,
+                onKeyUp: onCanvasKeyUp,
+                onCameraChange: adoptEngineCamera,
+                onApi: adoptEngineApi,
+                panMode: panHeld || handMode,
+                // §7.1/§7.3: the engine is what covers the canvas now, so it is
+                // also what has to accept a dropped file or library card.
+                onDragOver: onCanvasDragOver,
+                onDrop: onCanvasDrop,
+              }),
+            canvasSlot === undefined
               ? createElement(
-                'p',
-                { className: 'dsh-forge-canvas-hint' },
-                busy ? '正在生成…' : '这个画板还是空的。生成的第一张图会落在这里；拖空白处框选，Space 或中键平移，滚轮缩放，拖图可改位置。',
-              )
-              : null,
-            createElement(
               'div',
               {
                 className: 'dsh-forge-canvas-layer',
@@ -5318,7 +5444,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                   connectHandle(node),
                 )
               }),
-            ),
+            )
+              : null,
             // ---- screen-space overlays -------------------------------------
             //
             // Both live outside `dsh-forge-canvas-layer` on purpose (§6.1, §6.4):

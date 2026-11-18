@@ -111,6 +111,14 @@ export const STUDIO_CSS = `
 .dsh-forge-canvas.is-pan:active{cursor:grabbing}
 .dsh-forge-canvas:focus{outline:none}
 .dsh-forge-canvas:focus-visible{box-shadow:0 0 0 2px rgba(59,130,246,.28)}
+/* U04 step 2: the canvas engine inside the canvas container.
+   The container keeps the border and the screen-space overlays (menu, board
+   picker, lightbox); the pane fills it exactly, so React Flow measures a real box
+   — its height is what it projects the camera into — and the menu coordinates the
+   pane reports share one origin with the overlays. The dot background moves to
+   React Flow's own layer, so the container's copy is switched off here. */
+.dsh-forge-canvas.is-flow{background-image:none;display:flex}
+.dsh-forge-canvas.is-flow>.dsh-forge-flow{position:absolute;inset:0;min-height:0;border:0;border-radius:0}
 .dsh-forge-canvas-layer{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
 .dsh-forge-canvas-edges{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
 .dsh-forge-edge{fill:none;stroke:rgba(59,130,246,.5);stroke-width:2;stroke-dasharray:6 5;stroke-linecap:round;vector-effect:non-scaling-stroke}
@@ -348,6 +356,10 @@ export const WORKBENCH_CSS = `
  */
 export const CANVAS_FLOW_CSS = `
 .dsh-forge-flow{position:relative;flex:1 1 auto;min-height:clamp(300px,50vh,540px);border:1px solid rgba(127,127,127,.28);border-radius:10px;overflow:hidden;background-color:rgba(127,127,127,.035)}
+/* §6.3: the flow container owns the keyboard table, so it is focusable — and a
+   focus ring around the whole canvas would read as a selected region. */
+.dsh-forge-flow:focus{outline:none}
+.dsh-forge-flow:focus-visible{box-shadow:0 0 0 2px rgba(59,130,246,.28)}
 .dsh-forge-flow .react-flow{background:transparent}
 .dsh-forge-flow-note{margin:0;padding:26px 12px;text-align:center;font-size:12px;opacity:.55}
 .dsh-forge-flow-hint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);margin:0;padding:0 28px;max-width:44ch;text-align:center;font-size:12.5px;line-height:1.7;opacity:.45;z-index:4;pointer-events:none}

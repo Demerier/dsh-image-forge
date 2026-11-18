@@ -21,7 +21,7 @@
  * and a fake EventSource; see the section note for what that does and does not
  * prove.
  *
- * ## What left automation in U04 step 1b
+ * ## What left automation in U04 step 1b, and where it stands after step 2
  *
  * Step 1b replaced the hand-rolled canvas with React Flow (`src/canvas-pane.ts`).
  * React Flow needs a real DOM: a measured container, `ResizeObserver`, pointer
@@ -31,28 +31,42 @@
  * moved out of automation rather than weakened. They are listed here because a
  * green run must not read as "these still pass":
  *
- *   - selection, Ctrl-toggle and marquee box            (S2)
- *   - Delete / Ctrl+Z / Ctrl+Shift+Z on the canvas      (S2)
- *   - the shortcut table and Escape-clear               (S2)
- *   - the right-click menu, on blank canvas and a node  (S2)
+ *   - selection, Ctrl-toggle and marquee box            (S2 — 已接线,待人工验收)
+ *   - Delete / Ctrl+Z / Ctrl+Shift+Z on the canvas      (S2 — 已接线,待人工验收)
+ *   - the shortcut table and Escape-clear               (S2 — 已接线,机器可见: Ctrl+A 与 Esc
+ *                                                        由 `U04 S2` 用例经 canvas 容器驱动)
+ *   - the right-click menu, on blank canvas and a node  (S2 — 已接线,待人工验收: 菜单数据
+ *                                                        `contextMenuItems` 与其映射仍由
+ *                                                        `canvas-interactions.test.mjs` 断言)
+ *   - node drag and its write-back                      (S2 — 半自动: 纯函数 `foldDragChanges`
+ *                                                        + `snapshotCommand` 的 undo 链路已断言,
+ *                                                        真实指针拖动待人工/ego-browser)
+ *   - fit (`F` / 适应) 与缩放下限提示                    (S2 — 半自动: `fitWouldClamp` 已断言,
+ *                                                        React Flow 的实际取景待人工)
  *   - the output handle, its screen size and the wire   (S3)
  *   - drop-to-create: draft / 布局 / 素材 picker         (S3)
  *   - copy/move to another board from the node menu     (S3)
- *   - the lightbox (G22) and its arrow keys             (S2)
+ *   - the lightbox (G22) and its arrow keys             (S2 — 双击经 `onOpen` 接线,覆盖层
+ *                                                        与 ←/→ 待人工验收)
  *   - the task node: clientId binding, retry, interrupt (S4)
  *   - the layout node: rebuild, create, generate, save  (S4)
  *
  * Their replacements are, in order: `test/canvas-flow-model.test.mjs` for the
  * board→flow mapping (geometry, kinds, edges, selection — the part that *is*
  * decidable without a browser, including the C13 "persisted layout entry
- * rebuilds with its draft and display box" assertion), and a manual /
+ * rebuilds with its draft and display box" assertion) and for step 2's
+ * interaction glue (the drag reducer, the viewport→camera conversion, the
+ * marquee hit test and the library's switched-off key bindings); the `U04 S2`
+ * cases at the bottom of this file for the wiring that a host element can still
+ * expose; `test/bundle-xyflow.test.mjs` for the shipped artifact; and a manual /
  * ego-browser checklist per phase for the rest. The gesture state machines
  * themselves never lost coverage: `canvas-interactions.test.mjs`,
  * `canvas-connections.test.mjs` and `canvas-export.test.mjs` are untouched.
  *
  * What remains here about the canvas is what a Node process can still prove:
  * the copy the bundle ships (`dsh-forge-canvas` strings), the pure geometry
- * (zoom floor, thumbnails) and the board writers' validation.
+ * (zoom floor, thumbnails), the board writers' validation, and — since step 2 —
+ * the keyboard the flow canvas forwards to the studio's shortcut table.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -2902,5 +2916,112 @@ test('P2: an instance the user started is not offered a stop button', async () =
     network.restore()
   }
 })
+
+// ---------------------------------------------------------------------------
+// U04 step 2: the interaction layer on the React Flow canvas.
+//
+// What can be driven here is the **wiring**, not the gesture: the pane's
+// container is a host element, so its handlers can be called and the studio's
+// reaction asserted through the tree. What cannot: pointer capture, React Flow's
+// own drag, and the engine's `onInit` (it only runs in a measured container,
+// which the DOM-less renderer never produces). Those stay on the manual list —
+// see the note at the top of this file.
+// ---------------------------------------------------------------------------
+
+/** The flow canvas's container: the element that owns the keyboard. */
+function flowContainer(panel) {
+  const found = fakeElementWithClass(panel.tree, 'dsh-forge-flow')
+  assert.ok(found !== undefined, 'the canvas tab must render the flow container')
+  return found
+}
+
+/** The first host element with `className`, re-read after a re-render. */
+function byClassNow(panel, className) {
+  return fakeElementWithClass(panel.tree, className)
+}
+
+test('U04 S2: the flow canvas takes the canvas’ keyboard, and the studio acts on it', async () => {
+  const mounted = await mountCanvasWorkbench()
+  try {
+    const container = flowContainer(mounted.panel)
+    // §6.3: the canvas owns the shortcut table, so its container must be
+    // focusable and must carry the studio's own handler — not a second table.
+    assert.equal(container.props.tabIndex, 0, 'the canvas container must be focusable')
+    assert.equal(typeof container.props.onKeyDown, 'function')
+    assert.equal(typeof container.props.onKeyUp, 'function')
+    // The same container carries the pointer gestures the marquee needs.
+    for (const handler of ['onPointerDown', 'onPointerMove', 'onPointerUp', 'onPointerCancel']) {
+      assert.equal(typeof container.props[handler], 'function', `${handler} must be wired`)
+    }
+
+    // Nothing is selected on a fresh board: no alignment toolbar.
+    assert.equal(byClassNow(mounted.panel, 'dsh-forge-align'), undefined)
+
+    // Ctrl+A is the studio's `resolveShortcut` → select-all; the toolbar appears
+    // because the multi-selection rule is "two or more" (§6.2).
+    flowContainer(mounted.panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(mounted.panel)
+    assert.ok(byClassNow(mounted.panel, 'dsh-forge-align') !== undefined, 'Ctrl+A must select the board')
+
+    // Escape clears it (§6.3), and the toolbar goes away with the selection.
+    flowContainer(mounted.panel).props.onKeyDown(keyEvent('Escape'))
+    await settle(mounted.panel)
+    assert.equal(byClassNow(mounted.panel, 'dsh-forge-align'), undefined, 'Escape must clear the selection')
+
+    // The engine path is the same studio callback the fallback canvas drives, so
+    // pressing a key there must also yield: a text field keeps its own keys.
+    flowContainer(mounted.panel).props.onKeyDown(keyEvent('a', { ctrl: true }, { tagName: 'INPUT' }))
+    await settle(mounted.panel)
+    assert.equal(byClassNow(mounted.panel, 'dsh-forge-align'), undefined, 'inside an input the canvas yields')
+  } finally {
+    mounted.restoreFrames()
+    mounted.network.restore()
+  }
+})
+
+test('U04 S2: the flow container is the canvas box the overlays are positioned in', async () => {
+  // The menu, the board picker and the lightbox are drawn by the studio and
+  // positioned in screen coordinates. Step 2 puts the engine *inside* the old
+  // canvas container, so those overlays keep one origin and one markup instead of
+  // growing a second copy — this asserts the container is still rendered (the
+  // overlays' positioning context) while the engine branch is taken.
+  const mounted = await mountCanvasWorkbench()
+  try {
+    const canvasBox = canvasElement(mounted.panel)
+    assert.ok(canvasBox !== undefined, 'the canvas container survives the engine swap')
+    assert.ok(
+      String(canvasBox.props.className).split(' ').includes('is-flow'),
+      'and says which engine it holds',
+    )
+    // The container itself is no longer the keyboard owner when the engine is
+    // mounted: two tab stops for one canvas would fight over focus.
+    assert.equal(canvasBox.props.tabIndex, undefined)
+    assert.equal(canvasBox.props.onPointerDown, undefined, 'the DOM gesture refs stay off with the engine mounted')
+  } finally {
+    mounted.restoreFrames()
+    mounted.network.restore()
+  }
+})
+
+test('U04 S2: the engine wiring ships in the artifact, one call per gesture', () => {
+  // The engine's own handlers only run in a measured container, which this
+  // harness cannot produce. What a Node process can still prove is that the
+  // wiring is in the shipped bundle and points at the studio's callbacks: a
+  // missing `onMoveNodes` would mean drags are painted and never saved.
+  for (const marker of [
+    'onMoveNodes: moveNodesFromGesture',
+    'onContextMenu: openContextMenuFromEngine',
+    'onCameraChange: adoptEngineCamera',
+    'onApi: adoptEngineApi',
+    'onKeyDown: onCanvasKeyDown',
+  ]) {
+    assert.ok(CLIENT_SOURCE.includes(marker), `${marker} must be in the canvas pane’s contract`)
+  }
+  // And the menu the pane opens is the §6.4 one the DOM canvas opens.
+  assert.ok(CLIENT_SOURCE.includes('openContextMenuAt'), 'both engines must share one menu builder')
+  // Drag write-back is one commit per gesture: the reducer is in the bundle.
+  assert.ok(CLIENT_SOURCE.includes('foldDragChanges'), 'the drag reducer must ship')
+})
+
 
 

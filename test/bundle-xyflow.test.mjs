@@ -177,6 +177,8 @@ test('the artifact stays inside the size budget the pane was measured at', (t) =
   t.diagnostic(`lib/client.js ${bytes} B, ${gzipped} B gzip`)
   // Measured at U04 step 1b, React Flow 12.12.1 inlined: 833,700 B raw and
   // 218,636 B gzip (the CSS-only step 1a artifact was 409,772 B / 108,342 B).
+  // Step 2 (the gestures) adds the marquee, the drag reducer and the keyboard
+  // forwarding on top of that.
   // The ceiling is deliberately loose — roughly +32 % raw and +37 % gzip — because
   // what it guards against is a *second* canvas library or a stray d3 copy being
   // pulled into a bundle the client evaluates on every page load, not a byte
@@ -188,4 +190,41 @@ test('the artifact stays inside the size budget the pane was measured at', (t) =
   assert.ok(BUNDLE.includes('dsh-forge-flow-node'), 'the pane’s node painters must ship')
   assert.ok(BUNDLE.includes('react-flow__node'), 'React Flow’s node wrapper must ship')
   assert.ok(BUNDLE.includes('getBezierPath'), 'the lineage edge’s path builder must ship')
+})
+
+/**
+ * U04 step 2's regression guard: the library's own key bindings must stay off.
+ *
+ * These four lines are the difference between "the canvas has one handler per
+ * gesture" and "the canvas has two": React Flow binds `Backspace` to a delete,
+ * `Shift` to a marquee and `Ctrl/Cmd`-click to a selection toggle **by default**,
+ * and this canvas implements all three itself (`resolveShortcut`,
+ * `marqueeWorldRect`, `toggleSelection`). The failure mode is silent — a Delete
+ * that fires twice, a Shift-marquee that replaces the selection the user asked to
+ * extend — so it is asserted on the shipped artifact, in the same style as the
+ * packaging contract above.
+ */
+test('the interaction config ships with the library’s own bindings switched off', () => {
+  // Read from the bundle, not from the source: this is what the browser gets.
+  assert.ok(
+    BUNDLE.includes('nodesConnectable: false'),
+    'nodesConnectable must stay false until the wire gesture lands (S3)',
+  )
+  assert.ok(BUNDLE.includes('nodesDraggable: true'), 'dragging is the gesture whose positions are written back')
+  for (const key of ['deleteKeyCode', 'multiSelectionKeyCode', 'selectionKeyCode']) {
+    assert.ok(
+      BUNDLE.includes(`${key}: null`),
+      `${key} must be null: this canvas implements that gesture itself, and two handlers for one key is the bug`,
+    )
+  }
+  assert.ok(
+    BUNDLE.includes('selectionOnDrag: false'),
+    'the marquee is marqueeWorldRect’s; React Flow must not draw a second one',
+  )
+  // Hand mode and middle-drag panning: one expression, so a later edit cannot
+  // make the pane pan on left-drag and tear a marquee at the same time.
+  assert.ok(BUNDLE.includes('panOnDrag: options.panMode === true ? true : [1]'))
+  // The keyboard and the drag write-back must be in the shipped bundle.
+  assert.ok(BUNDLE.includes('foldDragChanges'), 'the one-commit-per-drag reducer must ship')
+  assert.ok(BUNDLE.includes('marqueeWorldRect'), 'the marquee must reuse the tested screen→world conversion')
 })

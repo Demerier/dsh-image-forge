@@ -33,6 +33,7 @@
  * @module canvas-flow-model
  */
 import { CANVAS_NODE_HEIGHT, CANVAS_NODE_WIDTH, nodeDisplaySize } from './studio-canvas.ts'
+import type { Camera, Point, Rect } from './studio-canvas.ts'
 import { clampLayoutNodeWidth, layoutNodeHeight } from './layout-editor.ts'
 import {
   STUDIO_NODE_THUMB_WIDTH,
@@ -443,4 +444,314 @@ export function flowModelFingerprint(model: FlowModel): string {
   parts.push('|')
   for (const edge of model.edges) parts.push(`${edge.id}>${edge.source ?? ''}->${edge.target}`)
   return parts.join(';')
+}
+
+/* -------------------------------------------------------------------------- */
+/* Interaction glue (U04 step 2)                                              */
+/* -------------------------------------------------------------------------- */
+//
+// Step 1b shipped a *renderer*: React Flow drew the board and nothing could move
+// it. Step 2 re-attaches the gestures the hand-rolled canvas had. Everything a
+// gesture *decides* is still a pure function — `src/canvas-interactions.ts` owns
+// the marquee, the selection algebra and the undo stack — but React Flow speaks
+// its own vocabulary (viewport transforms, `NodeChange` streams, interaction
+// props), so the translation layer lives here and is asserted without a DOM.
+//
+// The three translations:
+//
+// 1. {@link cameraFromFlow} — React Flow's `{x, y, zoom}` transform into the
+//    studio's camera convention, so `marqueeWorldRect` (already tested) is what
+//    decides which nodes a marquee covers instead of a second copy of that maths.
+// 2. {@link foldDragChanges} — a `NodeChange` stream into "where is this drag
+//    now, and did it just end". One commit per gesture, not one per frame.
+// 3. {@link flowInteractionProps} — the library knobs, in one place, so the keys
+//    it would otherwise handle itself are provably off.
+
+/** One node's world rectangle, in the shape the marquee hit-test takes. */
+export interface FlowNodeRect extends Rect {
+  readonly id: string
+}
+
+/**
+ * Every node as a world rectangle.
+ *
+ * Input order is preserved (the model's order is the board's order), and the
+ * sizes come from {@link nodeSizeOf} — the *displayed* box, not the picture's
+ * pixel size, so a marquee catches what the user sees.
+ */
+export function flowNodeRects(nodes: readonly FlowSourceNode[]): FlowNodeRect[] {
+  return nodes.map((node) => {
+    const size = nodeSizeOf(node)
+    return { id: node.id, x: node.x, y: node.y, width: size.width, height: size.height }
+  })
+}
+
+/**
+ * React Flow's viewport transform, expressed as the studio's camera.
+ *
+ * React Flow stores `screen = world * zoom + translate`; `./studio-canvas.ts`
+ * stores "the world point at the viewport's top-left corner, plus the zoom"
+ * (`world = screen / zoom + camera`). The two are the same camera written from
+ * opposite ends, and this is the one place that conversion happens.
+ *
+ * A non-positive or non-finite zoom falls back to 1 rather than dividing by it:
+ * a camera that cannot project should freeze the gesture, not return `Infinity`.
+ */
+export function cameraFromFlow(viewport: { readonly x: number; readonly y: number; readonly zoom: number }): Camera {
+  const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1
+  return { x: -viewport.x / zoom, y: -viewport.y / zoom, zoom }
+}
+
+/** One entry of React Flow's `NodeChange` stream, narrowed to what a drag says. */
+export interface FlowDragChange {
+  readonly id: string
+  readonly type: string
+  readonly position?: Point
+  readonly dragging?: boolean
+}
+
+/** Where a drag is right now: where it started, where it is, what is moving. */
+export interface FlowDragState {
+  /** Positions captured when each id's drag was first observed. */
+  readonly origins: ReadonlyMap<string, Point>
+  /** Latest position per id, mid-gesture. */
+  readonly live: ReadonlyMap<string, Point>
+  /** Ids a gesture is currently moving. */
+  readonly dragging: ReadonlySet<string>
+}
+
+/** The state a canvas with no gesture in flight is in. */
+export const EMPTY_FLOW_DRAG: FlowDragState = {
+  origins: new Map<string, Point>(),
+  live: new Map<string, Point>(),
+  dragging: new Set<string>(),
+}
+
+/** What one batch of `NodeChange`s means for the drag in flight. */
+export interface FlowDragStep {
+  /** The bookkeeping after this batch; feed it back with the next one. */
+  readonly state: FlowDragState
+  /** Ids whose drag ended in this batch (React Flow sent `dragging: false`). */
+  readonly ended: readonly string[]
+  /**
+   * Positions to write back for `ended`, **only** for ids that actually moved.
+   *
+   * This is the 700 ms rule in one sentence: a gesture that ends where it began
+   * produces an empty map, so the caller pushes no command and schedules no save.
+   */
+  readonly moved: Map<string, Point>
+}
+
+/**
+ * Fold one batch of `NodeChange`s into the drag's bookkeeping.
+ *
+ * React Flow emits a `position` change **every frame** of a drag, and exactly one
+ * of them carries `dragging: false` (the release). Doing anything durable per
+ * frame would PUT the board sixty times a second, so this function's whole job is
+ * to separate "the drag moved" from "the drag ended": the caller keeps the
+ * positions for painting and calls its write path only when `moved` is non-empty.
+ *
+ * `base` supplies the position a node had before the gesture for ids the reducer
+ * has not seen yet — the model's own positions. Nothing is mutated: both the
+ * input state and the input changes are left alone, so a gesture can be replayed.
+ *
+ * Changes that are not position changes (selection, dimensions, remove) are
+ * ignored on purpose: selection truth is the studio's, and `remove` is the
+ * keyboard table's decision, not the mouse's.
+ */
+export function foldDragChanges(
+  state: FlowDragState,
+  base: ReadonlyMap<string, Point>,
+  changes: readonly FlowDragChange[],
+): FlowDragStep {
+  const origins = new Map(state.origins)
+  const live = new Map(state.live)
+  const dragging = new Set(state.dragging)
+  const ended: string[] = []
+
+  for (const change of changes) {
+    if (change === null || typeof change !== 'object') continue
+    if (change.type !== 'position') continue
+    const position = change.position
+    if (position === undefined || position === null) continue
+    const x = Number(position.x)
+    const y = Number(position.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    if (!origins.has(change.id)) {
+      const origin = base.get(change.id)
+      origins.set(change.id, origin === undefined ? { x, y } : { x: origin.x, y: origin.y })
+    }
+    live.set(change.id, { x, y })
+    if (change.dragging === true) {
+      dragging.add(change.id)
+    } else if (change.dragging === false && !ended.includes(change.id)) {
+      // React Flow's own stream opens a gesture with `dragging: true` and closes
+      // it with `dragging: false`; a gesture that began and ended inside one
+      // batch therefore arrives closed, and must still commit.
+      dragging.delete(change.id)
+      ended.push(change.id)
+    }
+  }
+
+  const moved = new Map<string, Point>()
+  for (const id of ended) {
+    const origin = origins.get(id)
+    const now = live.get(id)
+    if (origin !== undefined && now !== undefined && (origin.x !== now.x || origin.y !== now.y)) {
+      moved.set(id, { x: now.x, y: now.y })
+    }
+    // The gesture is over: its bookkeeping must not leak into the next one.
+    origins.delete(id)
+    live.delete(id)
+    dragging.delete(id)
+  }
+
+  return { state: { origins, live, dragging }, ended, moved }
+}
+
+/**
+ * The node array React Flow should draw right now.
+ *
+ * The model is rebuilt from the studio's state on every render (a progress tick,
+ * a retry, a selection change), so the array handed to the flow has to follow it
+ * — except for the nodes a gesture is currently moving: rewriting those from the
+ * model mid-drag would snap them back to their stored position every time the
+ * server said "step 7 of 40". Only the in-flight positions survive a reseed;
+ * everything else (status, badge, selection, size) always comes from the model.
+ */
+export function reseedFlowNodes(
+  model: FlowModel,
+  live: ReadonlyMap<string, Point>,
+  dragging: ReadonlySet<string>,
+): FlowNodeSpec[] {
+  if (live.size === 0) return [...model.nodes]
+  return model.nodes.map((node) => {
+    if (!dragging.has(node.id)) return node
+    const position = live.get(node.id)
+    return position === undefined ? node : { ...node, position: { x: position.x, y: position.y } }
+  })
+}
+
+/**
+ * The props React Flow is configured with, as data.
+ *
+ * Kept here rather than inline in the JSX because these are the knobs whose
+ * *absence* is invisible in a browser until it is a bug:
+ *
+ * - `nodesConnectable: false` — drawing a wire is S3's gesture; until the drop is
+ *   wired, a draggable handle that connects nothing is worse than a dead one.
+ * - `deleteKeyCode` / `multiSelectionKeyCode` / `selectionKeyCode`: `null`.
+ *   React Flow binds these itself (`Backspace` deletes, `Shift` marquees,
+ *   `Ctrl`-click toggles) and this canvas has its own implementation of all
+ *   three — in the pane's pointer handlers and in the studio's shortcut table.
+ *   Leaving the defaults on would mean two handlers for one gesture: a Delete
+ *   that removes a node twice, a Shift-marquee that replaces a selection the
+ *   user asked to extend. `panActivationKeyCode` is deliberately *not* nulled:
+ *   Space-to-pan has no second implementation, and React Flow's is the one that
+ *   pans its own viewport.
+ * - `selectionOnDrag: false` — the marquee is ours (§6.1's positive-area rule and
+ *   its Shift-union), so the library must not draw a second one.
+ * - `panOnDrag` — middle-drag pans, like the hand-rolled canvas, unless the
+ *   toolbar's sticky hand mode is on, in which case a left-drag pans too.
+ */
+export interface FlowInteractionOptions {
+  /** Whether a selection callback exists at all; drives `elementsSelectable`. */
+  readonly selectable?: boolean
+  /** Sticky hand mode (`panHeld`, or the toolbar toggle). */
+  readonly panMode?: boolean
+  readonly minZoom?: number
+  readonly maxZoom?: number
+}
+
+/** The interaction subset of React Flow's props, structurally. */
+export interface FlowInteractionProps {
+  readonly nodesDraggable: boolean
+  readonly nodesConnectable: boolean
+  readonly elementsSelectable: boolean
+  readonly deleteKeyCode: null
+  readonly multiSelectionKeyCode: null
+  readonly selectionKeyCode: null
+  readonly selectionOnDrag: false
+  readonly panOnDrag: true | readonly number[]
+  readonly zoomOnDoubleClick: false
+  readonly minZoom: number
+  readonly maxZoom: number
+  readonly fitView: boolean
+}
+
+/** The library's default zoom floor and ceiling, mirrored from the DOM canvas. */
+export const FLOW_MIN_ZOOM = 0.1
+export const FLOW_MAX_ZOOM = 8
+
+/**
+ * The interaction props for one configuration.
+ *
+ * Selection is **off in the library** (`elementsSelectable`) and handled by the
+ * pane: §6.1's Ctrl/Cmd toggle, the Shift-union marquee and "a blank click
+ * clears" are one state machine (`src/canvas-interactions.ts`) and letting React
+ * Flow run a second one would make the two disagree on the same click. Dragging
+ * stays on: it is the library's own, and it is the gesture whose positions the
+ * pane writes back.
+ */
+export function flowInteractionProps(options: FlowInteractionOptions = {}): FlowInteractionProps {
+  const minZoom = Number.isFinite(options.minZoom) ? (options.minZoom as number) : FLOW_MIN_ZOOM
+  const maxZoom = Number.isFinite(options.maxZoom) ? (options.maxZoom as number) : FLOW_MAX_ZOOM
+  return {
+    nodesDraggable: true,
+    nodesConnectable: false,
+    elementsSelectable: options.selectable === true,
+    deleteKeyCode: null,
+    multiSelectionKeyCode: null,
+    selectionKeyCode: null,
+    selectionOnDrag: false,
+    // `true` also suppresses `selectionOnDrag` inside the library, which is why
+    // hand mode cannot accidentally leave a marquee armed.
+    panOnDrag: options.panMode === true ? true : [1],
+    zoomOnDoubleClick: false,
+    minZoom,
+    maxZoom,
+    fitView: true,
+  }
+}
+
+/**
+ * The zoom a "fit every node" would need, before any clamp.
+ *
+ * `padding` is React Flow's own fraction-of-the-viewport padding (0.2 = 10 % on
+ * each side). An empty board, or one with no size to speak of, returns
+ * `Number.POSITIVE_INFINITY` — there is nothing to fit, and the caller's clamp
+ * decision must not read "infinity is bigger than minZoom" as "fits".
+ */
+export function fitZoomFor(
+  bounds: Rect | undefined,
+  viewport: { readonly width: number; readonly height: number },
+  padding = 0.2,
+): number {
+  if (bounds === undefined) return Number.POSITIVE_INFINITY
+  const width = Math.max(1, viewport.width)
+  const height = Math.max(1, viewport.height)
+  const usable = 1 - 2 * Math.max(0, Math.min(0.45, padding))
+  const zoomX = (width * usable) / Math.max(1, bounds.width)
+  const zoomY = (height * usable) / Math.max(1, bounds.height)
+  const zoom = Math.min(zoomX, zoomY)
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1
+}
+
+/**
+ * Whether fitting the board would hit the zoom floor and leave nodes off-screen.
+ *
+ * This is G15's question, asked again for the new engine: React Flow clamps
+ * `fitView` at `minZoom` exactly like `fitCamera` did, and the old implementation
+ * answered the clamp with a note instead of silence. The pane calls this before
+ * it fits, so the same note can be raised for the same reason.
+ */
+export function fitWouldClamp(
+  bounds: Rect | undefined,
+  viewport: { readonly width: number; readonly height: number },
+  minZoom = FLOW_MIN_ZOOM,
+  padding = 0.2,
+): boolean {
+  if (bounds === undefined) return false
+  if (!Number.isFinite(minZoom) || minZoom <= 0) return false
+  return fitZoomFor(bounds, viewport, padding) < minZoom
 }
