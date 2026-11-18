@@ -452,6 +452,55 @@ export const CANVAS_FLOW_CSS = `
 .react-flow__handle.valid{background:#16a34a;opacity:1}
 `
 
+/**
+ * U06: the node detail tab (§8.2) and the canvas node's read-only thumbnail
+ * (§8.4).
+ *
+ * Two surfaces, one rule set, because they are the same decision seen from both
+ * sides: the tab is the only place a layout draft is edited, and the node's
+ * thumbnail is what the canvas shows instead of a second editor. So the detail
+ * pane gets the full width a tab has (no 320 px drawer), and the thumbnail is
+ * strictly non-interactive apart from the one button that goes back to the tab.
+ */
+export const NODE_DETAIL_CSS = `
+.dsh-forge-detail{display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-width:0;min-height:0;height:100%}
+.dsh-forge-detail-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 2px 6px;border-bottom:1px solid rgba(127,127,127,.24)}
+.dsh-forge-detail-crumb{display:flex;align-items:center;gap:5px;min-width:0;font-size:12px;line-height:1.5;opacity:.86}
+.dsh-forge-detail-crumb-link{appearance:none;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;line-height:1.5;text-decoration:underline;text-underline-offset:2px;cursor:pointer;opacity:.8;max-width:22ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-forge-detail-crumb-link:hover{opacity:1}
+.dsh-forge-detail-crumb-text{opacity:.7;max-width:22ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-forge-detail-sep{opacity:.4}
+.dsh-forge-detail-kind{font-weight:600}
+.dsh-forge-detail-close{appearance:none;margin-left:auto;flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:1;opacity:.55;cursor:pointer}
+.dsh-forge-detail-close:hover{opacity:1;background:rgba(220,38,38,.16)}
+.dsh-forge-detail-hint{flex:0 0 100%;font-size:11.5px;line-height:1.5;opacity:.7}
+.dsh-forge-detail-body{display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0;min-width:0;overflow:auto;scrollbar-width:thin}
+.dsh-forge-detail-copy{margin:0;font-size:12.5px;line-height:1.6;opacity:.78;overflow-wrap:anywhere}
+.dsh-forge-detail-notice{display:flex;flex-direction:column;gap:10px;align-items:flex-start;padding:14px 15px;border:1px dashed rgba(127,127,127,.34);border-radius:10px;background:rgba(127,127,127,.035)}
+.dsh-forge-detail-actions{display:flex;gap:6px;flex-wrap:wrap}
+.dsh-forge-detail-facts{display:grid;grid-template-columns:minmax(84px,auto) minmax(0,1fr);gap:4px 12px;font-size:12.5px;line-height:1.55}
+.dsh-forge-detail-row{display:contents}
+.dsh-forge-detail-row>.dsh-forge-label{opacity:.7;white-space:nowrap;padding-top:1px}
+.dsh-forge-detail-value{min-width:0;overflow-wrap:anywhere}
+.dsh-forge-detail-layout{display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0}
+.dsh-forge-detail-editor{position:relative;display:flex;flex-direction:column;flex:1 1 auto;min-height:clamp(320px,52vh,760px);border:1px solid rgba(127,127,127,.28);border-radius:10px;background:rgba(127,127,127,.045);overflow:hidden}
+.dsh-forge-detail-editor-host{position:relative;display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow:auto;scrollbar-width:thin}
+.dsh-forge-detail-error{padding:8px 10px;border-radius:6px;font-size:12px;line-height:1.5;border:1px solid rgba(220,38,38,.45);background:rgba(220,38,38,.1);color:#dc2626}
+.dsh-forge-detail-image{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(200px,1fr);gap:12px;align-items:start}
+.dsh-forge-detail-picture{display:block;width:100%;height:auto;max-height:min(72vh,900px);object-fit:contain;border-radius:10px;border:1px solid rgba(127,127,127,.24);background:rgba(127,127,127,.06)}
+.dsh-forge-detail-task{display:flex;flex-direction:column;gap:8px;min-width:0}
+.dsh-forge-detail-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-top:6px;border-top:1px solid rgba(127,127,127,.24)}
+/* §8.4: the canvas node while its detail tab owns the draft. The boxes are
+   percentages of the draft, so the preview is right at any node size. */
+.dsh-forge-flow-layout-thumb{position:relative;flex:1 1 auto;min-height:0;margin:4px;border-radius:6px;background:rgba(127,127,127,.09);border:1px dashed rgba(127,127,127,.32);overflow:hidden}
+.dsh-forge-flow-layout-box{position:absolute;border:1px solid rgba(59,130,246,.85);border-radius:2px;background:rgba(59,130,246,.16);pointer-events:none}
+.dsh-forge-flow-btn.is-locked{position:absolute;left:50%;bottom:4px;transform:translateX(-50%);white-space:nowrap;z-index:2}
+@media (max-width: 760px){
+  .dsh-forge-detail-image{grid-template-columns:minmax(0,1fr)}
+  .dsh-forge-detail-facts{grid-template-columns:minmax(72px,auto) minmax(0,1fr)}
+}
+`
+
 /** The stylesheet text, exported so tests can pin the rules without a DOM. */
 export const CLIENT_CSS = `
 .dsh-image-forge-settings {
@@ -839,6 +888,7 @@ export const CLIENT_CSS = `
 }
 ${STUDIO_CSS}
 ${WORKBENCH_CSS}
+${NODE_DETAIL_CSS}
 ${XYFLOW_CSS}
 ${CANVAS_FLOW_CSS}
 `

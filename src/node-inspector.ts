@@ -518,6 +518,8 @@ const TASK_ACTION_COPY: Readonly<Record<string, { readonly label: string; readon
   retry: { label: '重试', title: '用相同的参数原地重新提交' },
   edit: { label: '编辑参数', title: '在抽屉里改参数，改完再提交会替换这个节点' },
   cancel: { label: '取消', title: '中断这次生成' },
+  // U06 §8.2: a task's detail tab is its full parameter sheet plus 重试.
+  'open-detail': { label: '打开详情', title: '在详情页签里看这个任务的全部参数并重试' },
   remove: { label: '移除', title: '从画布移除（不删文件）' },
 }
 
@@ -536,11 +538,25 @@ function taskActions(node: InspectorNodeLike, options: InspectorOptions): readon
     })
   }
   for (const id of taskNodeActions(status)) {
+    // U06: the detail tab is offered whatever the run's state, and always just
+    // before 移除 — "take it off the canvas" stays the last thing in the row.
+    if (id === 'remove') buttons.push(openDetailAction())
     const copy = TASK_ACTION_COPY[id]
     if (copy === undefined) continue
     buttons.push({ id, label: copy.label, title: copy.title, danger: id === 'remove' })
   }
+  if (!buttons.some((button) => button.id === 'open-detail')) buttons.push(openDetailAction())
   return buttons
+}
+
+/** U06's entry, so a picture and a task describe the same tab the same way. */
+function openDetailAction(): InspectorActionSpec {
+  const copy = TASK_ACTION_COPY['open-detail']
+  return {
+    id: 'open-detail',
+    label: copy?.label ?? '打开详情',
+    title: copy?.title ?? '在详情页签里看这个节点',
+  }
 }
 
 /**
@@ -658,9 +674,11 @@ export function inspectorSpecFor(
         },
         {
           id: 'open-detail',
+          // U06: the tab exists now, so the entry is the real one (§8.2). The
+          // detail kind is not part of the tab key, so opening it is a callback
+          // the canvas supplies, not a state change here.
           label: '打开详情',
-          title: '节点详情页签（U06）还没落地',
-          disabled: true,
+          title: '在详情页签里做全尺寸编辑（画框、尺寸、生成都在那里）',
         },
         { id: 'remove', label: '移除', title: '从画布移除（不删文件）', danger: true },
       ],
@@ -712,6 +730,9 @@ export function inspectorSpecFor(
     actions: [
       { id: 'continue', label: '按这张继续', title: '建一个以这张图为参考的待生成节点', primary: true },
       { id: 'open', label: '查看原图', title: '在新标签页打开原图' },
+      // U06 §8.2: every persisted node kind has a detail tab, so the drawer
+      // offers the same entry on a picture as on a layout.
+      { id: 'open-detail', label: '打开详情', title: '在大图详情页签里看这张图和它的全部参数' },
       { id: 'remove', label: '移除', title: '从画布移除（不删文件）', danger: true },
     ],
     hint: '图片的参数是历史记录，要改就「按这张继续」再生成一张。',

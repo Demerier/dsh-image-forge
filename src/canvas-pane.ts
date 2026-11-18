@@ -134,6 +134,10 @@ import {
 } from './layout-editor.ts'
 import type { BoardLayoutDraft, BoardSummary } from './studio-shared.ts'
 import { StudioPanel } from './studio-view.ts'
+// U06: the detail tab is a *sibling* pane (§8.2), so the only two things the
+// canvas needs from it are the read-only preview of a draft (§8.4) and the
+// request type the shell hands down.
+import { draftPreviewBoxes, type CanvasIntent } from './node-detail-pane.ts'
 
 /* -------------------------------------------------------------------------- */
 /* Composition                                                                */
@@ -152,8 +156,22 @@ export interface CanvasPaneProps {
   readonly boardId?: string
   /** The board library, for anything that names a project (§5). */
   readonly boards?: readonly BoardSummary[]
-  /** Open one node's detail pane (U06). Unused until that pane exists. */
-  readonly onOpenNode?: (boardId: string, nodeId: string) => void
+  /**
+   * Open one node's detail tab (U06, §8.2).
+   *
+   * The kind travels with the id: the tab's key (`node:<boardId>:<itemId>`) does
+   * not encode it, and the pane is the side that knows what it drew.
+   */
+  readonly onOpenNode?: (boardId: string, nodeId: string, kind: 'layout' | 'task' | 'image') => void
+  /**
+   * The nodes whose detail tab is open (§8.4, WD10) — the engine paints those as
+   * read-only thumbnails, so a node never has two editors at once.
+   */
+  readonly detailOpen?: ReadonlySet<string>
+  /** A detail tab's request to run here (generation / retry / continue-from). */
+  readonly intent?: CanvasIntent
+  /** Called once the intent has been executed, so it is not repeated. */
+  readonly onIntentDone?: () => void
 }
 
 /**
@@ -163,7 +181,14 @@ export interface CanvasPaneProps {
  * @returns the tab's tree.
  */
 export function CanvasPane(props: CanvasPaneProps): ReactNode {
-  return createElement(StudioPanel, { boardId: props.boardId, canvas: FlowCanvas })
+  return createElement(StudioPanel, {
+    boardId: props.boardId,
+    canvas: FlowCanvas,
+    ...(props.onOpenNode === undefined ? {} : { onOpenNode: props.onOpenNode }),
+    ...(props.detailOpen === undefined ? {} : { detailOpen: props.detailOpen }),
+    ...(props.intent === undefined ? {} : { intent: props.intent }),
+    ...(props.onIntentDone === undefined ? {} : { onIntentDone: props.onIntentDone }),
+  })
 }
 
 /* -------------------------------------------------------------------------- */
@@ -231,6 +256,17 @@ export interface FlowCanvasProps {
   readonly onGenerateLayout?: (nodeId: string) => void
   /** Ids that may not be dragged yet (a task in flight stays put). */
   readonly locked?: ReadonlySet<string>
+  /**
+   * Ids whose **detail tab is open** (U06, §8.4/WD10).
+   *
+   * A layout node in this set is painted as a read-only thumbnail instead of
+   * mounting its in-node editor: the detail tab is that node's one editor, and a
+   * second `mountLayoutEditor` on the same draft would let two instances write
+   * over each other's intermediate states.
+   */
+  readonly detailOpen?: ReadonlySet<string>
+  /** The thumbnail's "在详情页编辑" button: activate that node's detail tab. */
+  readonly onOpenDetail?: (nodeId: string) => void
 
   /* ---- U04 step 2: the gestures the hand-rolled canvas had --------------- */
 
@@ -564,6 +600,7 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     onRemove: (nodeId) => { latest.current.onRemove?.(nodeId) },
     onOpen: (nodeId) => { latest.current.onOpen?.(nodeId) },
     onGenerateLayout: (nodeId) => { latest.current.onGenerateLayout?.(nodeId) },
+    onOpenDetail: (nodeId) => { latest.current.onOpenDetail?.(nodeId) },
   }), [])
 
   // What was handed to React Flow last time. A reseed that changes one node's
@@ -571,12 +608,24 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
   const seedRef = useRef<readonly FlowNodeSpec[]>([])
 
   const flowNodes = useMemo(() => {
+    const detailOpen = props.detailOpen
     const next = reseedFlowNodes(model, live, dragRef.current.dragging)
-      .map((node) => ({ ...node, data: { ...node.data, actions } }))
+      .map((node) => {
+        // U06 (§8.4): `detailOpen` is a fact about the *strip*, not about the
+        // node, so it rides in `data` rather than through the model — the model
+        // is a pure function of the board, and this is not the board's shape.
+        const locked = detailOpen?.has(node.id) === true
+        return {
+          ...node,
+          data: locked
+            ? { ...node.data, actions, detailOpen: true }
+            : { ...node.data, actions },
+        }
+      })
     const stable = reuseFlowNodes(seedRef.current, next)
     seedRef.current = stable
     return stable
-  }, [model, live, actions])
+  }, [model, live, actions, props.detailOpen])
 
   /**
    * One batch of React Flow's change stream.
@@ -1114,6 +1163,8 @@ interface FlowNodeActions {
   readonly onRemove?: (nodeId: string) => void
   readonly onOpen?: (nodeId: string) => void
   readonly onGenerateLayout?: (nodeId: string) => void
+  /** U06: the locked thumbnail's "在详情页编辑" — activate that node's tab. */
+  readonly onOpenDetail?: (nodeId: string) => void
 }
 
 /** Read `data.actions` without lying about its type. */
@@ -1384,8 +1435,59 @@ function LayoutEditorSlot(props: {
 }
 
 /**
+ * A layout draft painted from its own data — the read-only thumbnail of §8.4.
+ *
+ * Not an editor and not a screenshot: `draftPreviewBoxes` turns the draft's
+ * pixel boxes into percentages, so the preview is right at any node size and
+ * costs one render. This is what the shell draws while the detail tab owns the
+ * draft, which is why `layout-editor.ts` never had to grow a read-only mode.
+ */
+function LayoutThumb(props: {
+  readonly nodeId: string
+  readonly draft: BoardLayoutDraft | undefined
+  readonly onOpenDetail?: () => void
+}): ReactNode {
+  const boxes = draftPreviewBoxes(props.draft)
+  return createElement(
+    'div',
+    {
+      className: 'dsh-forge-flow-layout-thumb',
+      'data-detail-locked': 'true',
+      'data-detail-boxes': String(boxes.length),
+      title: '这个节点正在详情页签里编辑；画布这里是只读缩略。',
+    },
+    ...boxes.map((box, index) => createElement('span', {
+      key: `${String(index)}`,
+      className: 'dsh-forge-flow-layout-box',
+      style: {
+        left: `${String(box.left)}%`,
+        top: `${String(box.top)}%`,
+        width: `${String(box.width)}%`,
+        height: `${String(box.height)}%`,
+      },
+    })),
+    createElement(
+      'button',
+      {
+        type: 'button',
+        className: 'dsh-forge-flow-btn is-locked',
+        title: '打开（或切回）这个节点的详情页签',
+        'data-detail-action': 'open-detail',
+        onClick: () => { props.onOpenDetail?.() },
+      },
+      '在详情页编辑',
+    ),
+  )
+}
+
+/**
  * A layout draft as a node: a title bar that can generate from it, the editor
  * body, and a footnote carrying the draft's own size and box count.
+ *
+ * U06 (§8.4, WD10): while this node's detail tab is open the body is
+ * {@link LayoutThumb} instead of the editor. The decision comes from the tab
+ * strip through `data.detailOpen`; the note below the head says which window
+ * owns the draft, so "why can I not drag a box here" never has to be guessed.
  */
 export function LayoutFlowNode(props: NodeProps): ReactNode {
   const data = props.data as Record<string, unknown>
@@ -1396,12 +1498,14 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
   const boxes = typeof data['boxes'] === 'number' ? data['boxes'] : 0
   const width = typeof data['width'] === 'number' ? data['width'] : 0
   const height = typeof data['height'] === 'number' ? data['height'] : 0
+  const detailOpen = data['detailOpen'] === true
   return createElement(
     'div',
     {
       className: nodeClassName('layout', props.selected === true),
       'data-node-kind': 'layout',
       'data-node-id': nodeId,
+      'data-detail-locked': detailOpen ? 'true' : 'false',
       style: { '--dsh-forge-zoom': String(zoom) },
     },
     createElement(
@@ -1424,7 +1528,13 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
       { className: 'dsh-forge-flow-layout-body nodrag nopan nowheel' },
       draft === undefined
         ? createElement('div', { className: 'dsh-forge-flow-layout-error' }, '草稿缺失')
-        : createElement(LayoutEditorSlot, { nodeId, draft, onDraft: actions.onDraft }),
+        : detailOpen
+          ? createElement(LayoutThumb, {
+            nodeId,
+            draft,
+            onOpenDetail: () => { actions.onOpenDetail?.(nodeId) },
+          })
+          : createElement(LayoutEditorSlot, { nodeId, draft, onDraft: actions.onDraft }),
     ),
     createElement(
       'div',

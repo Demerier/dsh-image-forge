@@ -56,6 +56,18 @@ import {
 } from './studio-shared.ts'
 import { CanvasPane } from './canvas-pane.ts'
 import { ProjectsPane } from './workbench-projects.ts'
+// U06: the node detail tab (§8). Everything it decides — which view a kind has,
+// what the strip calls it, which nodes still have an editor — is a pure function
+// there, so the shell stays the seam it is and not a second implementation.
+import {
+  NodeDetailPane,
+  intentFor,
+  nodeDetailTitle,
+  openDetailItemIds,
+  type CanvasIntent,
+  type CanvasIntentKind,
+  type NodeDetailSubject,
+} from './node-detail-pane.ts'
 import {
   MAX_CANVAS_TABS,
   MAX_TABS,
@@ -66,10 +78,12 @@ import {
   emptyState,
   listTabs,
   openCanvas,
+  openNodeDetail,
   parseTabKey,
   stateFromWorkspace,
   toWorkspaceJson,
   touchRecentProjects,
+  type NodeDetailKind,
   type TabDescriptor,
   type TabKey,
   type WorkbenchTabsState,
@@ -93,9 +107,6 @@ export const WORKBENCH_WRITE_DELAY_MS = 300
 
 /** Copy for a canvas tab whose board is gone (§3.3 "invalid" state). */
 export const WORKBENCH_DELETED_COPY = '这个项目已经被删除了。'
-
-/** Copy for a node-detail tab, which U06 fills in (§8). */
-export const WORKBENCH_NODE_PENDING_COPY = '节点详情页签将在 U06 落地，这里先留一个占位。'
 
 /* -------------------------------------------------------------------------- */
 /* Wire helpers                                                               */
@@ -199,12 +210,30 @@ function boardNameOf(boardId: string, boards: readonly BoardSummary[]): string |
   return boards.find((board) => board.id === boardId)?.name
 }
 
-/** What a tab says on the strip (§3.1: labels come from data, keys never do). */
-export function tabLabelFor(tab: TabDescriptor, boards: readonly BoardSummary[]): string {
+/**
+ * What a tab says on the strip (§3.1: labels come from data, keys never do).
+ *
+ * A canvas tab is its project's name. A node detail tab is named by §8.2's rule
+ * — `布局 · <项目名>`, `任务 · <prompt 首行>`, `图片 · <时间>` — with the parts the
+ * shell does not have yet omitted; the detail pane reports its node's prompt and
+ * time once it has read it, and the title fills in without the key moving.
+ */
+export function tabLabelFor(
+  tab: TabDescriptor,
+  boards: readonly BoardSummary[],
+  subjects?: Readonly<Record<TabKey, NodeDetailSubject>>,
+): string {
   if (tab.kind === 'projects') return WORKBENCH_PROJECTS_LABEL
   const name = tab.boardId === undefined ? undefined : boardNameOf(tab.boardId, boards)
   const label = name === undefined || name.length === 0 ? (tab.boardId ?? '未命名项目') : name
-  return tab.kind === 'canvas' ? label : `详情 · ${label}`
+  if (tab.kind === 'canvas') return label
+  const kind: NodeDetailKind = tab.detailKind ?? 'task'
+  const subject = subjects?.[tab.key]
+  return nodeDetailTitle(kind, {
+    boardName: label,
+    ...(subject?.prompt === undefined ? {} : { prompt: subject.prompt }),
+    ...(subject?.createdAt === undefined ? {} : { createdAt: subject.createdAt }),
+  })
 }
 
 /** Whether a tab may be closed at all: `projects` never may (§3.1, §12.3). */
@@ -238,6 +267,14 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
   // Roving focus for arrow-key navigation (§12.3). An index, not a key, so a
   // closing tab cannot leave focus pointing at a vanished entry.
   const [focusIndex, setFocusIndex] = useState(0)
+  // U06 (§8.2): what each detail tab is about, as far as its node has said. This
+  // is *label* data, not tab state: it never reaches `workspace.json`, and a tab
+  // re-learns it from the node every time it is reopened.
+  const [detailSubjects, setDetailSubjects] = useState<Readonly<Record<TabKey, NodeDetailSubject>>>({})
+  // U06 (§8.2): one request from a detail tab for the canvas to execute. Held
+  // here because the shell is what swaps the panes; cleared once consumed.
+  const [intent, setIntent] = useState<CanvasIntent | undefined>(undefined)
+  const intentSeqRef = useRef(0)
   const stateRef = useRef(state)
   const pendingRef = useRef<WorkbenchTabsState | undefined>(undefined)
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -364,16 +401,110 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
     [commit],
   )
 
+  /** Forget the label data of tabs that are going away (session state, §4.1). */
+  const forgetSubjects = useCallback((keys: readonly TabKey[]) => {
+    if (keys.length === 0) return
+    setDetailSubjects((current) => {
+      const next: Record<TabKey, NodeDetailSubject> = {}
+      let changed = false
+      for (const [key, subject] of Object.entries(current)) {
+        if (keys.includes(key)) {
+          changed = true
+          continue
+        }
+        next[key] = subject
+      }
+      return changed ? next : current
+    })
+  }, [])
+
   /** Close one tab, cascading to a board's node tabs (§3.3, WD2). */
   const close = useCallback(
     (key: TabKey) => {
       const result = closeTab(stateRef.current, key)
       if (result.rejected !== undefined) return
       setNotice(undefined)
+      forgetSubjects(result.closed ?? [key])
+      commit(result.state)
+    },
+    [commit, forgetSubjects],
+  )
+
+  /**
+   * Open (or re-activate) one node's detail tab (U06, §8.2).
+   *
+   * The kind comes from the canvas because it is not encodable in the key; the
+   * placement, the caps and the "already open" rule are the state machine's
+   * (`openNodeDetail`), never this component's.
+   */
+  const openNodeDetailTab = useCallback(
+    (boardId: string, nodeId: string, kind: NodeDetailKind) => {
+      const result = openNodeDetail(stateRef.current, boardId, nodeId, kind)
+      if (result.rejected === 'tab-limit') {
+        setNotice(`同时最多打开 ${String(MAX_TABS)} 个页签，请先关闭一个。`)
+        return
+      }
+      if (result.rejected !== undefined) {
+        setNotice('这个节点打不开详情页签。')
+        return
+      }
+      setNotice(undefined)
       commit(result.state)
     },
     [commit],
   )
+
+  /**
+   * The detail tab's breadcrumb, both directions of it (§8.3).
+   *
+   * When the source canvas is still on the strip this is an activation; when it
+   * has been closed, the degraded breadcrumb's "reopen the project" is the same
+   * call — `openProject` re-checks the caps and re-opens it.
+   */
+  const backToCanvas = useCallback(
+    (boardId: string) => {
+      const key = canvasTabKey(boardId)
+      if (stateRef.current.tabOrder.includes(key)) activate(key)
+      else openProject(boardId)
+    },
+    [activate, openProject],
+  )
+
+  /**
+   * A detail tab asked the canvas to run something (§8.2).
+   *
+   * The request is held here, the canvas tab is activated, and the canvas
+   * consumes it once. Nothing is executed in the shell: the run has to become a
+   * task node on the canvas, and that is the canvas tab's own path.
+   */
+  const runCanvasIntent = useCallback(
+    (kind: CanvasIntentKind, boardId: string, nodeId: string) => {
+      intentSeqRef.current += 1
+      const request = intentFor(kind, boardId, nodeId, `u06-${String(intentSeqRef.current)}`)
+      if (request === undefined) return
+      setNotice(undefined)
+      setIntent(request)
+      const opened = openCanvas(stateRef.current, boardId)
+      commit(opened.state)
+      if (opened.rejected === 'canvas-limit') {
+        setNotice(`同时最多打开 ${String(MAX_CANVAS_TABS)} 个项目，请先关闭一个页签。`)
+        setIntent(undefined)
+        return
+      }
+      if (opened.rejected === 'tab-limit') {
+        setNotice(`同时最多打开 ${String(MAX_TABS)} 个页签，请先关闭一个。`)
+        setIntent(undefined)
+        return
+      }
+      commit(opened.state)
+    },
+    [commit],
+  )
+
+  /** The canvas ran the request; it must not run twice (§8.2). */
+  const consumeIntent = useCallback(() => {
+    setIntent(undefined)
+  }, [])
 
   /** Create a project and open it, the primary action of §5.3. */
   const createProject = useCallback(
@@ -422,12 +553,15 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
       setBoards((current) => current.filter((board) => board.id !== boardId))
       const closed = closeTab(stateRef.current, canvasTabKey(boardId))
       if (closed.rejected === undefined) {
+        // §3.3 (WD2): the board's detail tabs went with it, so their labels go
+        // too — a deleted board must not leave a title behind for a dead tab.
+        forgetSubjects(closed.closed ?? [])
         setState(closed.state)
         stateRef.current = closed.state
         queueWrite(closed.state)
       }
     },
-    [queueWrite],
+    [forgetSubjects, queueWrite],
   )
 
   /**
@@ -504,6 +638,18 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
   const activeTab = tabs.find((tab) => tab.key === state.activeTab)
   const activeRef = parseTabKey(state.activeTab)
   const activeBoardId = activeRef !== null && activeRef.kind !== 'projects' ? activeRef.boardId : undefined
+  /**
+   * §8.4 (WD10): the nodes the canvas must paint as read-only thumbnails.
+   *
+   * The strip is the source of truth (`openDetailItemIds`), not "who mounted
+   * last": while a layout node's detail tab is open the canvas stays read-only
+   * whichever of the two panes is on screen. Only the *canvas* tab needs it, so
+   * it is computed for that one board and left undefined everywhere else.
+   */
+  const detailOpen = useMemo(
+    () => (activeBoardId === undefined ? undefined : openDetailItemIds(tabs, activeBoardId)),
+    [activeBoardId, tabs],
+  )
   // §3.3's "invalid" state: the library loaded and this tab's board is not in
   // it, so the pane has nothing to draw. Never shown while the library is still
   // unknown — that would flash "deleted" over every restored tab on a slow read.
@@ -548,17 +694,66 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
           ),
         ])
       : // U04 step 1b: the tab owns its board and the canvas engine. `CanvasPane`
-        // composes them; the studio's form, list and asset page stay where they
-        // are until U05 replaces the form with the node inspector, which is also
-        // when `onOpenNode` gets a detail pane to open (U06).
-        createElement(CanvasPane, { boardId: activeBoardId, boards })
+        // composes them, and since U06 it also carries the two facts the detail
+        // tab needs: how to open one (`onOpenNode`), and which nodes already have
+        // one open (`detailOpen` — §8.4's read-only thumbnail).
+        createElement(CanvasPane, {
+          boardId: activeBoardId,
+          boards,
+          onOpenNode: openNodeDetailTab,
+          ...(detailOpen === undefined ? {} : { detailOpen }),
+          ...(intent === undefined ? {} : { intent }),
+          onIntentDone: consumeIntent,
+        })
   } else {
-    panel = createElement('p', { className: 'dsh-forge-workbench-empty-note' }, WORKBENCH_NODE_PENDING_COPY)
+    // U06 (§8.2): the node detail tab lives here. The key decides *which* node;
+    // the kind decides which of the three views, and it lives beside the key in
+    // the state (`nodeKinds`) because §3.1 keeps the key shape-free.
+    const detailBoardId = activeTab.boardId ?? ''
+    const detailItemId = activeTab.itemId ?? ''
+    const detailKind: NodeDetailKind = activeTab.detailKind ?? 'task'
+    panel = missingBoard
+      ? createElement('div', { className: 'dsh-forge-workbench-deleted' }, [
+          createElement('p', { key: 'copy', className: 'dsh-forge-workbench-empty-note' }, WORKBENCH_DELETED_COPY),
+          createElement(
+            'button',
+            {
+              key: 'close',
+              type: 'button',
+              className: 'dsh-forge-workbench-action',
+              onClick: () => close(activeTab.key),
+            },
+            '关闭页签',
+          ),
+        ])
+      : createElement(NodeDetailPane, {
+          boardId: detailBoardId,
+          itemId: detailItemId,
+          kind: detailKind,
+          ...(boardNameOf(detailBoardId, boards) === undefined
+            ? {}
+            : { boardName: boardNameOf(detailBoardId, boards) }),
+          orphaned: activeTab.orphaned,
+          onBackToCanvas: () => backToCanvas(detailBoardId),
+          onClose: () => close(activeTab.key),
+          onSubject: (subject: NodeDetailSubject) => {
+            // §8.2: the title fills in once the node has been read. Skipped when
+            // it says nothing new, so a re-read cannot re-render the strip.
+            const current = detailSubjects[activeTab.key]
+            if (
+              current !== undefined &&
+              current.prompt === subject.prompt &&
+              current.createdAt === subject.createdAt
+            ) return
+            setDetailSubjects((previous) => ({ ...previous, [activeTab.key]: subject }))
+          },
+          onIntent: (action: CanvasIntentKind) => { runCanvasIntent(action, detailBoardId, detailItemId) },
+        })
   }
 
   const stripTabs = tabs.map((tab, index) => {
     const active = tab.key === state.activeTab
-    const label = tabLabelFor(tab, boards)
+    const label = tabLabelFor(tab, boards, detailSubjects)
     const entries: ReactNode[] = [
       createElement('span', { key: 'label', className: 'dsh-forge-workbench-tab-label' }, label),
     ]

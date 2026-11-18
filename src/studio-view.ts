@@ -155,11 +155,21 @@ import {
   type InspectorNodeLike,
   type InspectorOptions,
 } from './node-inspector.ts'
+// U06: the node detail tab. The canvas hosts its *entry* (the drawer's 打开详情)
+// and executes what the tab asks for — a generation, a retry, a "continue from
+// this picture" — because a run has to land on the canvas as a task node. The
+// draft→request mapping lives there so this file and the tab cannot disagree
+// about what a layout draft generates (§8.4).
+import {
+  detailKindOfNodeKind,
+  intentAppliesTo,
+  layoutGeneratePlan,
+  type CanvasIntent,
+} from './node-detail-pane.ts'
 import {
   DEFAULT_LAYOUT_HEIGHT,
   DEFAULT_LAYOUT_WIDTH,
   LAYOUT_EDITOR_CLASS,
-  compileLayout,
   LAYOUT_NODE_DEFAULT_WIDTH,
   clampLayoutNodeWidth,
   draftToEditorState,
@@ -188,15 +198,12 @@ import {
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
   STUDIO_NODE_THUMB_WIDTH,
-  STUDIO_LAYOUT_RATIO_TOLERANCE,
   STUDIO_MAX_COUNT,
-  STUDIO_MAX_LAYOUT_CHARS,
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_MAX_REFERENCES,
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
   firstLine,
-  fitStudioRatio,
   stepperStepsOf,
   studioFileUrl,
   type BoardDetail,
@@ -1313,6 +1320,31 @@ export interface StudioPanelProps {
   readonly boardId?: string
   /** The canvas element the panel should render in place of its own. */
   readonly canvas?: unknown
+  /**
+   * Open one node's detail tab (U06, §8.2).
+   *
+   * The panel supplies the *kind* because it is the side that knows the node;
+   * the shell owns the key (§3.1: `node:<boardId>:<itemId>` cannot carry it).
+   */
+  readonly onOpenNode?: (boardId: string, nodeId: string, kind: 'layout' | 'task' | 'image') => void
+  /**
+   * Ids whose detail tab is **open** right now (§8.4, WD10).
+   *
+   * While a layout node is in this set its in-canvas editor is not mounted: the
+   * node paints a read-only thumbnail and the detail tab is the only editor. The
+   * canvas is told, rather than deciding, because the tab strip is what knows.
+   */
+  readonly detailOpen?: ReadonlySet<string>
+  /**
+   * One request from a detail tab, to be executed here (§8.2).
+   *
+   * The tab cannot run a generation itself — the run has to appear on the canvas
+   * as a task node and stream into it. So it asks, the shell activates this tab,
+   * and the request is consumed exactly once (`CanvasIntent.token`).
+   */
+  readonly intent?: CanvasIntent
+  /** Called after {@link StudioPanelProps.intent} has been executed, so it is not repeated. */
+  readonly onIntentDone?: () => void
 }
 
 /**
@@ -1328,6 +1360,13 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // the branch below honest without threading it through every helper.
   const canvasSlot = props?.canvas
   const preferredBoardId = props?.boardId
+  // U06: the detail tab's two hooks into the canvas. Both are read through refs
+  // where a long-lived callback is the caller (§8.2's drawer entry, §8.4's lock),
+  // because a `useCallback` keeps the closure it was built with and the shell may
+  // hand a new function on any of its own renders.
+  const detailOpen = props?.detailOpen
+  const openNodeRef = useRef<StudioPanelProps['onOpenNode']>(undefined)
+  openNodeRef.current = props?.onOpenNode
   const [config, setConfig] = useState<StudioConfigResponse | undefined>(undefined)
   const [configError, setConfigError] = useState<string | undefined>(undefined)
   // P2: the environment snapshot (state/pid/owned/logPath) is its own concern,
@@ -2475,51 +2514,22 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * but only when the draft is within 1% of it. A draft composed at an
    * unofficial aspect is refused with the nearest ratio named, because §8.4
    * forbids silently stretching the drawn boxes.
+   *
+   * U06 moved the *decision* into `layoutGeneratePlan` (`./node-detail-pane.ts`):
+   * the detail tab's 生成 has to submit exactly what this button submits, and a
+   * second copy of "is this draft generatable" is how the two containers would
+   * drift apart. What stays here is the run and where it lands.
    */
   const generateLayoutNode = useCallback((nodeId: string) => {
     const node = nodesRef.current.find((entry) => entry.id === nodeId)
     if (node === undefined || !isLayoutNode(node)) return
-    if (node.draft.items.length === 0) {
-      setNote('布局至少需要一个画框：先在内嵌编辑器里拖出一个框，再生成。')
+    const plan = layoutGeneratePlan(node.draft)
+    if (!plan.ok) {
+      setNote(plan.reason)
       return
     }
-    const caption = typeof node.draft.summary.caption === 'string' ? node.draft.summary.caption.trim() : ''
-    if (caption.length === 0) {
-      setNote('布局缺少整图描述（summary.caption）；MOSS 把它当布局 prompt 的语义锚点，先写上。')
-      return
-    }
-    let compiled: string
-    try {
-      compiled = compileLayout(node.draft as unknown as LayoutDraft)
-    } catch (error) {
-      setNote('布局还不能生成：' + (error instanceof Error ? error.message : String(error)))
-      return
-    }
-    if (compiled.length > STUDIO_MAX_LAYOUT_CHARS) {
-      setNote('布局 compiled 超过 ' + String(STUDIO_MAX_LAYOUT_CHARS) + ' 字符上限。')
-      return
-    }
-    const fit = fitStudioRatio(node.draft.width, node.draft.height)
-    if (fit === undefined) {
-      setNote('布局 draft 尺寸无效，无法映射到官方画幅比例。')
-      return
-    }
-    if (fit.deviation > STUDIO_LAYOUT_RATIO_TOLERANCE) {
-      setNote(
-        '布局 draft 比例 ' + String(node.draft.width) + '×' + String(node.draft.height) +
-          ' 不在官方七档内（最接近 ' + fit.ratio + '，偏差 ' + (fit.deviation * 100).toFixed(1) +
-          '%）；请把 draft 尺寸改到七档比例，不静默拉伸。',
-      )
-      return
-    }
-    const params: BoardTaskParams = {
-      prompt: caption,
-      ratio: fit.ratio,
-      count: 1,
-      layout: compiled,
-    }
-    setNote('已按布局 ' + fit.ratio + ' 提交 MOSS 生成（compiled 作为正向编码文本）。')
-    void startGeneration(params, { parents: [node.id] })
+    setNote('已按布局 ' + String(plan.params.ratio) + ' 提交 MOSS 生成（compiled 作为正向编码文本）。')
+    void startGeneration(plan.params, { parents: [node.id] })
   }, [startGeneration])
 
   const reuse = useCallback((batch: Batch) => {
@@ -4225,14 +4235,52 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       case 'layout-generate':
         generateLayoutNode(id)
         break
-      case 'open-detail':
-        // U06's node detail tab does not exist yet; the button says so by being
-        // disabled in the spec, and this branch is what keeps the union total.
+      case 'open-detail': {
+        // U06: the node's own tab (§8.2). The canvas supplies the kind because
+        // it is the side that knows the node; the shell owns the key.
+        const kind = detailKindOfNodeKind(node.kind)
+        const open = openNodeRef.current
+        const owner = boardIdRef.current
+        if (kind === undefined) {
+          setNote('这个节点还没有详情视图（待生成节点要先生成一张图）。')
+          break
+        }
+        if (open === undefined || owner === undefined) {
+          setNote('外壳没有接上详情页签。')
+          break
+        }
+        open(owner, node.id, kind)
         break
+      }
       default:
         break
     }
   }, [cancelTask, continueFromNode, generateDraftNode, generateLayoutNode, removeNode, retryTask, selection])
+
+  /**
+   * U06: run the one action a detail tab asked for (§8.2).
+   *
+   * A detail tab cannot generate by itself: the run has to become a task node on
+   * the canvas, stream into it and convert into the picture where it lands. So
+   * the tab asks, the shell activates this tab with the request, and this is the
+   * only place it is executed — once per `token`, after the board is read, and
+   * then handed back so a remount cannot repeat it.
+   */
+  const intentRef = useRef<string | undefined>(undefined)
+  const intent = props?.intent
+  const intentDoneRef = useRef<StudioPanelProps['onIntentDone']>(undefined)
+  intentDoneRef.current = props?.onIntentDone
+  useEffect(() => {
+    if (intent === undefined || !intentAppliesTo(intent, boardId)) return
+    if (!boardView.loaded) return
+    if (intentRef.current === intent.token) return
+    intentRef.current = intent.token
+    const node = nodesRef.current.find((entry) => entry.id === intent.nodeId)
+    if (intent.kind === 'generate-layout') generateLayoutNode(intent.nodeId)
+    else if (intent.kind === 'retry') retryTask(intent.nodeId)
+    else if (node !== undefined) continueFromNode(node)
+    intentDoneRef.current?.()
+  }, [boardId, boardView.loaded, continueFromNode, generateLayoutNode, intent, retryTask])
 
   /**
    * Run one choice of the node-type menu (G26 §1).
@@ -5650,6 +5698,14 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 // canvases write lineage and open the same card.
                 onConnectStart: beginEngineConnection,
                 onConnectEnd: endEngineConnection,
+                // U06 (§8.4): the nodes whose detail tab is open. The engine
+                // paints a layout node as a read-only thumbnail for those, so one
+                // node never has two editors — see `layoutEditorOwner`.
+                detailOpen,
+                onOpenDetail: (nodeId: string) => {
+                  const owner = boardIdRef.current
+                  if (owner !== undefined) openNodeRef.current?.(owner, nodeId, 'layout')
+                },
               }),
             canvasSlot === undefined
               ? createElement(

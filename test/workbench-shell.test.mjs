@@ -160,6 +160,10 @@ function installFakeNetwork(options = {}) {
   const previousFetch = globalThis.fetch
   const calls = []
   const library = (options.boards ?? []).map((board) => ({ ...board }))
+  // U06: the board a canvas tab reads, when a case needs nodes on the canvas (a
+  // detail tab needs something to be the detail *of*). Absent means the old
+  // behaviour: a read answers 404 and the canvas stays empty.
+  const detail = options.board
   const config = {
     ready: options.ready !== false,
     ...(options.reason === undefined ? {} : { reason: options.reason }),
@@ -221,10 +225,26 @@ function installFakeNetwork(options = {}) {
           library.splice(index, 1)
           return respond({ ok: true })
         }
+        if (action.action === 'save-layout-node') {
+          // The detail tab's one writer (§8.1). The board it answers with is the
+          // fixture's, with the written draft, so a save can be observed.
+          const items = detail === undefined ? [] : detail.items
+          const item = items.find((entry) => entry.id === action.item)
+          if (item === undefined) return respond({ error: '节点不存在' }, 404)
+          item.draft = action.draft
+          item.w = action.w
+          item.h = action.h
+          item.x = action.x
+          item.y = action.y
+          return respond({ ok: true, item, board: detail })
+        }
       }
       return respond({ ok: true })
     }
-    if (url.indexOf(BOARD_ROUTE) === 0) return respond({ error: '这个测试没有画板数据' }, 404)
+    if (url.indexOf(BOARD_ROUTE) === 0) {
+      if (detail !== undefined) return respond(detail)
+      return respond({ error: '这个测试没有画板数据' }, 404)
+    }
     return respond({ ok: true })
   }
   return {
@@ -672,6 +692,253 @@ test('the assets entry opens the placeholder sub-view and comes back', async () 
 /* -------------------------------------------------------------------------- */
 /* The seat: the shell is what `main` renders (§14.4 acceptance ⑥)           */
 /* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/* U06 — the node detail tab (§8.2, §8.4)                                    */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * What this section can and cannot prove.
+ *
+ * The tab itself is host markup, so "click 打开详情 → a `node:` tab appears →
+ * closing the canvas tab takes it with it" runs end to end through the real
+ * bundle. What it cannot see is the *canvas node*: `FlowCanvas` needs a measured
+ * container (`clientWidth`) and this renderer has no DOM, so the engine paints
+ * "画布准备中…" and never reaches a node painter. §8.4's thumbnail — the canvas
+ * side of the single-editor rule — is therefore asserted where it is decidable:
+ * the pure `layoutEditorOwner` / `draftPreviewBoxes` in `test/studio.test.mjs`,
+ * the shipped source below, and the U06 manual checklist.
+ */
+
+/** A layout draft with two boxes: the detail tab's subject. */
+const DETAIL_DRAFT = {
+  width: 1536,
+  height: 1024,
+  bbox_coord_space: 'abs',
+  bbox_format: 'xyxy',
+  summary: { caption: '三栏海报' },
+  items: [
+    { label: 'object', caption: '左边的橘猫', bbox: [0, 0, 512, 1024] },
+    { label: 'text', caption: '右边的标题', bbox: [1024, 0, 1536, 400] },
+  ],
+}
+
+/** One board whose only node is a MOSS layout — U06's reason for existing. */
+const LAYOUT_BOARD = {
+  id: 'b_one',
+  name: '橘猫计划',
+  camera: { x: 0, y: 0, zoom: 1 },
+  items: [
+    { id: 'ilayout1', kind: 'layout', x: 120, y: 60, parents: [], w: 480, draft: DETAIL_DRAFT },
+  ],
+}
+
+/** The first host element carrying `props[name] === value`. */
+function byData(root, name, value) {
+  return findAll(root, (element) => element.props[name] === value)[0]
+}
+
+/** The flow container — where the studio's keyboard handler is forwarded. */
+function flowRoot(root) {
+  const found = byClass(root, 'dsh-forge-flow')
+  assert.ok(found !== undefined, 'the canvas tab must render the flow container')
+  return found
+}
+
+/** Shaped like the keyboard events the canvas reads. */
+function pressKey(key, modifiers = {}) {
+  return {
+    key,
+    ctrlKey: modifiers.ctrl === true,
+    metaKey: modifiers.meta === true,
+    shiftKey: modifiers.shift === true,
+    altKey: modifiers.alt === true,
+    preventDefault() {},
+    target: { tagName: 'DIV', isContentEditable: false, closest: () => null },
+  }
+}
+
+/** Open the layout board and select its one node (Ctrl+A is the harness's way). */
+async function openLayoutBoard() {
+  const handle = await mountShell({ boards: [BOARD_ONE], board: LAYOUT_BOARD })
+  const panel = handle.mounted
+  byClass(cardOf(panel.tree, 'b_one'), 'dsh-forge-workbench-card-open').props.onClick()
+  await settlePanel(panel)
+  flowRoot(panel.tree).props.onKeyDown(pressKey('a', { ctrl: true }))
+  await settlePanel(panel)
+  return handle
+}
+
+/** The drawer's 打开详情, clicked — the one entry §8.2 gives the user. */
+function openLayoutDetail(panel) {
+  const drawer = byData(panel.tree, 'data-inspector-kind', 'layout')
+  assert.ok(drawer !== undefined, 'the layout node’s drawer must be open')
+  const open = byData(drawer, 'data-inspector-action', 'open-detail')
+  assert.ok(open !== undefined, 'the drawer offers 打开详情')
+  open.props.onClick()
+}
+
+test('U06: 打开详情 opens a node tab beside its canvas tab, and the pane is the layout editor', async () => {
+  const mounted = await openLayoutBoard()
+  const panel = mounted.mounted
+  try {
+    // The drawer is about the layout node, and its 打开详情 is a real button now.
+    const drawer = byData(panel.tree, 'data-inspector-kind', 'layout')
+    assert.ok(drawer !== undefined, 'selecting the layout node opens its drawer')
+    const open = byData(drawer, 'data-inspector-action', 'open-detail')
+    assert.ok(open !== undefined, 'the drawer offers 打开详情')
+    assert.equal(open.props.disabled, false, 'U06 un-disabled it')
+
+    open.props.onClick()
+    await settlePanel(panel)
+
+    // §3.2 rule 3: immediately right of the board's own tab group.
+    assert.deepEqual(
+      tabsOf(panel.tree).map((tab) => tab.props['data-tab-key']),
+      ['projects', 'canvas:b_one', 'node:b_one:ilayout1'],
+      'the detail tab lands with its board, and becomes active',
+    )
+    assert.equal(selectedTab(panel.tree).props['data-tab-key'], 'node:b_one:ilayout1')
+
+    // §8.2's title rule: `布局 · <项目名>` (the key never moves, only the label).
+    const label = textOf(tabByKey(panel.tree, 'node:b_one:ilayout1')).trim()
+    assert.ok(label.startsWith('布局 · 橘猫计划'), `the tab is named after its kind and project, got ${label}`)
+
+    // §8.2's layout view: the facts and the editor host the pane mounts into.
+    const pane = byData(panel.tree, 'data-detail-kind', 'layout')
+    assert.ok(pane !== undefined, 'the pane is the layout view')
+    assert.match(textOf(byData(pane, 'data-detail-field', 'size')), /1536×1024/, 'the draft’s own pixels')
+    assert.match(textOf(byData(pane, 'data-detail-field', 'items')), /2/, 'the box count is the draft’s')
+    assert.match(
+      textOf(byData(pane, 'data-detail-field', 'ratio')),
+      /3:2/,
+      'a 1536×1024 draft maps onto the 3:2 tier the generation would use',
+    )
+    assert.ok(byData(pane, 'data-detail-editor', 'layout') !== undefined, 'the editor has a host in the pane')
+    for (const action of ['undo', 'save', 'intent', 'back']) {
+      assert.ok(byData(pane, 'data-detail-action', action) !== undefined, `the toolbar offers ${action}`)
+    }
+    // One pane at a time: the canvas tab is unmounted, so no second editor can
+    // even exist while the detail tab is on screen (§8.4's first half).
+    assert.equal(byClass(panel.tree, 'dsh-forge-flow'), undefined, 'the canvas pane unmounted')
+  } finally {
+    await stop(mounted.host, mounted.network)
+  }
+})
+
+test('U06: 保存 writes the draft through save-layout-node, geometry included', async () => {
+  const mounted = await openLayoutBoard()
+  const panel = mounted.mounted
+  try {
+    openLayoutDetail(panel)
+    await settlePanel(panel)
+    const save = byData(panel.tree, 'data-detail-action', 'save')
+    assert.ok(save !== undefined)
+    save.props.onClick()
+    await settlePanel(panel)
+
+    const writes = mounted.network.boardActions().filter((action) => action.action === 'save-layout-node')
+    assert.equal(writes.length, 1, 'one write, through the one route §8.1 defines')
+    const body = writes[0]
+    assert.equal(body.board, 'b_one')
+    assert.equal(body.item, 'ilayout1')
+    assert.deepEqual(body.draft, DETAIL_DRAFT, 'the draft travels verbatim')
+    assert.equal(body.x, 120, 'the node keeps its place')
+    assert.equal(body.y, 60)
+    assert.equal(body.w, 480, 'the display width is the node’s, not the draft’s')
+    // 100 px of chrome + 480 × (1024/1536) — the same rule the canvas applies.
+    assert.equal(body.h, 420, 'the height follows the draft’s proportion')
+  } finally {
+    await stop(mounted.host, mounted.network)
+  }
+})
+
+test('U06: closing the canvas tab closes its detail tab too (WD2)', async () => {
+  const mounted = await openLayoutBoard()
+  const panel = mounted.mounted
+  try {
+    openLayoutDetail(panel)
+    await settlePanel(panel)
+    const canvasTab = tabByKey(panel.tree, 'canvas:b_one')
+    byClass(canvasTab, 'dsh-forge-workbench-tab-close').props.onClick({ stopPropagation() {} })
+    await settlePanel(panel)
+    assert.deepEqual(
+      tabsOf(panel.tree).map((tab) => tab.props['data-tab-key']),
+      ['projects'],
+      'the detail tab went with its canvas — the strip cannot hold a tab with no project',
+    )
+    assert.equal(selectedTab(panel.tree).props['data-tab-key'], 'projects')
+  } finally {
+    await stop(mounted.host, mounted.network)
+  }
+})
+
+test('U06: a detail tab closed on its own leaves the canvas alone', async () => {
+  const mounted = await openLayoutBoard()
+  const panel = mounted.mounted
+  try {
+    openLayoutDetail(panel)
+    await settlePanel(panel)
+    byData(panel.tree, 'data-detail-action', 'close').props.onClick()
+    await settlePanel(panel)
+    assert.deepEqual(
+      tabsOf(panel.tree).map((tab) => tab.props['data-tab-key']),
+      ['projects', 'canvas:b_one'],
+      '§3.3: closing a node tab does not cascade upwards',
+    )
+    assert.equal(selectedTab(panel.tree).props['data-tab-key'], 'canvas:b_one')
+  } finally {
+    await stop(mounted.host, mounted.network)
+  }
+})
+
+test('U06: a detail tab restored without its canvas tab degrades its breadcrumb and can reopen (§8.3)', async () => {
+  // A workspace with a detail tab and no open canvas: what a hand-edited file,
+  // or a phase where the canvas tab was closed elsewhere, leaves behind.
+  const stored = {
+    version: 1,
+    openProjects: [],
+    activeTab: { kind: 'node', boardId: 'b_one', nodeId: 'ilayout1' },
+    nodeDetailTabs: [{ boardId: 'b_one', nodeId: 'ilayout1', kind: 'layout' }],
+    tabOrder: ['projects', 'node:b_one:ilayout1'],
+    recentProjects: [],
+  }
+  const { network, host, mounted } = await mountShell({ boards: [BOARD_ONE], board: LAYOUT_BOARD, workspace: stored })
+  try {
+    assert.deepEqual(
+      tabsOf(mounted.tree).map((tab) => tab.props['data-tab-key']),
+      ['projects', 'node:b_one:ilayout1'],
+      'the orphaned detail tab is restored, at the end of the strip',
+    )
+    const crumb = byData(mounted.tree, 'data-detail-crumb', 'orphaned')
+    assert.ok(crumb !== undefined, 'the breadcrumb degrades to plain text')
+    assert.ok(byData(mounted.tree, 'data-detail-orphan', 'true') !== undefined, 'and says why')
+    // The degraded breadcrumb's action reopens the project (§8.3).
+    const back = byData(mounted.tree, 'data-detail-action', 'back')
+    assert.ok(back !== undefined)
+    back.props.onClick()
+    await settlePanel(mounted)
+    assert.deepEqual(
+      tabsOf(mounted.tree).map((tab) => tab.props['data-tab-key']),
+      ['projects', 'node:b_one:ilayout1', 'canvas:b_one'],
+      '返回画布 opens the missing canvas tab and activates it',
+    )
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'canvas:b_one')
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U06: the panel’s own wiring ships — one editor owner, one intent, no second generate path', () => {
+  // The canvas side of §8.4 lives inside React Flow's node painters, which need a
+  // measured container; what a Node process can still pin is that the branch and
+  // the plumbing are in the shipped bundle at all.
+  assert.ok(CLIENT_SOURCE.includes('detailOpen'), 'the strip’s open detail tabs reach the canvas')
+  assert.ok(CLIENT_SOURCE.includes('data-detail-locked'), 'the node painter has the locked branch')
+  assert.ok(CLIENT_SOURCE.includes('data-detail-action'), 'the pane’s buttons are addressable')
+  assert.ok(CLIENT_SOURCE.includes('save-layout-node'), 'the pane writes through §8.1’s one route')
+  assert.ok(CLIENT_SOURCE.includes('openNodeDetail('), 'the shell opens tabs through the state machine')
+})
 
 test('the main seat renders the tabbed shell, with id and label unchanged', () => {
   const harness = clientEntry()

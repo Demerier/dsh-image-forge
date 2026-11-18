@@ -139,6 +139,30 @@
  *    仍可点击、可滚动;拉宽回去恢复并排。
  * 8. 切到 列表 / 素材 页签:老表单仍在(本轮不动它们);切回画布页签,表单不在,
  *    抽屉回来。刷新页面后草稿节点不会被持久化(它是内存态,重开画板就没了)。
+ *
+ * ## U06 的人工验收清单(节点详情页签)
+ *
+ * 详情页签是**面板内**页签,和「项目管理」「画布:xxx」同级。机器能验的是页签出现/消失、
+ * 标题、pane 的字段与按钮、`save-layout-node` 的请求体、以及「生成」回到画布走同一条
+ * 请求;验不了的是**画布里那个节点长什么样**(`FlowCanvas` 要量容器,这个渲染器没有 DOM,
+ * 引擎永远停在「画布准备中…」)和编辑器的拖拽手感。要看的:
+ *
+ * 1. 选中一个布局节点 → 右侧抽屉底部出现「打开详情」;点它 → 页签条上多出一个
+ *    「布局 · <项目名>」页签,**紧挨着**来源画布页签,并自动激活。
+ * 2. 详情页签里是**全宽**的 MOSS 编辑器(不是 480 世界单位的小框),上面一行是
+ *    草稿尺寸 / 画框数量 / 映射画幅;拖任意一个框,框跟手,画布不跟着平移。
+ * 3. 松手后 700 ms 内网络面板里出现一次 `save-layout-node`,body 里的 `draft` 与
+ *    编辑器所见一致,`w` 仍是节点自己的、`h` 按草稿比例;点「撤销」把上一版找回来。
+ * 4. **双写防护**:在详情页签打开的情况下切回画布页签 → 那个布局节点变成**只读缩略**
+ *    (灰底 + 蓝框 + 「在详情页编辑」),里面**没有**可拖的框;点「在详情页编辑」回到
+ *    详情页签;关掉详情页签再回画布,编辑器**回来了**且是最新草稿。
+ * 5. 详情页签里点「生成」→ 自动切到画布页签,画布上出现任务节点并跑完,
+ *    结果图的血缘线指回布局节点;详情页签本身**仍然开着**(没被关掉)。
+ * 6. 「返回画布」回到来源画布页签;先关掉画布页签再点它 → 项目被重新打开。
+ * 7. 关掉画布页签 → 它的详情页签**一起消失**(WD2);只关详情页签时画布不受影响。
+ * 8. 图片节点:抽屉「打开详情」→ 「图片 · <时间>」页签,大图 + 元信息 + 「按这张继续」;
+ *    任务节点:「任务 · <prompt 首行>」页签,全参数 + 失败原因 + 「重试」。
+ * 9. 窄面板(< 760 px)下详情页签的大图与信息栏**上下堆叠**,不出现横向滚动。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -157,6 +181,7 @@ import {
   fakeResponse,
   fakeText,
   fakeVisit,
+  findAll,
   loadClientBundle,
   sameDeps,
   settle,
@@ -255,6 +280,31 @@ import {
   inspectorVisible,
   patchDraftParams,
 } from '../src/node-inspector.ts'
+// U06: the node detail tab's decisions, imported from the shipped source for the
+// same reason as the drawer's above — they are pure, and a `testlib/` snapshot
+// would only be rebuilt with the whole host bundle.
+import {
+  EMPTY_DRAFT_HISTORY,
+  NODE_DETAIL_KIND_LABELS,
+  NODE_DETAIL_TITLE_MAX,
+  DetailEditorClaims,
+  clockOf,
+  detailIntentOf,
+  detailKindOfNodeKind,
+  detailViewOf,
+  draftPreviewBoxes,
+  intentAppliesTo,
+  intentFor,
+  layoutDetailSummary,
+  layoutEditorOwner,
+  layoutGeneratePlan,
+  layoutWriteOf,
+  nodeDetailTitle,
+  openDetailItemIds,
+  pushDraftHistory,
+  shortSubject,
+  undoDraftHistory,
+} from '../src/node-detail-pane.ts'
 
 /** The authoritative compiled-layout sample (T21's format authority). */
 const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
@@ -3450,22 +3500,29 @@ test('U05: the field set and the buttons follow the node kind', () => {
   assert.equal(fieldOf(image, 'model').value, 'qwen_image_2.1.safetensors', '底模 is profile-level, shown read-only')
   assert.equal(fieldOf(image, 'size').value, '1248×1248')
   assert.deepEqual(image.lineage, ['p1'], 'where it grew from')
-  assert.deepEqual(image.actions.map((action) => action.id), ['continue', 'open', 'remove'])
+  // U06: 打开详情 sits between "look at it" and "remove" — every persisted node
+  // kind has a detail tab now (§8.2), so the picture offers the same entry.
+  assert.deepEqual(image.actions.map((action) => action.id), ['continue', 'open', 'open-detail', 'remove'])
+  assert.notEqual(image.actions[2].disabled, true, 'U06’s node detail tab is reachable from a picture')
 
   // A task: the canvas's own status→buttons mapping, plus 重新生成 in edit mode.
   const task = inspectorSpecFor({ kind: 'task', id: 't1', status: 'failed', params: { prompt: '猫' }, error: 'CUDA out of memory' })
-  assert.deepEqual(task.actions.map((action) => action.id), ['retry', 'edit', 'remove'])
+  assert.deepEqual(task.actions.map((action) => action.id), ['retry', 'edit', 'open-detail', 'remove'])
   assert.equal(fieldOf(task, 'error').value, 'CUDA out of memory', 'the reason is the point of the node')
   const editing = inspectorSpecFor(
     { kind: 'task', id: 't1', status: 'failed', params: { prompt: '猫' }, error: 'x' },
     { editing: true },
   )
-  assert.deepEqual(editing.actions.map((action) => action.id), ['generate', 'retry', 'edit', 'remove'])
+  assert.deepEqual(editing.actions.map((action) => action.id), ['generate', 'retry', 'edit', 'open-detail', 'remove'])
   assert.equal(editing.fields.every((field) => field.editable), true, '编辑参数 makes the snapshot an editor')
   const running = inspectorSpecFor({ kind: 'task', id: 't2', status: 'running', params: { prompt: '猫' }, progress: { percent: 40 } })
-  assert.deepEqual(running.actions.map((action) => action.id), ['cancel', 'remove'], 'a live run can be interrupted')
+  assert.deepEqual(
+    running.actions.map((action) => action.id),
+    ['cancel', 'open-detail', 'remove'],
+    'a live run can be interrupted — and still has a detail tab, which is where its parameters are',
+  )
 
-  // A layout: generate, a disabled U06 entry, remove.
+  // A layout: generate, the U06 entry, remove.
   const layout = inspectorSpecFor({
     kind: 'layout',
     id: 'l1',
@@ -3475,7 +3532,8 @@ test('U05: the field set and the buttons follow the node kind', () => {
   assert.ok(String(layout.status).includes('2 个画框'))
   assert.equal(fieldOf(layout, 'ratio').value, '3:2', 'a 1536×1024 draft maps onto the 3:2 tier')
   assert.deepEqual(layout.actions.map((action) => action.id), ['layout-generate', 'open-detail', 'remove'])
-  assert.equal(layout.actions[1].disabled, true, 'U06’s node detail tab is not there yet')
+  assert.notEqual(layout.actions[1].disabled, true, 'U06 landed: the detail entry is a real button')
+  assert.match(layout.actions[1].title, /详情页签/, 'and it says what it opens')
   // Off the ladder, the drawer says so instead of silently stretching (§8.4).
   const skewed = inspectorSpecFor({ kind: 'layout', id: 'l2', draft: { width: 1000, height: 700, items: [] } })
   assert.ok(String(fieldOf(skewed, 'ratio').value).includes('无法生成'), 'a 10:7 draft is not an official tier')
@@ -3642,6 +3700,470 @@ test('U05: the drawer’s wiring ships — its edits land on the node, not on a 
   assert.ok(submit.includes('canGenerateFromDrawer('), 'with the same emptiness rule the button uses')
   // The wire body itself is the drawer's builder — one mapping, not two.
   assert.ok(sourceBlock('startGeneration').includes('...generateParamsBody(params)'))
+})
+
+// ---------------------------------------------------------------------------
+// U06: the node detail tab (§8.2, §8.4).
+//
+// The product decision: **simple controls live on the canvas, complex ones get
+// their own panel tab.** The MOSS layout is the case that forced it — its editor
+// needs the width of a tab, and a canvas node is 480 world units.
+//
+// What is provable here: every decision the pane makes is pure (kinds, titles,
+// the draft's readout and its MOSS request, the save body, the undo stack, the
+// preview, the intent), and the wiring around it is host markup — 打开详情 in the
+// drawer, the detail tab's toolbar, 生成 going back through the canvas. What is
+// not: the *canvas side* of the single-editor rule (the thumbnail instead of the
+// editor), because React Flow needs a measured container this renderer has no
+// DOM for. That half is `layoutEditorOwner` here, the shipped-source check at the
+// bottom, and the U06 manual checklist at the top of this file.
+// ---------------------------------------------------------------------------
+
+/** A two-box, 3:2 draft: the ladder's own tier, so it can generate. */
+const U06_DRAFT = {
+  width: 1536,
+  height: 1024,
+  bbox_coord_space: 'abs',
+  bbox_format: 'xyxy',
+  summary: { caption: '三栏海报：左边一只橘猫，右边标题' },
+  items: [
+    { label: 'object', caption: '左边的橘猫', bbox: [0, 0, 512, 1024] },
+    { label: 'text', caption: '右边的标题', text: '右边的标题', bbox: [1024, 0, 1536, 400] },
+  ],
+}
+
+/** A board whose only node is that layout — one node, so Ctrl+A is single select. */
+const U06_LAYOUT_BOARD = {
+  id: 'cbrdu06',
+  name: '详情页签板',
+  camera: { x: 0, y: 0, zoom: 1 },
+  items: [{ id: 'ilayout1', kind: 'layout', x: 120, y: 60, parents: [], w: 480, draft: U06_DRAFT }],
+}
+
+/** The same board with one picture on it, for the image detail view. */
+const U06_IMAGE_BOARD = {
+  id: 'cbrdu06i',
+  name: '大图板',
+  camera: { x: 0, y: 0, zoom: 1 },
+  items: [{
+    ...HARNESS_BOARD.items[0],
+    id: 'iimg1',
+    path: 'C:/out/iimg1.png',
+    markdownPath: 'C:/out/iimg1.png',
+    prompt: '一只橘猫坐在窗台上\n第二行不是标题',
+    createdAt: '2026-11-18T09:05:00.000Z',
+    parents: [],
+  }],
+}
+
+/** And one with a failed task node, for the task detail view. */
+const U06_TASK_BOARD = {
+  id: 'cbrdu06t',
+  name: '任务板',
+  camera: { x: 0, y: 0, zoom: 1 },
+  items: [{
+    id: 'itask1',
+    kind: 'task',
+    x: 0,
+    y: 0,
+    parents: [],
+    task: {
+      status: 'failed',
+      params: { prompt: '一只橘猫', ratio: '16:9', steps: 8, count: 2, seed: 7, layout: '{"bboxes":[]}' },
+      error: 'CUDA out of memory',
+    },
+  }],
+}
+
+/** Click the drawer's 打开详情 for whatever is selected. */
+async function openDetailOf(panel) {
+  const button = inspectorAction(panel, 'open-detail')
+  assert.ok(button !== undefined, 'the drawer must offer 打开详情')
+  assert.notEqual(button.props.disabled, true, 'and it must be enabled')
+  button.props.onClick()
+  await settle(panel)
+}
+
+/** One row of the detail pane, by its field id. */
+function detailField(panel, id) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.props['data-detail-field'] === id) found = entry
+  })
+  return found === undefined ? '' : fakeText(found)
+}
+
+/** One button of the detail pane's toolbar, by its action id. */
+function detailAction(panel, action) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.type === 'button' && entry.props['data-detail-action'] === action) found = entry
+  })
+  return found
+}
+
+/** The detail pane itself (its class list carries the view as a second class). */
+function detailPane(panel) {
+  return findAll(panel.tree, (element) => {
+    const value = element.props.className
+    return typeof value === 'string' && value.split(' ')[0] === 'dsh-forge-detail'
+  })[0]
+}
+
+/** The key of the selected tab on the strip (`aria-selected`). */
+function selectedTabKey(panel) {
+  const selected = findAll(panel.tree, (element) => element.props.role === 'tab' && element.props['aria-selected'] === true)[0]
+  return selected === undefined ? undefined : selected.props['data-tab-key']
+}
+
+/**
+ * One `function name(…) { … }` block of the shipped bundle.
+ *
+ * `sourceBlock` above only understands the studio's `const x = useCallback(…)`
+ * shape; a component or a plain helper is not that. Braces are counted with
+ * string and template literals skipped, so the slice ends at the function's own
+ * closing brace rather than at the first `}` it meets.
+ */
+function functionBlock(name) {
+  const start = CLIENT_SOURCE.indexOf(`function ${name}(`)
+  assert.ok(start >= 0, `${name} must be a function in the shipped source`)
+  let depth = 0
+  let quote = ''
+  for (let index = start; index < CLIENT_SOURCE.length; index += 1) {
+    const char = CLIENT_SOURCE[index]
+    if (quote !== '') {
+      if (char === '\\') {
+        index += 1
+        continue
+      }
+      if (char === quote) quote = ''
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) return CLIENT_SOURCE.slice(start, index + 1).replace(/"/g, "'")
+    }
+  }
+  assert.fail(`${name} must close at the top level`)
+}
+
+test('U06: a node kind has one detail view, and a tab is named from its data', () => {
+  // Three kinds, three views (§8.2); anything else has none.
+  for (const kind of ['layout', 'image', 'task']) assert.equal(detailViewOf(kind), kind)
+  for (const bad of ['draft', '', 'LAYOUT', undefined, null, 7]) assert.equal(detailViewOf(bad), 'unknown')
+  assert.equal(detailKindOfNodeKind('layout'), 'layout')
+  assert.equal(detailKindOfNodeKind('draft'), undefined, 'a draft node is not a board item yet')
+  assert.equal(detailKindOfNodeKind('nope'), undefined)
+
+  // §8.2's titles, each from the data that names it.
+  assert.equal(nodeDetailTitle('layout', { boardName: '橘猫计划' }), '布局 · 橘猫计划')
+  assert.equal(
+    nodeDetailTitle('task', { boardName: '橘猫计划', prompt: '一只橘猫坐在窗台上\n第二行不是标题' }),
+    '任务 · 一只橘猫坐在窗台上',
+    'a task is named by the first line of its prompt',
+  )
+  assert.equal(
+    nodeDetailTitle('image', { boardName: '橘猫计划', createdAt: '2026-11-18T09:05:11.000Z' }),
+    '图片 · 09:05',
+    'a picture is named by when it was made',
+  )
+  // Degrades instead of going blank, and the parts it lacks are not invented.
+  assert.equal(nodeDetailTitle('layout'), '布局 · 未命名项目')
+  assert.equal(nodeDetailTitle('task', { boardName: '板子' }), '任务 · 板子', 'no prompt yet, so the project names it')
+  assert.equal(nodeDetailTitle('image', { boardName: '板子', createdAt: 'nope' }), '图片 · 板子')
+  assert.deepEqual(NODE_DETAIL_KIND_LABELS, { layout: '布局', task: '任务', image: '图片' })
+
+  // Clipping and the clock are string operations: no zone, no locale.
+  assert.equal(shortSubject('  一只猫  '), '一只猫')
+  assert.equal(shortSubject('一'.repeat(NODE_DETAIL_TITLE_MAX + 5)).endsWith('…'), true)
+  assert.equal(shortSubject(null), '')
+  assert.equal(clockOf('2026-11-18T09:05:00.000Z'), '09:05')
+  assert.equal(clockOf('2026-11-18'), undefined)
+  assert.equal(clockOf(12), undefined)
+})
+
+test('U06: one editor per node — the strip decides, the registry is the second guard', () => {
+  // The tab strip is the input: whichever pane is on screen, an open detail tab
+  // means the canvas may not mount that node's editor (§8.4).
+  const tabs = [
+    { key: 'projects', kind: 'projects', orphaned: false },
+    { key: 'canvas:b1', kind: 'canvas', boardId: 'b1', orphaned: false },
+    { key: 'node:b1:l1', kind: 'node', boardId: 'b1', itemId: 'l1', detailKind: 'layout', orphaned: false },
+    { key: 'node:b1:i1', kind: 'node', boardId: 'b1', itemId: 'i1', detailKind: 'image', orphaned: false },
+    { key: 'node:b2:l9', kind: 'node', boardId: 'b2', itemId: 'l9', detailKind: 'layout', orphaned: true },
+  ]
+  const open = openDetailItemIds(tabs, 'b1')
+  assert.deepEqual([...open].sort(), ['i1', 'l1'], 'only this board’s nodes are locked')
+  assert.equal(openDetailItemIds(tabs, 'b2').has('l9'), true, 'an orphaned tab still owns its node')
+  assert.equal(openDetailItemIds(tabs, 'b9').size, 0)
+  assert.equal(layoutEditorOwner('l1', open), 'detail')
+  assert.equal(layoutEditorOwner('l2', open), 'canvas', 'no detail tab, so the canvas edits it')
+  assert.equal(layoutEditorOwner('l1', undefined), 'canvas')
+  assert.equal(layoutEditorOwner('', open), 'canvas', 'an empty id is never an editor')
+
+  // The instant-level guard: the same node cannot be mounted twice in one page.
+  const claims = new DetailEditorClaims()
+  assert.equal(claims.claim('b1:l1'), true)
+  assert.equal(claims.claim('b1:l1'), false, 'a second mount of the same node is refused')
+  assert.equal(claims.size, 1)
+  assert.equal(claims.has('b1:l1'), true)
+  claims.release('b1:l1')
+  assert.equal(claims.has('b1:l1'), false)
+  assert.equal(claims.claim('b1:l1'), true, 'closing the tab gives the node back')
+  assert.equal(claims.claim(''), false, 'an empty key is never claimable')
+  claims.release('never-claimed')
+  assert.equal(claims.size, 1)
+})
+
+test('U06: a draft is read out, and becomes the MOSS request or a stated refusal', () => {
+  const summary = layoutDetailSummary(U06_DRAFT)
+  assert.equal(summary.size, '1536×1024')
+  assert.equal(summary.boxes, 2)
+  assert.equal(summary.ratio, '3:2', 'the draft maps onto an official tier')
+  assert.equal(summary.mappable, true)
+  assert.equal(layoutDetailSummary(undefined).mappable, false)
+  // Off the ladder, the readout says so rather than pretending a tier.
+  const skewed = layoutDetailSummary({ ...U06_DRAFT, width: 1000, height: 700 })
+  assert.equal(skewed.mappable, false)
+
+  const plan = layoutGeneratePlan(U06_DRAFT)
+  assert.equal(plan.ok, true, 'a drawn, captioned, on-ladder draft can generate')
+  assert.equal(plan.params.prompt, U06_DRAFT.summary.caption, 'the whole-image caption is the prompt')
+  assert.equal(plan.params.ratio, '3:2')
+  assert.equal(plan.params.count, 1)
+  assert.equal(typeof plan.params.layout, 'string', 'the compiled layout is the conditioning text')
+  assert.ok(plan.params.layout.includes('abs_centralized'), 'and it is the compiled form, not the draft')
+  assert.ok(plan.params.layout.includes('yxyx'))
+
+  // Every refusal names the one thing to fix — the same words the canvas shows.
+  const noBoxes = layoutGeneratePlan({ ...U06_DRAFT, items: [] })
+  assert.equal(noBoxes.ok, false)
+  assert.match(noBoxes.reason, /画框/)
+  const noCaption = layoutGeneratePlan({ ...U06_DRAFT, summary: { caption: '   ' } })
+  assert.equal(noCaption.ok, false)
+  assert.match(noCaption.reason, /summary\.caption/)
+  const stretched = layoutGeneratePlan({
+    width: 1024,
+    height: 640,
+    bbox_coord_space: 'abs',
+    bbox_format: 'xyxy',
+    summary: { caption: '一张 16:10 的板子' },
+    items: [{ label: 'object', caption: '整块', bbox: [0, 0, 512, 640] }],
+  })
+  assert.equal(stretched.ok, false)
+  assert.match(stretched.reason, /不在官方七档内/, 'a 16:10 draft is refused, never silently stretched')
+  const broken = layoutGeneratePlan({ width: 0, height: 0, items: [{ label: 'object', caption: 'x', bbox: [0, 0, 0, 0] }], summary: { caption: 'x' } })
+  assert.equal(broken.ok, false)
+  assert.equal(layoutGeneratePlan(undefined).ok, false)
+
+  // One decision for two containers: the canvas node's 生成 uses this function,
+  // so the detail tab cannot submit something the canvas would have refused.
+  const canvasGenerate = sourceBlock('generateLayoutNode')
+  assert.ok(canvasGenerate.includes('layoutGeneratePlan('), 'the canvas generates through the same plan')
+  assert.ok(!canvasGenerate.includes('fitStudioRatio('), 'and does not re-derive the ratio on its own')
+})
+
+test('U06: a draft write keeps the node’s place and follows the draft’s proportion', () => {
+  const write = layoutWriteOf({ x: 120, y: 60, w: 480 }, U06_DRAFT)
+  assert.equal(write.x, 120)
+  assert.equal(write.y, 60)
+  assert.equal(write.w, 480, 'the display width is the node’s own decision')
+  assert.equal(write.h, 420, '100 px chrome + 480 × (1024/1536)')
+  // The width is clamped to the editor's own range, and a missing item still
+  // produces a legal body (a hand-written board entry can lack x/y/w).
+  assert.equal(layoutWriteOf({ x: 0, y: 0, w: 10 }, U06_DRAFT).w, 320)
+  assert.equal(layoutWriteOf({ x: 0, y: 0, w: 5000 }, U06_DRAFT).w, 960)
+  const bare = layoutWriteOf(undefined, U06_DRAFT)
+  assert.equal(bare.x, 0)
+  assert.equal(bare.y, 0)
+  assert.equal(bare.w, 480, 'the default canvas-node width')
+  assert.equal(bare.draft, U06_DRAFT)
+})
+
+test('U06: undo walks the pane’s own drafts back, bounded', () => {
+  const first = { ...U06_DRAFT, summary: { caption: '第一版' } }
+  const second = { ...U06_DRAFT, summary: { caption: '第二版' } }
+  let history = EMPTY_DRAFT_HISTORY
+  assert.equal(undoDraftHistory(history).draft, undefined, 'nothing to undo on a fresh pane')
+  history = pushDraftHistory(history, first)
+  history = pushDraftHistory(history, second)
+  const step = undoDraftHistory(history)
+  assert.equal(step.draft, second, 'the newest recorded draft comes back first')
+  assert.equal(step.history.entries.length, 1)
+  assert.equal(undoDraftHistory(step.history).draft, first)
+  assert.equal(undoDraftHistory(undoDraftHistory(step.history).history).draft, undefined)
+  // Bounded: a long editing session cannot grow the stack without limit.
+  let bounded = EMPTY_DRAFT_HISTORY
+  for (let index = 0; index < 6; index += 1) bounded = pushDraftHistory(bounded, { ...U06_DRAFT, width: 1536 + index * 16 }, 3)
+  assert.equal(bounded.entries.length, 3)
+  assert.equal(bounded.entries[2].width, 1536 + 5 * 16, 'the newest survive')
+})
+
+test('U06: the canvas thumbnail is the draft drawn as percentages', () => {
+  const boxes = draftPreviewBoxes(U06_DRAFT)
+  assert.equal(boxes.length, 2)
+  assert.deepEqual(boxes[0], { left: 0, top: 0, width: (512 / 1536) * 100, height: 100 })
+  assert.deepEqual(boxes[1], {
+    left: (1024 / 1536) * 100,
+    top: 0,
+    // The right edge is the one clamped, so the span is derived from 100.
+    width: 100 - (1024 / 1536) * 100,
+    height: (400 / 1024) * 100,
+  })
+  // Degenerate input is dropped, never painted outside the node.
+  assert.deepEqual(draftPreviewBoxes(undefined), [])
+  assert.deepEqual(draftPreviewBoxes({ ...U06_DRAFT, width: 0 }), [])
+  const odd = draftPreviewBoxes({
+    ...U06_DRAFT,
+    items: [
+      { label: 'object', caption: 'x', bbox: [10, 10, 10, 400] },
+      { label: 'object', caption: 'x', bbox: [-200, -200, 100, 100] },
+      { label: 'object', caption: 'x', bbox: [0, 0, 99999, 99999] },
+    ],
+  })
+  assert.equal(odd.length, 2, 'the zero-width box is dropped')
+  assert.deepEqual(
+    odd[0],
+    { left: 0, top: 0, width: (100 / 1536) * 100, height: (100 / 1024) * 100 },
+    'a box hanging off the canvas shows the part that is on it',
+  )
+  assert.deepEqual(odd[1], { left: 0, top: 0, width: 100, height: 100 }, 'and one past the far edge stops at it')
+})
+
+test('U06: a detail tab’s one action is the intent the canvas executes, once', () => {
+  assert.equal(detailIntentOf('layout'), 'generate-layout')
+  assert.equal(detailIntentOf('image'), 'continue-from')
+  assert.equal(detailIntentOf('task'), 'retry')
+  assert.equal(detailIntentOf('nope'), undefined)
+
+  const intent = intentFor('generate-layout', 'b1', 'l1', 'u06-1')
+  assert.deepEqual(intent, { kind: 'generate-layout', boardId: 'b1', nodeId: 'l1', token: 'u06-1' })
+  assert.equal(intentFor('layout', 'b1', 'l1', 't'), undefined, 'the node kind is not an action')
+  assert.equal(intentFor('generate-layout', '', 'l1', 't'), undefined)
+  assert.equal(intentFor('generate-layout', 'b1', '', 't'), undefined)
+  assert.equal(intentAppliesTo(intent, 'b1'), true)
+  assert.equal(intentAppliesTo(intent, 'b2'), false, 'a request never runs on another board')
+  assert.equal(intentAppliesTo(intent, undefined), false, 'nor before the board is known')
+  assert.equal(intentAppliesTo(undefined, 'b1'), false)
+})
+
+test('U06: 生成 in the detail tab runs the canvas’s own layout request', async () => {
+  const requests = []
+  const { network, panel } = await mountWorkbench({
+    board: U06_LAYOUT_BOARD,
+    generate: (init) => {
+      requests.push(JSON.parse(init.body))
+      return fakeResponse(generateResult([resultImage('u06i1')]))
+    },
+  })
+  try {
+    flowContainer(panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(panel)
+    assert.equal(inspectorElement(panel).props['data-inspector-kind'], 'layout')
+    await openDetailOf(panel)
+
+    // The pane is the layout's, and the primary action is the one §8.2 gives it.
+    assert.equal(detailPane(panel).props['data-detail-kind'], 'layout')
+    const generate = detailAction(panel, 'intent')
+    assert.ok(generate !== undefined, 'the detail toolbar has the primary action')
+    assert.equal(generate.props.disabled, false, 'a valid draft can generate from here')
+    assert.equal(fakeText(generate), '生成')
+    generate.props.onClick()
+    await settle(panel)
+
+    assert.equal(requests.length, 1, 'exactly one submission')
+    const body = requests[0]
+    assert.equal(body.prompt, U06_DRAFT.summary.caption, 'the caption is the MOSS prompt')
+    assert.equal(body.ratio, '3:2', 'the draft’s mapped tier')
+    assert.equal(body.count, 1)
+    assert.ok(String(body.layout).includes('abs_centralized'), 'the compiled layout rides along')
+    assert.equal(body.board, U06_LAYOUT_BOARD.id)
+    assert.deepEqual(body.parents, ['ilayout1'], 'the picture keeps the edge to the layout node')
+    // The canvas tab is where it ran, and the detail tab stays on the strip.
+    assert.equal(selectedTabKey(panel), 'canvas:' + U06_LAYOUT_BOARD.id)
+  } finally {
+    network.restore()
+  }
+})
+
+test('U06: a picture’s detail tab is the big picture, its facts, and 按这张继续', async () => {
+  const { network, panel } = await mountWorkbench({ board: U06_IMAGE_BOARD })
+  try {
+    flowContainer(panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(panel)
+    await openDetailOf(panel)
+
+    const image = findAll(panel.tree, (element) => element.props['data-detail-image'] === 'true')[0]
+    assert.ok(image !== undefined, 'the picture itself, full size')
+    assert.ok(image.props.src.includes('?path='), 'served through the file route')
+    assert.equal(image.props.alt, '一只橘猫坐在窗台上', 'the first line names it')
+    assert.match(detailField(panel, 'size'), /1024×1024/)
+    assert.match(detailField(panel, 'prompt'), /第二行不是标题/, 'the full prompt, not just the first line')
+    assert.match(detailField(panel, 'seed'), /1/)
+    assert.equal(fakeText(detailAction(panel, 'intent')), '按这张继续')
+    // A picture's facts are history: only the one action is interactive.
+    assert.equal(detailAction(panel, 'save'), undefined, 'nothing here is editable')
+  } finally {
+    network.restore()
+  }
+})
+
+test('U06: a task’s detail tab is its parameters, and 重试 re-runs the same snapshot', async () => {
+  const requests = []
+  const { network, panel } = await mountWorkbench({
+    board: U06_TASK_BOARD,
+    generate: (init) => {
+      requests.push(JSON.parse(init.body))
+      return fakeResponse(generateResult([resultImage('u06i2')]))
+    },
+  })
+  try {
+    flowContainer(panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(panel)
+    await openDetailOf(panel)
+
+    assert.match(detailField(panel, 'status'), /失败/)
+    assert.match(detailField(panel, 'error'), /CUDA out of memory/)
+    assert.match(detailField(panel, 'prompt'), /一只橘猫/)
+    assert.match(detailField(panel, 'ratio'), /16:9/)
+    assert.match(detailField(panel, 'layout'), /字符/, 'the compiled layout is part of the record')
+    const retry = detailAction(panel, 'intent')
+    assert.equal(fakeText(retry), '重试')
+    retry.props.onClick()
+    await settle(panel)
+
+    assert.equal(requests.length, 1, 'the canvas runs it, in place')
+    assert.equal(requests[0].prompt, '一只橘猫')
+    assert.equal(requests[0].ratio, '16:9')
+    assert.equal(requests[0].steps, 8)
+    assert.equal(requests[0].count, 2)
+    assert.equal(requests[0].seed, 7)
+  } finally {
+    network.restore()
+  }
+})
+
+test('U06: the detail pane ships, and the canvas keeps its half of the single-editor rule', () => {
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-detail'), 'the pane’s markup is in the bundle')
+  assert.ok(CLIENT_SOURCE.includes('data-detail-action'), 'its buttons are addressable')
+  assert.ok(CLIENT_SOURCE.includes('layoutGeneratePlan('), 'the draft→request mapping ships')
+  // §8.4's canvas side: the painter branches on the strip's answer, and the tab
+  // strip is what computes it.
+  const painter = functionBlock('LayoutFlowNode')
+  assert.ok(painter.includes('detailOpen'), 'the node painter knows the detail tab')
+  assert.ok(painter.includes('LayoutThumb'), 'and draws the read-only thumbnail instead of the editor')
+  const pane = functionBlock('NodeDetailPane')
+  assert.ok(pane.includes('mountLayoutEditor('), 'the tab mounts the editor')
+  assert.ok(pane.includes('detailEditorClaims.claim('), 'and claims the node before it does')
+  assert.ok(pane.includes('save-layout-node'), 'writing through §8.1’s one route')
+  // The editor is mounted at 1:1 in a tab too: no `pointerScale` option is
+  // passed, which is the only correct value when the editor measures its own box.
+  assert.ok(!pane.includes('pointerScale:'), 'the detail tab does not scale the pointer')
 })
 
 
