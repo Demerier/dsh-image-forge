@@ -537,14 +537,37 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
   }, [])
 
   /**
+   * Copy a project (§5.3).
+   *
+   * The copy is *not* opened: 复制 is a library action, and stealing the active
+   * canvas tab from the project the user is looking at would be a surprise. The
+   * grid refreshes, so the copy appears where the sort puts it — and `state.json`
+   * keeps pointing at whatever tab is actually open (§4.4).
+   */
+  const duplicateProject = useCallback(async (boardId: string) => {
+    const result = await postBoardRoute({ action: 'duplicate', board: boardId })
+    if (result.error !== undefined) {
+      setError(result.error)
+      return
+    }
+    setError(undefined)
+    await refreshLibrary()
+  }, [refreshLibrary])
+
+  /**
    * Delete a project, and close its canvas tab with it (§5.4).
    *
-   * The confirmation itself lives in the pane, because whether to ask at all
-   * depends on the item count the pane is already showing.
+   * The confirmation itself lives in the pane, because whether to ask at all —
+   * and which of the two modes was chosen — depends on the item count the pane is
+   * already showing. `files` is the only path that sends `deleteFiles`, so a
+   * button that says the pictures stay can never delete them.
    */
   const deleteProject = useCallback(
-    async (boardId: string) => {
-      const result = await postBoardRoute({ action: 'delete', board: boardId })
+    async (boardId: string, mode: 'keep' | 'files' = 'keep') => {
+      const body = mode === 'files'
+        ? { action: 'delete', board: boardId, deleteFiles: true }
+        : { action: 'delete', board: boardId }
+      const result = await postBoardRoute(body)
       if (result.error !== undefined) {
         setError(result.error)
         return
@@ -673,6 +696,7 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
       onCreate: createProject,
       onOpen: openProject,
       onRename: renameProject,
+      onDuplicate: duplicateProject,
       onDelete: deleteProject,
       onRefresh: () => {
         void refreshLibrary()

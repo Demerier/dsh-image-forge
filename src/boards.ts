@@ -445,10 +445,23 @@ function summarize(board: BoardFile): BoardSummary {
     && typeof item.markdownPath === 'string'
     && item.markdownPath.length > 0
   ))
+  // U07: the two numbers the project card and the delete confirmation need.
+  // Both are projected from the items already in hand, so listing the library
+  // still costs one read per board file and never `stat`s a picture. A
+  // hand-edited `bytes` that is not a number counts as 0 rather than poisoning
+  // the sum with `NaN`.
+  let bytes = 0
+  let imageCount = 0
+  for (const item of board.items) {
+    if ((item.kind ?? 'image') === 'image') imageCount += 1
+    if (typeof item.bytes === 'number' && Number.isFinite(item.bytes) && item.bytes > 0) bytes += item.bytes
+  }
   return {
     id: board.id,
     name: board.name,
     itemCount: board.items.length,
+    imageCount,
+    bytes,
     cover: newest === undefined ? null : newest.markdownPath,
     createdAt: board.createdAt,
     updatedAt: board.updatedAt,
@@ -1217,22 +1230,111 @@ export async function removeItem(
   })
 }
 
+/** What a board delete actually did (U07, §5.4). */
+export interface BoardRemoval {
+  /** True when this call removed the board file. */
+  removed: boolean
+  /** Picture files unlinked by this call. */
+  filesDeleted: number
+  /**
+   * Picture files deliberately **kept**: another board still references the
+   * same file (`copy-item`/`duplicate` share one PNG, §7.2/§5.3), or the unlink
+   * failed. Reported instead of swallowed — a "连图片一起删除" that silently kept
+   * a file is exactly the kind of refusal the user must be able to see.
+   */
+  filesKept: number
+}
+
+/**
+ * Delete a board, optionally with the pictures it owns (§5.4).
+ *
+ * Two modes, and the default is the recoverable one: without `deleteFiles` this
+ * is the old {@link deleteBoard} — metadata only, every PNG still on disk.
+ *
+ * With `deleteFiles`, every picture the board points at is unlinked **subject to
+ * the same shared-reference guard `removeItem` has**: `copy-item` and
+ * `duplicateBoard` make two boards share one file, and unlinking it would blank
+ * the picture on the surviving project. Such a file is counted in `filesKept`
+ * and left alone. Paths outside `outputDir` are never touched (a crafted board
+ * file must not turn "delete my project" into a filesystem oracle), which is the
+ * same rule and the same helper.
+ *
+ * Order: metadata first, then files. A crash in between leaves orphan PNGs —
+ * reachable from the asset page's copy-path, and harmless — whereas the reverse
+ * order would leave a board full of broken thumbnails.
+ *
+ * @param outputDir - the configured output directory.
+ * @param id - board id.
+ * @param options - `deleteFiles` also unlinks the pictures (guarded, above).
+ * @returns what happened; an unknown or unusable id reports `removed: false`
+ *   rather than throwing (an id from a stale panel is not an error).
+ */
+export async function removeBoard(
+  outputDir: string,
+  id: string,
+  options: { deleteFiles?: boolean } = {},
+): Promise<BoardRemoval> {
+  return serialized(boardsRoot(outputDir), async () => {
+    let doomed: BoardFile | undefined
+    try {
+      doomed = await readBoardFile(outputDir, id)
+    } catch {
+      // A crafted id fails the allow-list inside `boardFile`; nothing to remove.
+      return { removed: false, filesDeleted: 0, filesKept: 0 }
+    }
+    let removed = false
+    try {
+      await unlink(boardFile(outputDir, id))
+      removed = true
+    } catch {
+      return { removed: false, filesDeleted: 0, filesKept: 0 }
+    }
+    if (options.deleteFiles !== true || doomed === undefined) {
+      return { removed, filesDeleted: 0, filesKept: 0 }
+    }
+    // One file can be referenced by two items of the *same* board (a hand-edited
+    // file, or a same-board copy): unlink it once, not twice.
+    const wanted = new Map<string, string>()
+    for (const item of doomed.items) {
+      if (typeof item.path !== 'string' || item.path.length === 0) continue
+      if (!isInside(outputDir, item.path)) continue
+      const key = pathKey(item.path)
+      if (!wanted.has(key)) wanted.set(key, item.path)
+    }
+    let filesDeleted = 0
+    let filesKept = 0
+    if (wanted.size === 0) return { removed, filesDeleted, filesKept }
+    const others = await listBoardFiles(outputDir)
+    for (const [key, path] of wanted) {
+      const shared = others.some((other) => other.id !== id && other.items.some((item) => pathKey(item.path) === key))
+      if (shared) {
+        filesKept += 1
+        continue
+      }
+      try {
+        await unlink(path)
+        filesDeleted += 1
+      } catch {
+        filesKept += 1
+      }
+    }
+    return { removed, filesDeleted, filesKept }
+  })
+}
+
 /**
  * Delete a board's metadata. The images stay on disk.
+ *
+ * Kept as the boolean convenience over {@link removeBoard}: several callers only
+ * ask "did the board go", and the file-deleting mode must never be reachable by
+ * passing the wrong argument type here.
  *
  * @param outputDir - the configured output directory.
  * @param id - board id.
  * @returns whether a board file was removed.
  */
 export async function deleteBoard(outputDir: string, id: string): Promise<boolean> {
-  return serialized(boardsRoot(outputDir), async () => {
-    try {
-      await unlink(boardFile(outputDir, id))
-      return true
-    } catch {
-      return false
-    }
-  })
+  return (await removeBoard(outputDir, id)).removed
 }
 
 /**
@@ -1246,6 +1348,116 @@ export async function createBoard(outputDir: string, name?: string): Promise<Boa
   return serialized(boardsRoot(outputDir), async () => {
     const { board } = await ensureBoardLocked(outputDir, undefined, { name })
     return summarize(board)
+  })
+}
+
+/**
+ * Default name of a copied board: `<原名> 副本` (§5.3).
+ *
+ * The suffix counts against {@link BOARD_NAME_CHARS}, so the prefix is cut by
+ * **code point** to leave room for ` 副本` — a name at the cap would otherwise be
+ * truncated to `… 副` and read like a typo. Pure, so the panel and the store
+ * agree about what a copy is called.
+ *
+ * @param name - the source board's name.
+ * @returns a name that fits the cap and is never empty.
+ */
+export function duplicateBoardName(name: string): string {
+  const room = BOARD_NAME_CHARS - [...' 副本'].length
+  const cut = [...name].slice(0, room).join('').trim()
+  return `${cut.length > 0 ? cut : '画板'} 副本`
+}
+
+/** What one board copy produced (U07, §5.3). */
+export interface BoardDuplicate {
+  /** The new board's summary (item count, cover, bytes — the copy's own). */
+  board: BoardSummary
+  /** The copied items, in source order, with their new board-scoped ids. */
+  items: BoardItem[]
+  /**
+   * Lineage links dropped because they pointed at an item the copy does not
+   * have (a parent from another board, or one removed from the source since).
+   * Counted rather than thrown: a missing edge must never fail a copy, which is
+   * the rule `copyItem` and `resolveParents` already follow.
+   */
+  droppedParents: number
+}
+
+/**
+ * Copy a whole board: its entries, their arrangement and their lineage (§5.3).
+ *
+ * The pictures are **not** copied — every item keeps its `path`/`markdownPath`,
+ * so the two boards share one file on disk. That is the same semantics
+ * `copyItem` has (§7.2) and the reason {@link removeBoard}'s file mode refuses to
+ * unlink a shared file.
+ *
+ * Ids are board-scoped, so the copy mints a fresh id per item and rewrites
+ * `parents` through that map: a lineage edge must point at the *copy's* nodes, or
+ * the canvas would draw it nowhere. A parent id the map does not know is dropped
+ * and counted in {@link BoardDuplicate.droppedParents}.
+ *
+ * Coordinates (`x`/`y`) and every piece of provenance (prompt, seed, ratio,
+ * batch, `createdAt`, session) travel with the item; only the board-level clock
+ * is fresh. The camera is copied too — the copy opens looking the way the
+ * original did.
+ *
+ * @param outputDir - the configured output directory.
+ * @param id - source board id.
+ * @param name - the copy's name; blank means `<原名> 副本`.
+ * @returns the copy, or `undefined` when the source board is gone.
+ * @throws When the library is already at {@link MAX_BOARDS} — a copy is an
+ *   explicit user action, so it is refused by name instead of silently
+ *   overwriting somebody else's board the way a generation would.
+ */
+export async function duplicateBoard(
+  outputDir: string,
+  id: string,
+  name?: string,
+): Promise<BoardDuplicate | undefined> {
+  return serialized(boardsRoot(outputDir), async () => {
+    const source = await readBoardFile(outputDir, id)
+    if (source === undefined) return undefined
+    const existing = await listBoardFiles(outputDir)
+    if (existing.length >= MAX_BOARDS) {
+      throw new Error(`画板数量已达上限 ${String(MAX_BOARDS)}，请先删除一个项目再复制`)
+    }
+    const now = new Date().toISOString()
+    const taken = new Set<string>()
+    const remap = new Map<string, string>()
+    for (const item of source.items) {
+      let next = makeItemId()
+      while (taken.has(next)) next = makeItemId()
+      taken.add(next)
+      remap.set(item.id, next)
+    }
+    let droppedParents = 0
+    const items: BoardItem[] = source.items.map((item) => {
+      const parents: string[] = []
+      for (const parent of item.parents ?? []) {
+        const mapped = remap.get(parent)
+        if (mapped === undefined) {
+          droppedParents += 1
+          continue
+        }
+        if (!parents.includes(mapped)) parents.push(mapped)
+      }
+      return { ...item, id: remap.get(item.id) as string, parents }
+    })
+    const copy: BoardFile = {
+      version: BOARD_VERSION,
+      id: newBoardId((candidate) => existing.some((board) => board.id === candidate)),
+      name: sanitizeBoardName(name) ?? duplicateBoardName(source.name),
+      createdAt: now,
+      updatedAt: now,
+      sessionId: source.sessionId,
+      camera: source.camera === null ? null : { ...source.camera },
+      items,
+    }
+    // The same cap every other writer honours: a copy of a full board is still
+    // one board, not two thousand items.
+    capItems(copy)
+    await saveBoard(outputDir, copy)
+    return { board: summarize(copy), items: copy.items, droppedParents }
   })
 }
 

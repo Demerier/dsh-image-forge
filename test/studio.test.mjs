@@ -242,6 +242,7 @@ import {
   STUDIO_MAX_PROMPT_CHARS,
   STUDIO_RATIOS,
   fitStudioRatio,
+  formatBytes,
   isStudioClientId,
   stepperStepsOf,
 } from '../testlib/studio-shared.js'
@@ -259,7 +260,7 @@ import {
 // owns and the `calc()` the stylesheet writes; reading both from source is what
 // lets the test pin one to the other instead of restating the numbers.
 import { HANDLE_SCREEN_HIT, HANDLE_SCREEN_SIZE } from '../src/canvas-connections.ts'
-import { STUDIO_CSS } from '../src/client-styles.ts'
+import { STUDIO_CSS, WORKBENCH_CSS } from '../src/client-styles.ts'
 // U05: the drawer's decisions are pure and live in their own module — the same
 // split the canvas uses (`canvas-flow-model.ts`). Importing the *source* keeps the
 // assertions on the code that ships rather than on a `testlib/` snapshot that is
@@ -2775,6 +2776,161 @@ test('C14: the board action set reaches ten and the node writers validate their 
     () => parseBoardAction({ action: 'save-layout-node', draft: { width: 'x', items: [] }, w: 1, h: 1 }),
     /draft.width/,
   )
+})
+
+// ---------------------------------------------------------------------------
+// U07: 项目能力补齐 — duplicate / bytes / the two delete modes.
+// The store's side effects live in boards.test.mjs; here is the wire: the closed
+// action set, the flag's strictness, the size formatter the card uses, and the
+// route's answer for both delete modes over a real socket.
+// ---------------------------------------------------------------------------
+
+test('U07: 复制项目 is a thirteenth board action, and duplicate takes a name', () => {
+  assert.equal(parseBoardAction({ action: 'duplicate', board: 'b1' }).action, 'duplicate')
+  assert.equal(parseBoardAction({ action: 'duplicate', board: 'b1', name: ' 副本 A ' }).name, ' 副本 A ')
+  // Still a closed set: a typo is refused rather than treated as a no-op.
+  assert.throws(() => parseBoardAction({ action: 'copy' }), /未知的画板操作/)
+  assert.throws(() => parseBoardAction({ action: 'duplicate-board' }), /未知的画板操作/)
+})
+
+test('U07: the delete action carries deleteFiles only when it is literally true', () => {
+  assert.equal(parseBoardAction({ action: 'delete', board: 'b1' }).deleteFiles, undefined, '默认只删项目')
+  assert.equal(parseBoardAction({ action: 'delete', board: 'b1', deleteFiles: true }).deleteFiles, true)
+  // A truthy non-boolean must not become a file purge — the two 口径 stay explicit.
+  assert.equal(parseBoardAction({ action: 'delete', board: 'b1', deleteFiles: 'yes' }).deleteFiles, undefined)
+  assert.equal(parseBoardAction({ action: 'delete', board: 'b1', deleteFiles: 1 }).deleteFiles, undefined)
+  // `deleteFile` (one item) and `deleteFiles` (whole board) are different fields;
+  // sending the singular one to `delete` deletes no file.
+  const singular = parseBoardAction({ action: 'delete', board: 'b1', deleteFile: true })
+  assert.equal(singular.deleteFile, true)
+  assert.equal(singular.deleteFiles, undefined)
+})
+
+test('U07: the size label is three tiers, and every edge reads as a number', () => {
+  assert.equal(formatBytes(0), '0 B')
+  assert.equal(formatBytes(900), '900 B')
+  assert.equal(formatBytes(1024), '1024 B', 'below one MiB stays in bytes, so nothing rounds to 0 MB')
+  assert.equal(formatBytes(86 * 1024 * 1024), '86 MB')
+  assert.equal(formatBytes(Math.round(1.2 * 1024 * 1024 * 1024)), '1.2 GB')
+  // Boundaries: negative and non-finite clamp to `0 B` rather than print `NaN B`.
+  assert.equal(formatBytes(-5), '0 B')
+  assert.equal(formatBytes(Number.NaN), '0 B')
+  assert.equal(formatBytes(Number.POSITIVE_INFINITY), '0 B')
+  assert.equal(formatBytes(undefined), '0 B')
+  // Over a terabyte stays in the gigabyte tier — three tiers, not four.
+  const oneAndAHalfTb = 1536 * 1024 * 1024 * 1024
+  assert.equal(formatBytes(oneAndAHalfTb), '1536 GB')
+  // The tier edge is the *printed* value: 1023 MiB is megabytes, a full GiB is
+  // the next tier, and 1023.6 MiB is promoted rather than printed as `1024 MB`.
+  assert.equal(formatBytes(1023 * 1024 * 1024), '1023 MB')
+  assert.equal(formatBytes(1024 * 1024 * 1024), '1 GB')
+  assert.equal(formatBytes(Math.round(1023.6 * 1024 * 1024)), '1 GB')
+})
+
+/** Mount just the board route on a throwaway server over one temp output dir. */
+async function withBoardServer(run) {
+  const registered = []
+  const fakeWebServer = { register: (route) => { registered.push(route); return () => {} } }
+  const fakeCtx = { webServer: fakeWebServer, logger: { warn() {} } }
+  const dir = mkdtempSync(join(tmpdir(), 'forge-u07-'))
+  try {
+    registerStudioRoutes(fakeCtx, { settings: () => ({ outputDir: dir }), ctx: fakeCtx })
+    const route = registered.find((entry) => entry.path === STUDIO_BOARD_ROUTE)
+    assert.ok(route, 'the board route must be registered')
+    const server = createServer((req, res) => { void route.handler(req, res) })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${server.address().port}`
+    try {
+      return await run({ base, dir })
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** POST one board action the way the panel does, with a browser-like Origin. */
+function postBoard(base, body) {
+  return fetch(base + STUDIO_BOARD_ROUTE, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: `http://${new URL(base).host}` },
+    body: JSON.stringify(body),
+  })
+}
+
+/** One recorded picture with a unique file name, for the U07 route cases. */
+function u07Item(dir, name, bytes) {
+  const path = join(dir, `${name}.png`)
+  writeFileSync(path, 'png')
+  return {
+    path,
+    markdownPath: path,
+    width: 64,
+    height: 64,
+    bytes,
+    mediaType: 'image/png',
+    prompt: name,
+    mode: 'generate',
+    backend: 'studio',
+    parents: [],
+  }
+}
+
+test('U07: the board route copies a project, and both delete 口径 reach the store', async () => {
+  await withBoardServer(async ({ base, dir }) => {
+    const recorded = await recordItemsLive(dir, undefined, [
+      u07Item(dir, 'u07a', 1024),
+      u07Item(dir, 'u07b', 2048),
+    ], { prompt: 'U07 项目' })
+    const boardId = recorded.board.id
+    const [pngA, pngB] = recorded.items.map((entry) => entry.path)
+
+    const copyRes = await postBoard(base, { action: 'duplicate', board: boardId, name: '副本 A' })
+    assert.equal(copyRes.status, 200)
+    const copy = await copyRes.json()
+    assert.equal(copy.ok, true)
+    assert.equal(copy.board.name, '副本 A')
+    assert.notEqual(copy.board.id, boardId, 'the copy is its own board')
+    assert.equal(copy.board.itemCount, 2, '条目数一致')
+    assert.equal(copy.board.bytes, 3072, 'the summary reports the summed item bytes')
+    assert.equal(copy.droppedParents, 0)
+
+    // 口径二 on the original: the copy still references both files, so the
+    // shared-reference guard keeps them — the answer says so instead of lying.
+    const swept = await postBoard(base, { action: 'delete', board: boardId, deleteFiles: true })
+    assert.deepEqual(await swept.json(), { ok: true, filesDeleted: 0, filesKept: 2 })
+    assert.ok(existsSync(pngA) && existsSync(pngB), 'a shared picture survives')
+
+    // The last board holding them may take them with it.
+    const last = await postBoard(base, { action: 'delete', board: copy.board.id, deleteFiles: true })
+    assert.deepEqual(await last.json(), { ok: true, filesDeleted: 2, filesKept: 0 })
+    assert.equal(existsSync(pngA), false)
+    assert.equal(existsSync(pngB), false)
+  })
+})
+
+test('U07: a delete with no deleteFiles keeps every picture on disk', async () => {
+  await withBoardServer(async ({ base, dir }) => {
+    const recorded = await recordItemsLive(dir, undefined, [u07Item(dir, 'u07keep', 512)], { prompt: '只删项目' })
+    const png = recorded.items[0].path
+    const res = await postBoard(base, { action: 'delete', board: recorded.board.id })
+    assert.equal(res.status, 200)
+    assert.deepEqual(await res.json(), { ok: true, filesDeleted: 0, filesKept: 0 })
+    assert.equal(await readBoardLive(dir, recorded.board.id), undefined, 'the project is gone')
+    assert.ok(existsSync(png), '只删项目时图片仍在素材库')
+  })
+})
+
+test('U07: the panel ships 复制/两口径, and the stylesheet carries their classes', () => {
+  const client = readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8')
+  assert.ok(client.includes('duplicate'), 'the pane must be able to ask for a copy')
+  assert.ok(client.includes('deleteFiles'), 'and to ask for the destructive delete mode')
+  assert.ok(client.includes('连图片一起删除'), 'the destructive option says what it does')
+  assert.ok(client.includes('只删项目'), 'and the safe one says what it keeps')
+  // The two U07 classes live in the workbench sheet, not the studio's.
+  assert.ok(WORKBENCH_CSS.includes('.dsh-forge-workbench-confirm-warn'), 'the irreversibility line is styled')
+  assert.ok(WORKBENCH_CSS.includes('.dsh-forge-workbench-card-size'), 'so is the size chip')
 })
 
 /** Mount a board holding exactly one layout node with `draft`. */

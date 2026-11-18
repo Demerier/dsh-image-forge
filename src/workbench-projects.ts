@@ -26,7 +26,7 @@
  * @module workbench-projects
  */
 import { createElement, useMemo, useState, type ReactNode } from 'react'
-import { studioFileUrl, type BoardSummary } from './studio-shared.ts'
+import { formatBytes, studioFileUrl, type BoardSummary } from './studio-shared.ts'
 
 /** Sort orders the toolbar offers (§5.3). `recent` is the default. */
 export const PROJECT_SORTS = ['recent', 'name'] as const
@@ -112,9 +112,50 @@ export function itemCountLabel(count: number): string {
   return count === 0 ? '空项目' : `${String(count)} 个节点`
 }
 
+/**
+ * How much disk a project's pictures take, for the card's meta line (U07).
+ *
+ * `''` when the host did not report a size — an older payload or a fixture —
+ * because "· 0 B" next to a full project would be a lie, and the empty-cover
+ * branch already says "空项目" for a genuinely empty one.
+ *
+ * @param board - the summary the card is rendering.
+ * @returns `86 MB` / `1.2 GB` / `0 B`, or `''` when unknown.
+ */
+export function boardSizeLabel(board: Pick<BoardSummary, 'bytes'>): string {
+  return typeof board.bytes === 'number' && Number.isFinite(board.bytes) ? formatBytes(board.bytes) : ''
+}
+
+/**
+ * The line inside the destructive delete confirmation (§5.4): what goes, and
+ * that it does not come back.
+ *
+ * Counts **pictures**, not nodes: `itemCount` includes a failed task and a
+ * layout draft, and neither is a file the user could lose. Falls back to
+ * `itemCount` when an older payload carries no `imageCount`.
+ *
+ * @param board - the project about to be deleted.
+ * @returns e.g. `将删除 3 张图片 · 86 MB，无法恢复。`
+ */
+export function deleteFilesWarning(board: Pick<BoardSummary, 'imageCount' | 'itemCount' | 'bytes'>): string {
+  const images = typeof board.imageCount === 'number' ? board.imageCount : board.itemCount
+  return `连图片一起删除：将删除 ${String(images)} 张图片 · ${formatBytes(board.bytes)}，无法恢复。`
+}
+
 /* -------------------------------------------------------------------------- */
 /* The pane                                                                   */
 /* -------------------------------------------------------------------------- */
+
+/** What a confirmed delete should do with the pictures (§5.4). */
+export type ProjectDeleteMode = 'keep' | 'files'
+
+/** The labels of the two delete choices, kept here so a test can name them once. */
+export const PROJECT_DELETE_KEEP_LABEL = '只删项目（图片留在素材库）'
+export const PROJECT_DELETE_FILES_LABEL = '连图片一起删除'
+export const PROJECT_DELETE_EMPTY_LABEL = '确认删除'
+export const PROJECT_CANCEL_LABEL = '取消'
+/** The card action that copies a project (§5.3). */
+export const PROJECT_DUPLICATE_LABEL = '复制'
 
 /** Props of {@link ProjectsPane}; every mutation is a callback, not a fetch. */
 export interface ProjectsPaneProps {
@@ -132,8 +173,15 @@ export interface ProjectsPaneProps {
   readonly onOpen: (boardId: string) => void
   /** Commit a rename. */
   readonly onRename: (boardId: string, name: string) => unknown
-  /** Delete a project — the pane has already confirmed it. */
-  readonly onDelete: (boardId: string) => unknown
+  /** Copy a project: same entries and layout, new board (§5.3). */
+  readonly onDuplicate?: (boardId: string) => unknown
+  /**
+   * Delete a project — the pane has already confirmed it, including *which*
+   * delete: `keep` (default) leaves the pictures on disk, `files` also unlinks
+   * them (§5.4). The mode is passed, not inferred, so the destructive path is
+   * always the result of a click the user made on a labelled button.
+   */
+  readonly onDelete: (boardId: string, mode?: ProjectDeleteMode) => unknown
   /** Re-read the library and the environment (`重新检测`). */
   readonly onRefresh?: () => void
 }
@@ -166,7 +214,7 @@ function Cover(props: { board: BoardSummary }): ReactNode {
  *   sub-view when it is open.
  */
 export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof createElement> {
-  const { boards, loading, environment, error, onCreate, onOpen, onRename, onDelete, onRefresh } = props
+  const { boards, loading, environment, error, onCreate, onOpen, onRename, onDuplicate, onDelete, onRefresh } = props
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<ProjectSort>('recent')
   const [draftName, setDraftName] = useState('')
@@ -314,6 +362,7 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
       visible.map((board) => {
         const renamingThis = renaming === board.id
         const confirmingThis = confirming === board.id
+        const size = boardSizeLabel(board)
         const cardChildren: ReactNode[] = [
           createElement('button', {
             key: 'open',
@@ -326,7 +375,15 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
             createElement('span', { key: 'title', className: 'dsh-forge-workbench-card-title' }, board.name),
             createElement('span', { key: 'meta', className: 'dsh-forge-workbench-card-meta' }, [
               createElement('span', { key: 'count', className: 'dsh-forge-workbench-card-count' }, itemCountLabel(board.itemCount)),
-              createElement('span', { key: 'dot', className: 'dsh-forge-workbench-card-dot', 'aria-hidden': 'true' }, '·'),
+              // U07: the size sits next to the count (`12 个节点 · 86 MB`). It is
+              // omitted rather than shown as `0 B` when the host did not report it.
+              size.length === 0
+                ? null
+                : createElement('span', { key: 'size', className: 'dsh-forge-workbench-card-size' }, [
+                    createElement('span', { key: 'dot', className: 'dsh-forge-workbench-card-dot', 'aria-hidden': 'true' }, '·'),
+                    size,
+                  ]),
+              createElement('span', { key: 'dot-time', className: 'dsh-forge-workbench-card-dot', 'aria-hidden': 'true' }, '·'),
               createElement(
                 'span',
                 { key: 'time', className: 'dsh-forge-workbench-card-time', title: absoluteTime(board.updatedAt) },
@@ -380,6 +437,25 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
                 },
                 '重命名',
               ),
+              // U07 §5.3: 复制项目. Rendered only when the shell gave it a handler,
+              // so the pane stays usable (and assertable) without one.
+              onDuplicate === undefined
+                ? null
+                : createElement(
+                    'button',
+                    {
+                      key: 'duplicate',
+                      type: 'button',
+                      className: 'dsh-forge-workbench-action',
+                      'aria-label': `复制 ${board.name}`,
+                      title: '复制一份：条目、位置与血缘都复制，图片文件不复制',
+                      onClick: () => {
+                        setConfirming(undefined)
+                        void onDuplicate(board.id)
+                      },
+                    },
+                    PROJECT_DUPLICATE_LABEL,
+                  ),
               createElement(
                 'button',
                 {
@@ -395,19 +471,14 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
           )
         }
         if (confirmingThis) {
-          // §5.4: the confirmation names what is about to go. The two-option
-          // split (keep the files / delete them too) is U07's `deleteFile` line;
-          // today every delete keeps the files, and the copy says so.
-          cardChildren.push(
-            createElement('div', { key: 'confirm', className: 'dsh-forge-workbench-confirm', role: 'group' }, [
-              createElement(
-                'p',
-                { key: 'copy', className: 'dsh-forge-workbench-confirm-copy' },
-                board.itemCount === 0
-                  ? `删除「${board.name}」？此操作不可撤销。`
-                  : `删除「${board.name}」？它的 ${String(board.itemCount)} 个节点会一起消失，图片文件仍留在素材库。`,
-              ),
-              createElement('div', { key: 'actions', className: 'dsh-forge-workbench-confirm-actions' }, [
+          // §5.4: the confirmation names what is about to go, and — for a project
+          // with pictures — the two modes are *two labelled buttons*, never one
+          // button plus a checkbox. The destructive one spells out the count, the
+          // size and that it cannot be undone, so "连图片一起删除" is always a click
+          // on a sentence the user has read.
+          const empty = board.itemCount === 0
+          const options: ReactNode[] = empty
+            ? [
                 createElement(
                   'button',
                   {
@@ -419,8 +490,58 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
                       setConfirming(undefined)
                     },
                   },
-                  '确认删除',
+                  PROJECT_DELETE_EMPTY_LABEL,
                 ),
+              ]
+            : [
+                createElement(
+                  'button',
+                  {
+                    key: 'keep',
+                    type: 'button',
+                    className: 'dsh-forge-workbench-action is-danger',
+                    'aria-label': `只删项目 ${board.name}`,
+                    title: '项目条目会消失，图片文件留在素材库，仍可从素材库找回',
+                    onClick: () => {
+                      void onDelete(board.id, 'keep')
+                      setConfirming(undefined)
+                    },
+                  },
+                  PROJECT_DELETE_KEEP_LABEL,
+                ),
+                createElement(
+                  'button',
+                  {
+                    key: 'files',
+                    type: 'button',
+                    className: 'dsh-forge-workbench-action is-danger',
+                    'aria-label': `连图片一起删除 ${board.name}`,
+                    onClick: () => {
+                      void onDelete(board.id, 'files')
+                      setConfirming(undefined)
+                    },
+                  },
+                  PROJECT_DELETE_FILES_LABEL,
+                ),
+              ]
+          cardChildren.push(
+            createElement('div', { key: 'confirm', className: 'dsh-forge-workbench-confirm', role: 'group' }, [
+              createElement(
+                'p',
+                { key: 'copy', className: 'dsh-forge-workbench-confirm-copy' },
+                empty
+                  ? `删除空项目「${board.name}」？此操作不可撤销。`
+                  : `删除「${board.name}」？它的 ${String(board.itemCount)} 个节点会一起消失。`,
+              ),
+              empty
+                ? null
+                : createElement(
+                    'p',
+                    { key: 'warn', className: 'dsh-forge-workbench-confirm-warn' },
+                    deleteFilesWarning(board),
+                  ),
+              createElement('div', { key: 'actions', className: 'dsh-forge-workbench-confirm-actions' }, [
+                ...options,
                 createElement(
                   'button',
                   {
@@ -429,7 +550,7 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
                     className: 'dsh-forge-workbench-action',
                     onClick: () => setConfirming(undefined),
                   },
-                  '取消',
+                  PROJECT_CANCEL_LABEL,
                 ),
               ]),
             ]),

@@ -133,6 +133,9 @@ const BOARD_ONE = {
   id: 'b_one',
   name: '橘猫计划',
   itemCount: 3,
+  // U07: the card reads imageCount/bytes; the numbers are the fake host's.
+  imageCount: 3,
+  bytes: 86 * 1024 * 1024,
   cover: 'C:/out/cat.png',
   createdAt: '2026-11-17T00:00:00.000Z',
   updatedAt: new Date(Date.now() - 3 * 60_000).toISOString(),
@@ -142,6 +145,8 @@ const BOARD_TWO = {
   id: 'b_two',
   name: '海报草图',
   itemCount: 0,
+  imageCount: 0,
+  bytes: 0,
   cover: null,
   createdAt: '2026-11-16T00:00:00.000Z',
   updatedAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
@@ -178,11 +183,16 @@ function installFakeNetwork(options = {}) {
   }
   let workspace = options.workspace === undefined ? null : options.workspace
   let created = 0
+  let duplicates = 0
   globalThis.fetch = async (input, init) => {
     const url = String(input)
     const method = init === undefined || init.method === undefined ? 'GET' : init.method
     calls.push({ url, method, body: init === undefined ? undefined : init.body })
-    if (url.indexOf(CONFIG_ROUTE) === 0) return respond(config)
+    // A fresh payload per read, the way a real host re-serialises the snapshot:
+    // `create`/`duplicate` answer a new array, and a shell that re-reads must be
+    // able to render it. Handing back the same array reference would let a stale
+    // `boards` prop look unchanged to anything comparing references.
+    if (url.indexOf(CONFIG_ROUTE) === 0) return respond({ ...config, boards: library.map((board) => ({ ...board })) })
     if (url.indexOf(FILE_ROUTE) === 0) return respond({ ok: true })
     if (url.indexOf(BOARD_ROUTE) === 0 && method === 'POST') {
       let action
@@ -223,7 +233,30 @@ function installFakeNetwork(options = {}) {
           const index = library.findIndex((entry) => entry.id === action.board)
           if (index < 0) return respond({ error: '画板不存在' }, 404)
           library.splice(index, 1)
-          return respond({ ok: true })
+          // U07 §5.4: the two 口径 answer with how many files went and how many
+          // were kept. The stub keeps no files, so a keep-mode delete reports
+          // zeros for both — what matters here is that the flag arrived.
+          return respond({
+            ok: true,
+            filesDeleted: action.deleteFiles === true ? 3 : 0,
+            filesKept: 0,
+          })
+        }
+        if (action.action === 'duplicate') {
+          // U07 §5.3: a copy is a new board with the same entries, never the files.
+          const source = library.find((entry) => entry.id === action.board)
+          if (source === undefined) return respond({ error: '画板不存在' }, 404)
+          duplicates += 1
+          const now = new Date().toISOString()
+          const board = {
+            ...source,
+            id: `b_copy${String(duplicates)}`,
+            name: typeof action.name === 'string' && action.name.length > 0 ? action.name : `${source.name} 副本`,
+            createdAt: now,
+            updatedAt: now,
+          }
+          library.unshift(board)
+          return respond({ ok: true, board, droppedParents: 0 })
         }
         if (action.action === 'save-layout-node') {
           // The detail tab's one writer (§8.1). The board it answers with is the
@@ -571,14 +604,92 @@ test('creating a project names it, opens its canvas tab, and deleting asks first
     const confirm = byClass(mounted.tree, 'dsh-forge-workbench-confirm')
     assert.ok(confirm !== undefined, 'a non-empty project asks for confirmation')
     assert.match(textOf(confirm), /3 个节点/)
-    buttonByText(confirm, '确认删除').props.onClick()
+    // U07 §5.4: both 口径 are reachable in the confirmation, and the destructive
+    // one states what it would delete and that it cannot be undone.
+    const warn = byClass(mounted.tree, 'dsh-forge-workbench-confirm-warn')
+    assert.ok(warn !== undefined, 'the confirmation warns about the destructive option')
+    assert.match(textOf(warn), /3 张图片/)
+    assert.match(textOf(warn), /86 MB/)
+    assert.match(textOf(warn), /无法恢复/)
+    assert.ok(buttonByText(confirm, '连图片一起删除') !== undefined, 'the second option is on screen')
+    buttonByText(confirm, '只删项目（图片留在素材库）').props.onClick()
     await settle(host, mounted)
     assert.deepEqual(
       network.boardActions().filter((action) => action.action === 'delete'),
       [{ action: 'delete', board: 'b_one' }],
-      'the confirmation is what sends the delete',
+      'the confirmation is what sends the delete, and 只删项目 sends no file flag',
     )
     assert.equal(cardOf(mounted.tree, 'b_one'), undefined, 'and the card is gone')
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U07: 复制 sends a duplicate action and the copy lands in the grid', async () => {
+  const { network, host, mounted } = await mountShell({ boards: [BOARD_ONE] })
+  try {
+    const card = cardOf(mounted.tree, 'b_one')
+    // The card menu carries the copy action (§5.3), next to 重命名 / 删除.
+    const copyButton = byLabel(card, '复制 橘猫计划')
+    assert.ok(copyButton !== undefined, '复制 is one of the card actions')
+    assert.equal(textOf(copyButton), '复制')
+    copyButton.props.onClick()
+    await settle(host, mounted)
+
+    assert.deepEqual(
+      network.boardActions().filter((action) => action.action === 'duplicate'),
+      [{ action: 'duplicate', board: 'b_one' }],
+      '复制 asks the host for one duplicate of this project',
+    )
+    // The library was re-read, so the copy is a card of its own — with its own id,
+    // the same entries and therefore the same size.
+    const copied = cardOf(mounted.tree, 'b_copy1')
+    assert.ok(copied !== undefined, 'the copy appears in the grid')
+    assert.match(textOf(copied), /橘猫计划 副本/)
+    assert.match(textOf(copied), /86 MB/, 'a copy shares the files, so it reports the same size')
+  } finally {
+    await stop(host, network)
+  }
+})
+
+test('U07: 连图片一起删除 sends deleteFiles, and only that option does', async () => {
+  const { network, host, mounted } = await mountShell({ boards: [BOARD_ONE, BOARD_TWO] })
+  try {
+    byLabel(cardOf(mounted.tree, 'b_one'), '删除 橘猫计划').props.onClick()
+    await settle(host, mounted)
+    const confirm = byClass(mounted.tree, 'dsh-forge-workbench-confirm')
+    assert.ok(confirm !== undefined)
+    // The destructive option is labelled with what it does, and carries the counts
+    // the user is agreeing to in the same block.
+    assert.match(textOf(confirm), /3 张图片/, 'the confirmation names the picture count')
+    assert.match(textOf(confirm), /86 MB/, 'and the size')
+    buttonByText(confirm, '连图片一起删除').props.onClick()
+    await settle(host, mounted)
+
+    assert.deepEqual(
+      network.boardActions().filter((action) => action.action === 'delete'),
+      [{ action: 'delete', board: 'b_one', deleteFiles: true }],
+      'the second option is the only path that sends deleteFiles',
+    )
+    assert.equal(cardOf(mounted.tree, 'b_one'), undefined)
+
+    // An empty project needs no choice: one 确认删除, and no file flag.
+    byLabel(cardOf(mounted.tree, 'b_two'), '删除 海报草图').props.onClick()
+    await settle(host, mounted)
+    const empty = byClass(mounted.tree, 'dsh-forge-workbench-confirm')
+    assert.ok(empty !== undefined)
+    assert.match(textOf(empty), /删除空项目/)
+    assert.equal(buttonByText(empty, '连图片一起删除'), undefined, 'nothing to delete, so no second option')
+    buttonByText(empty, '确认删除').props.onClick()
+    await settle(host, mounted)
+    assert.deepEqual(
+      network.boardActions().filter((action) => action.action === 'delete'),
+      [
+        { action: 'delete', board: 'b_one', deleteFiles: true },
+        { action: 'delete', board: 'b_two' },
+      ],
+      'an empty project deletes with one confirmation and no flag',
+    )
   } finally {
     await stop(host, network)
   }

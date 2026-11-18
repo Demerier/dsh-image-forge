@@ -79,12 +79,13 @@ import {
   activeBoardId,
   copyItem,
   createBoard,
-  deleteBoard,
+  duplicateBoard,
   listAssets,
   listBoards,
   moveItem,
   readBoard,
   recordItems,
+  removeBoard,
   removeItem,
   renameBoard,
   saveLayout,
@@ -93,6 +94,7 @@ import {
   setActiveBoard,
 } from './boards.ts'
 import { readWorkspaceFile, writeWorkspaceFile } from './boards.ts'
+import type { BoardDuplicate } from './boards.ts'
 import { parseMossLayout } from './model-profiles.ts'
 import { stateFromWorkspace, toWorkspaceJson } from './workbench-tabs.ts'
 import { sanitizePrefix, writeImages } from './output.ts'
@@ -435,6 +437,27 @@ export function registerStudioRoutes(
             await setActiveBoard(outputDir, board.id)
             return json(res, 200, { ok: true, board })
           }
+          case 'duplicate': {
+            // §5.3: a copy is entries + camera, never the pictures. The new id
+            // is deliberately **not** made the active board: `state.json` mirrors
+            // the open canvas tab (§4.4), and the panel decides whether to open
+            // the copy. Making it active here would claim a tab nobody opened.
+            const id = await targetBoardId(outputDir, action.board)
+            if (id === undefined) return jsonError(res, 404, '画板不存在')
+            let copy: BoardDuplicate | undefined
+            try {
+              copy = await duplicateBoard(outputDir, id, action.name)
+            } catch (error) {
+              // The one expected refusal: the library is at MAX_BOARDS.
+              return jsonError(res, 409, firstLine(error))
+            }
+            if (copy === undefined) return jsonError(res, 404, '画板不存在')
+            return json(res, 200, {
+              ok: true,
+              board: copy.board,
+              droppedParents: copy.droppedParents,
+            })
+          }
           case 'rename': {
             const id = await targetBoardId(outputDir, action.board)
             if (id === undefined) return jsonError(res, 404, '画板不存在')
@@ -510,9 +533,16 @@ export function registerStudioRoutes(
           case 'delete': {
             const id = await targetBoardId(outputDir, action.board)
             if (id === undefined) return jsonError(res, 404, '画板不存在')
-            const removed = await deleteBoard(outputDir, id)
-            if (removed && (await activeBoardId(outputDir)) === id) await setActiveBoard(outputDir, null)
-            return json(res, 200, { ok: removed })
+            // §5.4's two modes, one action: without `deleteFiles` the pictures
+            // stay (the reversible delete the panel defaults to); with it they go,
+            // minus any file another board still shares.
+            const result = await removeBoard(outputDir, id, { deleteFiles: action.deleteFiles === true })
+            if (result.removed && (await activeBoardId(outputDir)) === id) await setActiveBoard(outputDir, null)
+            return json(res, 200, {
+              ok: result.removed,
+              filesDeleted: result.filesDeleted,
+              filesKept: result.filesKept,
+            })
           }
           case 'active': {
             const id = await targetBoardId(outputDir, action.board)
@@ -829,6 +859,7 @@ function parseLayoutText(value: unknown): string {
 const BOARD_ACTIONS = [
   'create',
   'rename',
+  'duplicate',
   'layout',
   'remove-item',
   'delete',
@@ -864,6 +895,9 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
   const name = typeof body.name === 'string' ? body.name.slice(0, 120) : undefined
   const item = typeof body.item === 'string' && body.item.trim().length > 0 ? body.item.trim().slice(0, 80) : undefined
   const deleteFile = body.deleteFile === true
+  // Strictly `true`: a truthy string must not turn a "只删除项目" click into a
+  // file purge. The panel sends the flag only for the second option (§5.4).
+  const deleteFiles = body.deleteFiles === true
   const items = Array.isArray(body.items)
     ? body.items.slice(0, 2000).map(parsePosition).filter(isPosition)
     : undefined
@@ -898,6 +932,7 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
     ...(name === undefined ? {} : { name }),
     ...(item === undefined ? {} : { item }),
     ...(deleteFile ? { deleteFile } : {}),
+    ...(deleteFiles ? { deleteFiles } : {}),
     ...(items === undefined ? {} : { items }),
     ...(camera === undefined ? {} : { camera }),
     ...(toBoard === undefined ? {} : { toBoard }),

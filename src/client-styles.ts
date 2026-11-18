@@ -368,6 +368,8 @@ export const WORKBENCH_CSS = `
 .dsh-forge-workbench-rename .dsh-forge-workbench-input{flex:1 1 auto;width:auto}
 .dsh-forge-workbench-confirm{display:flex;flex-direction:column;gap:5px;padding:6px;border-radius:6px;border:1px solid rgba(220,38,38,.4);background:rgba(220,38,38,.07)}
 .dsh-forge-workbench-confirm-copy{margin:0;font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+.dsh-forge-workbench-confirm-warn{margin:0;font-size:10.5px;line-height:1.5;overflow-wrap:anywhere;color:#dc2626;font-weight:600}
+.dsh-forge-workbench-card-size{font-variant-numeric:tabular-nums;white-space:nowrap}
 .dsh-forge-workbench-confirm-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 .dsh-forge-workbench-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:28px 16px;border-radius:10px;border:1px dashed rgba(127,127,127,.32);text-align:center}
 .dsh-forge-workbench-empty-title{margin:0;font-size:13.5px;font-weight:600;line-height:1.5}

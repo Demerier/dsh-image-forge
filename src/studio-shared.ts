@@ -136,6 +136,38 @@ export function parseStudioThumbWidth(raw: string | null): number | undefined | 
   return (STUDIO_THUMB_WIDTHS as readonly number[]).includes(width) ? width : null
 }
 
+/**
+ * A byte count as the panel shows it: `0 B` / `86 MB` / `1.2 GB`.
+ *
+ * Three tiers, on purpose (U07 §5.4): a project card is 220 px wide and the
+ * delete confirmation has one line, so a fourth ("KB") tier would buy precision
+ * nobody reads. Below one mebibyte the number stays in bytes — that is what
+ * makes `0 B` reachable for an empty project and keeps a 900-byte board from
+ * rounding to `0 MB`.
+ *
+ * Pure and defensive: an absent, non-finite or negative value reads `0 B`
+ * rather than `NaN B` — the caller may be an older payload or a fixture that
+ * predates `BoardSummary.bytes`.
+ *
+ * @param bytes - the count, from `BoardSummary.bytes` or an item's `bytes`.
+ * @returns printable text; never empty.
+ */
+export function formatBytes(bytes: number | undefined): string {
+  const MIB = 1024 * 1024
+  const GIB = 1024 * MIB
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes < MIB) return `${String(Math.round(bytes))} B`
+  // One decimal below 10 (`1.2 GB`), whole numbers above (`86 MB`): a card line
+  // that jumps between `9.8 MB` and `10 MB` reads worse than one that does not.
+  const round = (value: number): string => String(value < 10 ? Math.round(value * 10) / 10 : Math.round(value))
+  const mebibytes = bytes / MIB
+  // The tier is decided on the value that would be **printed**, not the raw one:
+  // 1023.6 MiB rounds to `1024 MB`, which reads like a bug next to `1 GB`, so
+  // anything that would print 1024 or more megabytes is promoted instead.
+  const printed = mebibytes < 10 ? Math.round(mebibytes * 10) / 10 : Math.round(mebibytes)
+  return printed < 1024 ? `${round(mebibytes)} MB` : `${round(bytes / GIB)} GB`
+}
+
 /** File extensions the file route will serve, and the content types for them. */
 export const STUDIO_FILE_TYPES: Readonly<Record<string, string>> = {
   '.png': 'image/png',
@@ -520,6 +552,28 @@ export interface BoardSummary {
   name: string
   /** Number of images recorded on it. */
   itemCount: number
+  /**
+   * Pictures only — `kind:'image'` entries, so a task/layout node is not
+   * counted as a file. The destructive delete confirmation (U07, §5.4) says how
+   * many pictures a "连图片一起删除" would remove, and `itemCount` (which counts
+   * every node) would overstate it.
+   *
+   * Optional: a fixture, a cached payload or an older host may omit it, and the
+   * panel then falls back to `itemCount` rather than showing nothing.
+   */
+  imageCount?: number
+  /**
+   * Sum of this board's item `bytes` — how much the project's pictures weigh
+   * (U07). Deliberately **not** the board JSON's own size (the design note in
+   * `docs/WORKBENCH-SHELL.md` §5.5 suggested `stat` on the board file): the
+   * question the card and the delete confirmation ask is "how much disk do this
+   * project's files take", and the metadata is a few KB. Summing stored `bytes`
+   * costs nothing per request; `stat`-ing every picture would.
+   *
+   * Optional for the same reason as `imageCount`; the panel renders no size
+   * when it is absent (a zero-byte project shows `0 B`).
+   */
+  bytes?: number
   /** `markdownPath` of the newest image, for a cover thumbnail. */
   cover: string | null
   createdAt: string
@@ -672,13 +726,18 @@ export interface StudioBoardsResponse {
  * `move-item`) and to ten in C14, which gives the non-picture node kinds a
  * terminal write: `save-task` stores a failed/interrupted task node (§4.6) and
  * `save-layout-node` stores a layout draft (§8.1), so both survive a reload.
- * Importing an image is **not** a board action — it writes a file before it
- * records an item, so it has its own route ({@link STUDIO_IMPORT_ROUTE}).
+ * U07 takes it to thirteen: `duplicate` copies a whole board (§5.3) and `delete`
+ * gained the `deleteFiles` mode (§5.4), so "delete the project" and "delete the
+ * project and its pictures" are one action with a flag rather than two actions
+ * with two code paths. Importing an image is **not** a board action — it writes
+ * a file before it records an item, so it has its own route
+ * ({@link STUDIO_IMPORT_ROUTE}).
  */
 export interface StudioBoardRequest {
   action:
     | 'create'
     | 'rename'
+    | 'duplicate'
     | 'layout'
     | 'remove-item'
     | 'delete'
@@ -691,7 +750,7 @@ export interface StudioBoardRequest {
     | 'workspace-set'
   /** Target board; absent means the active board. */
   board?: string
-  /** New name, for `create` and `rename`. */
+  /** New name, for `create`, `rename` and `duplicate`. */
   name?: string
   /** Positions to persist, for `layout`. */
   items?: Array<{ id: string; x: number; y: number }>
@@ -703,6 +762,15 @@ export interface StudioBoardRequest {
   item?: string
   /** Also delete the PNG, for `remove-item`; the default only unplaces it. */
   deleteFile?: boolean
+  /**
+   * For `delete`: also unlink the board's pictures (§5.4's second option).
+   *
+   * A separate flag from `deleteFile` (singular) because the two act on
+   * different scopes — one item versus the whole project — and a shared spelling
+   * is exactly how a "只删除项目" click would end up deleting files. Absent means
+   * the reversible delete: the board's metadata goes, the pictures stay.
+   */
+  deleteFiles?: boolean
   /** Destination board for `copy-item` / `move-item`; id or name. */
   toBoard?: string
   /** Landing position on the destination board, when the caller knows it. */

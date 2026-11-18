@@ -15,7 +15,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -24,6 +24,8 @@ import {
   copyItem,
   createBoard,
   defaultBoardName,
+  duplicateBoard,
+  duplicateBoardName,
   moveItem,
   deleteBoard,
   listAssets,
@@ -31,6 +33,7 @@ import {
   nameFromPrompt,
   readBoard,
   recordItems,
+  removeBoard,
   removeItem,
   renameBoard,
   saveLayout,
@@ -240,6 +243,190 @@ test('deleting a board drops its metadata, never its images', async () => {
     assert.ok(existsSync(join(dir, 'keep.png')))
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/* -------------------------------------------------------------------------- */
+/* U07 — 复制项目 / 项目体积 / 删除的两口径                                    */
+/* -------------------------------------------------------------------------- */
+
+test('U07: duplicating a board copies entries, coords and lineage, never the files', async () => {
+  const dir = makeDir()
+  try {
+    const created = await recordItems(dir, undefined, [item(dir, 'a'), item(dir, 'b')], { prompt: '原项目' })
+    const [first, second] = created.items
+    await saveLayout(dir, created.board.id, {
+      items: [
+        { id: first.id, x: 120, y: 240 },
+        { id: second.id, x: 700, y: 260, parents: [first.id] },
+      ],
+      camera: { x: 12, y: 34, zoom: 1.5 },
+    })
+    // A third entry whose parent is not on this board at all (a cross-board id).
+    await recordItems(dir, created.board.id, [item(dir, 'c', { parents: ['ifromanotherboard'] })])
+    const before = (await readBoard(dir, created.board.id)).items
+    // Nothing but the metadata may be written: the picture list is the control.
+    const picturesBefore = readdirSync(dir).filter((name) => name.endsWith('.png'))
+
+    const copy = await duplicateBoard(dir, created.board.id)
+    assert.equal(copy.board.name, '原项目 副本', 'the default name says 副本')
+    assert.notEqual(copy.board.id, created.board.id, 'a copy is a new board')
+    assert.equal(copy.items.length, 3, '条目数一致')
+    assert.equal(copy.board.itemCount, 3)
+    assert.equal(copy.board.imageCount, 3, 'photos only — a task/layout node would not count')
+    assert.equal(copy.board.bytes, 3 * 1024, 'the size is the sum of the item bytes')
+
+    // Same files, by path: the pictures are shared, not copied (§5.3).
+    assert.deepEqual(
+      copy.items.map((entry) => entry.path).sort(),
+      before.map((entry) => entry.path).sort(),
+      '条目共用同一 path',
+    )
+    // Coordinates and provenance travel with the item; only identity is fresh.
+    const copiedA = copy.items.find((entry) => entry.path.endsWith('a.png'))
+    const copiedB = copy.items.find((entry) => entry.path.endsWith('b.png'))
+    const copiedC = copy.items.find((entry) => entry.path.endsWith('c.png'))
+    assert.deepEqual({ x: copiedA.x, y: copiedA.y }, { x: 120, y: 240 }, '坐标照抄')
+    assert.deepEqual({ x: copiedB.x, y: copiedB.y }, { x: 700, y: 260 })
+    assert.equal(copiedA.prompt, first.prompt)
+    assert.equal(copiedA.createdAt, first.createdAt)
+    // Lineage points at the copy's own ids, not the original board's.
+    assert.deepEqual(copiedB.parents, [copiedA.id], '板内父 id 重映射到新板的条目 id')
+    assert.notEqual(copiedA.id, first.id)
+    assert.equal(new Set(copy.items.map((entry) => entry.id)).size, 3, 'every copied id is distinct')
+    // A parent from another board cannot be resolved here, so it is dropped and counted.
+    assert.deepEqual(copiedC.parents, [])
+    assert.equal(copy.droppedParents, 1, '跨板父 id 被丢弃并计数')
+
+    // The camera came along, and the original board is untouched.
+    const detail = await readBoard(dir, copy.board.id)
+    assert.deepEqual(detail.camera, { x: 12, y: 34, zoom: 1.5 })
+    const untouched = (await readBoard(dir, created.board.id)).items
+    assert.deepEqual(untouched.map((entry) => entry.id), before.map((entry) => entry.id), '原板不变')
+    assert.deepEqual(
+      untouched.find((entry) => entry.id === second.id).parents,
+      [first.id],
+      'the original lineage still points at the original ids',
+    )
+    // And no PNG was written: the copy shares the originals' files.
+    assert.deepEqual(
+      readdirSync(dir).filter((name) => name.endsWith('.png')),
+      picturesBefore,
+      '复制不复制图片字节',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('U07: a copy can be named, and its default name always fits the cap', async () => {
+  const dir = makeDir()
+  try {
+    const created = await recordItems(dir, undefined, [item(dir, 'n1')], { prompt: '命名' })
+    const named = await duplicateBoard(dir, created.board.id, '  我的副本  ')
+    assert.equal(named.board.name, '我的副本')
+    assert.equal(await duplicateBoard(dir, 'bnosuchboard'), undefined, 'a missing source is not a copy')
+
+    assert.equal(duplicateBoardName('海报'), '海报 副本')
+    assert.equal(duplicateBoardName('   '), '画板 副本')
+    // The suffix counts against the 40-char cap, so a name AT the cap loses
+    // characters from the front rather than its 副本.
+    const label = duplicateBoardName('字'.repeat(40))
+    assert.equal([...label].length, 40)
+    assert.ok(label.endsWith(' 副本'), 'the suffix survives the cap')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('U07: deleting a project keeps its pictures unless the second mode is chosen', async () => {
+  const dir = makeDir()
+  try {
+    writeFileSync(join(dir, 'one.png'), 'png')
+    writeFileSync(join(dir, 'two.png'), 'png')
+    const created = await recordItems(dir, undefined, [
+      item(dir, 'one', { path: join(dir, 'one.png'), markdownPath: join(dir, 'one.png') }),
+      item(dir, 'two', { path: join(dir, 'two.png'), markdownPath: join(dir, 'two.png') }),
+    ], { prompt: '要删的项目' })
+    assert.deepEqual(
+      { bytes: created.board.bytes, imageCount: created.board.imageCount },
+      { bytes: 2048, imageCount: 2 },
+      'the card and the confirmation read the same two numbers',
+    )
+
+    // 口径一：只删项目。目录里的 PNG 一律不动（既有行为不回归）。
+    const kept = await removeBoard(dir, created.board.id)
+    assert.deepEqual(kept, { removed: true, filesDeleted: 0, filesKept: 0 })
+    assert.equal(await readBoard(dir, created.board.id), undefined)
+    assert.ok(existsSync(join(dir, 'one.png')), '只删项目时文件仍在')
+    assert.ok(existsSync(join(dir, 'two.png')))
+
+    // 口径二：连图片一起删。同一个板重新录一遍，然后整板删掉文件。
+    const again = await recordItems(dir, '要删的项目', [
+      item(dir, 'one', { path: join(dir, 'one.png'), markdownPath: join(dir, 'one.png') }),
+      item(dir, 'two', { path: join(dir, 'two.png'), markdownPath: join(dir, 'two.png') }),
+    ])
+    const swept = await removeBoard(dir, again.board.id, { deleteFiles: true })
+    assert.deepEqual(swept, { removed: true, filesDeleted: 2, filesKept: 0 })
+    assert.equal(existsSync(join(dir, 'one.png')), false)
+    assert.equal(existsSync(join(dir, 'two.png')), false)
+    // A board that is gone stays gone; a second sweep reports nothing done.
+    assert.deepEqual(await removeBoard(dir, again.board.id, { deleteFiles: true }), {
+      removed: false,
+      filesDeleted: 0,
+      filesKept: 0,
+    })
+    // The boolean convenience still answers the old question.
+    assert.equal(await deleteBoard(dir, '../../escaped'), false, 'a crafted id is refused, not followed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('U07: a picture another project still uses survives a delete-with-files', async () => {
+  const dir = makeDir()
+  try {
+    const sharedPath = join(dir, 'shared.png')
+    writeFileSync(sharedPath, 'png')
+    const source = await recordItems(dir, undefined, [
+      item(dir, 'shared', { path: sharedPath, markdownPath: sharedPath }),
+    ], { prompt: '原件' })
+    const copy = await duplicateBoard(dir, source.board.id)
+
+    const swept = await removeBoard(dir, source.board.id, { deleteFiles: true })
+    assert.deepEqual(
+      swept,
+      { removed: true, filesDeleted: 0, filesKept: 1 },
+      'the shared-reference guard keeps the file and says so',
+    )
+    assert.ok(existsSync(sharedPath), 'the copy would otherwise lose its picture')
+
+    // The last board referencing it may take it with it.
+    assert.deepEqual(
+      await removeBoard(dir, copy.board.id, { deleteFiles: true }),
+      { removed: true, filesDeleted: 1, filesKept: 0 },
+    )
+    assert.equal(existsSync(sharedPath), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('U07: a delete-with-files never touches a path outside the output directory', async () => {
+  const dir = makeDir()
+  const outside = makeDir()
+  try {
+    const outsidePath = join(outside, 'secret.png')
+    writeFileSync(outsidePath, 'png')
+    const created = await recordItems(dir, undefined, [
+      item(dir, 'outside', { path: outsidePath, markdownPath: outsidePath }),
+    ])
+    const result = await removeBoard(dir, created.board.id, { deleteFiles: true })
+    assert.deepEqual(result, { removed: true, filesDeleted: 0, filesKept: 0 })
+    assert.ok(existsSync(outsidePath), 'a crafted board file must not delete outside outputDir')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
   }
 })
 
