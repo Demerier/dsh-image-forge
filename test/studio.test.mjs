@@ -111,11 +111,34 @@
  *    同一动作在引擎里只移动一次,没有"先框住再跳过去"的两段位移。
  * 3. 任务节点:发起一次生成,节点从 待开始 → 排队中 → 生成中 且进度条随流推进;
  *    期间画布其它节点**不闪烁**(含被拖动中的节点不回弹);中断任务后出现 重试,
- *    点 重试 复用同一份参数原地重跑;失败后点 编辑参数 表单被回填、下次生成替换该节点;
- *    移除不删文件。
+ *    点 重试 复用同一份参数原地重跑;失败后点 编辑参数 **抽屉变成可编辑**(U05 起不再
+ *    回填表单)、改完「重新生成」替换该节点;移除不删文件。
  * 4. 布局节点:拖入/新建一个布局节点,拖动里面任何一个框 —— 画布不跟着平移(手势被隔离);
  *    改完刷新页面,草稿与显示框都还在;拉宽节点,高度按草稿比例走,草稿不变;
  *    在 50% 与 200% 缩放下各拖一次框,框的位移与指针**一致**(不出现双倍/半速)。
+ *
+ * ## U05 的人工验收清单(节点属性抽屉)
+ *
+ * 左栏表单在**画布页签**已经不存在了;它只剩在 列表 / 素材 两个页签里。要看的:
+ *
+ * 1. 打开一个画布页签:左半边**没有**表单,画布占满宽度,右边缘是一条 320 px 的
+ *    抽屉位;未选中任何节点时那里只有一句"选中一个节点查看属性",不可编辑。
+ * 2. 点画布左上"新建生成":画布上出现一个虚线"待生成"节点,抽屉切到**可编辑**:
+ *    描述 / 七档比例 / 步数 / 张数 / 种子 都在里面,光标已在描述框里。
+ * 3. 填完点「生成」:图落在那个虚线节点的位置(不是画布末尾),血缘线指向来源;
+ *    抽屉随后显示**图片**的属性(提示词首行 / 尺寸 / 步数 / 种子 / 底模 / 文件路径),
+ *    全部只读。
+ * 4. 选中一张图 → 抽屉里「按这张继续」:图片右侧多一个待生成节点,抽屉的参考图里
+ *    就是这张图;写一句改图描述再生成,出图能与原图对比。
+ * 5. Ctrl+A 选中多个节点:抽屉退回"选中一个节点查看属性"(多选不是单个节点的属性);
+ *    点空白处取消选择,抽屉同样退回。
+ * 6. 把一个生成任务拖到失败(停掉 ComfyUI 再生成):节点上有 重试 / 编辑参数;
+ *    点「编辑参数」抽屉变成可编辑,**改完点「重新生成」在原地替换**这个节点,
+ *    布局参数(如果来自布局节点)没有被丢掉。
+ * 7. 面板拉窄到 760 px 以下:抽屉变成画布右侧的**覆盖层**(不再挤压画布),
+ *    仍可点击、可滚动;拉宽回去恢复并排。
+ * 8. 切到 列表 / 素材 页签:老表单仍在(本轮不动它们);切回画布页签,表单不在,
+ *    抽屉回来。刷新页面后草稿节点不会被持久化(它是内存态,重开画板就没了)。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -212,6 +235,26 @@ import {
 // lets the test pin one to the other instead of restating the numbers.
 import { HANDLE_SCREEN_HIT, HANDLE_SCREEN_SIZE } from '../src/canvas-connections.ts'
 import { STUDIO_CSS } from '../src/client-styles.ts'
+// U05: the drawer's decisions are pure and live in their own module — the same
+// split the canvas uses (`canvas-flow-model.ts`). Importing the *source* keeps the
+// assertions on the code that ships rather than on a `testlib/` snapshot that is
+// only rebuilt with the whole host bundle; this module has no Node-only imports
+// (its one dependency is `react`, which only the renderer needs).
+import {
+  EMPTY_DRAFT_VALUES,
+  INSPECTOR_EMPTY_HINT,
+  INSPECTOR_MAX_SEED,
+  INSPECTOR_MAX_STEPS,
+  canGenerateFromDrawer,
+  draftParamsOf,
+  generateParamsBody,
+  inspectorRatio,
+  inspectorSpecFor,
+  inspectorTargetOf,
+  inspectorValuesOf,
+  inspectorVisible,
+  patchDraftParams,
+} from '../src/node-inspector.ts'
 
 /** The authoritative compiled-layout sample (T21's format authority). */
 const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
@@ -3141,8 +3184,12 @@ test('U04 S3: the three menu entries are the three node kinds, each on its own w
   // (`canvas-connections.test.mjs` pins their ids and order) and this switch
   // decides what each id builds.
   assert.ok(run.includes("target === 'image'"), '图片生成 must have its own branch')
-  assert.ok(run.includes('referenceNode(source)'), 'and pre-fill the form with the source as a reference')
-  assert.ok(run.includes('addDraftNode(open.world, open.sourceId)'), 'at the release point, parented to the source')
+  // U05 moved this one: the drop used to pre-fill the left form's reference row,
+  // which the canvas tab no longer has. The picture now rides into the new draft
+  // node's own reference list, which is exactly what the drawer shows.
+  assert.ok(run.includes('referenceOf(source)'), 'the source picture becomes a reference')
+  assert.ok(run.includes('{ references: [reference] }'), 'and the draft node is born holding it')
+  assert.ok(run.includes('addDraftNode(open.world, open.sourceId'), 'at the release point, parented to the source')
   assert.ok(run.includes('pendingReplaceRef.current = { id: draft.id }'), 'the next generation lands in place')
   assert.ok(run.includes("target === 'layout'"), '布局 must have its own branch')
   assert.ok(run.includes('addLayoutNode({'), 'built immediately (a layout draft is cheap)')
@@ -3250,9 +3297,15 @@ test('U04 S4: a task node’s buttons reach the studio callbacks that own them',
   }
   // Each one really is the existing studio action, not a second implementation.
   assert.ok(sourceBlock('retryTask').includes('startGeneration('), '重试 re-submits through the run path')
+  // U05 moved this one: 编辑参数 used to refill the left form and leave a
+  // `pendingReplaceRef` behind. The canvas no longer shows a form, so the
+  // parameters stay on the node and the button switches the *drawer* to an editor
+  // over that very snapshot — and 重新生成 goes through `retryTask`, which is the
+  // path that already replaces the node in place (asserted on the line above).
   const edit = sourceBlock('editTaskParams')
-  assert.ok(edit.includes('setPrompt('), '编辑参数 refills the form')
-  assert.ok(edit.includes('pendingReplaceRef.current'), 'and the next run replaces the failed node')
+  assert.ok(edit.includes('setTaskEditId('), '编辑参数 switches the drawer to that node')
+  assert.ok(edit.includes('setSelection('), 'and selects it, so the drawer is showing it')
+  assert.ok(!edit.includes('setPrompt('), 'it no longer writes into the list/asset form')
   assert.ok(sourceBlock('cancelTask').includes('.abort()'), '取消 aborts that run')
   // 移除 takes the entry off the board; it never deletes the file (that is the
   // separate, explicit delete path) — and it goes through the same local drop
@@ -3297,6 +3350,298 @@ test('U04 S4: a progress tick reuses every node it did not change', () => {
   const declaration = CLIENT_SOURCE.slice(actionsAt, actionsAt + 1600)
   assert.ok(declaration.startsWith('const actions = (0, react.useMemo)'), 'built once, not per render')
   assert.ok(declaration.includes('}), []);'), 'with no dependencies, so its identity never changes')
+})
+
+// ---------------------------------------------------------------------------
+// U05: the node property drawer.
+//
+// The product decision this encodes: the canvas tab has **no left form**. A node
+// is selected, and the drawer on the right is its properties; a draft node is the
+// thing you type into before generating, and it carries its own parameters so two
+// drafts can be described at once.
+//
+// What is provable here: the drawer's decisions are pure (`inspectorSpecFor` and
+// the value→body mapping, imported from source), and the wiring is host elements
+// — the toolbar button, the drawer's inputs, its 生成 — so the whole path
+// "新建生成 → 填参数 → 生成 → 请求体" runs through the real bundle. What is not:
+// the look of the 320 px column and the narrow-panel overlay, which are CSS and
+// stay on the manual list.
+// ---------------------------------------------------------------------------
+
+/** An empty board: U05's first-run path starts with nothing on the canvas. */
+const U05_BOARD = { id: 'cbrdu05', name: '抽屉测试板', camera: { x: 0, y: 0, zoom: 1 }, items: [] }
+
+/** The drawer (or the empty-hint box that stands in for it). */
+function inspectorElement(panel) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found !== undefined) return
+    if (typeof entry.props.className !== 'string') return
+    if (entry.props.className.split(' ')[0] === 'dsh-forge-inspector') found = entry
+  })
+  return found
+}
+
+/** One drawer input by its field id (`prompt`, `steps`, `count`, `seed`). */
+function inspectorInput(panel, id) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.props['data-inspector-input'] === id) found = entry
+  })
+  return found
+}
+
+/** One drawer button by its action id. */
+function inspectorAction(panel, id) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.type === 'button' && entry.props['data-inspector-action'] === id) found = entry
+  })
+  return found
+}
+
+/** One ratio button of the drawer's picker. */
+function inspectorRatioButton(panel, ratio) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.props['data-inspector-ratio'] === ratio) found = entry
+  })
+  return found
+}
+
+test('U05: the drawer is about exactly one node, or nobody', () => {
+  assert.equal(inspectorVisible(new Set()), false, 'nothing selected is no drawer')
+  assert.equal(inspectorVisible(new Set(['a'])), true)
+  assert.equal(
+    inspectorVisible(new Set(['a', 'b'])),
+    false,
+    'a multi-selection is the align toolbar’s job — one drawer would lie about its subject',
+  )
+  const nodes = [{ id: 'a', kind: 'draft' }, { id: 'b', kind: 'image' }]
+  assert.deepEqual(inspectorTargetOf(nodes, new Set(['b'])), { id: 'b', kind: 'image' })
+  assert.equal(inspectorTargetOf(nodes, new Set(['gone'])), undefined, 'a removed id resolves to nothing')
+  assert.equal(inspectorTargetOf(nodes, new Set(['a', 'b'])), undefined)
+})
+
+test('U05: the field set and the buttons follow the node kind', () => {
+  // A draft is the editable one: the five parameters, its own reference list, and
+  // 生成 as the primary action.
+  const draft = inspectorSpecFor({ kind: 'draft', id: 'd1', parents: [], params: { prompt: '', ratio: '1:1' } })
+  assert.deepEqual(draft.fields.map((field) => field.id), ['prompt', 'ratio', 'steps', 'count', 'seed'])
+  assert.ok(draft.fields.every((field) => field.editable), 'every parameter of a draft is editable')
+  assert.equal(draft.canEditReferences, true, 'a draft holds its own reference row')
+  assert.deepEqual(draft.actions.map((action) => action.id), ['generate', 'remove'])
+  assert.equal(draft.actions[0].disabled, true, 'an empty prompt keeps 生成 grey')
+
+  const ready = inspectorSpecFor({ kind: 'draft', id: 'd2', parents: [], params: { prompt: '猫', ratio: '1:1' } })
+  assert.equal(ready.actions[0].disabled, false, 'a written prompt enables it')
+  assert.ok(String(ready.status).includes('生成'), 'and the status line says what to do next')
+
+  // A picture: every field is history, so none of them is an input.
+  const image = inspectorSpecFor(
+    { kind: 'image', id: 'i1', parents: ['p1'], image: { markdownPath: 'C:/out/a.png', path: 'C:/out/a.png', width: 1248, height: 1248, bytes: 2048 } },
+    { item: { prompt: '一只橘猫坐在窗台上\n第二行不该出现', steps: 8, seed: 7, ratio: '1:1' }, model: 'qwen_image_2.1.safetensors' },
+  )
+  const fieldOf = (spec, id) => spec.fields.find((field) => field.id === id)
+  assert.equal(image.fields.every((field) => !field.editable), true, 'a picture’s parameters are not editable')
+  assert.equal(fieldOf(image, 'prompt').value, '一只橘猫坐在窗台上', 'the first line is the title')
+  assert.equal(fieldOf(image, 'steps').value, '8')
+  assert.equal(fieldOf(image, 'seed').value, '7')
+  assert.equal(fieldOf(image, 'model').value, 'qwen_image_2.1.safetensors', '底模 is profile-level, shown read-only')
+  assert.equal(fieldOf(image, 'size').value, '1248×1248')
+  assert.deepEqual(image.lineage, ['p1'], 'where it grew from')
+  assert.deepEqual(image.actions.map((action) => action.id), ['continue', 'open', 'remove'])
+
+  // A task: the canvas's own status→buttons mapping, plus 重新生成 in edit mode.
+  const task = inspectorSpecFor({ kind: 'task', id: 't1', status: 'failed', params: { prompt: '猫' }, error: 'CUDA out of memory' })
+  assert.deepEqual(task.actions.map((action) => action.id), ['retry', 'edit', 'remove'])
+  assert.equal(fieldOf(task, 'error').value, 'CUDA out of memory', 'the reason is the point of the node')
+  const editing = inspectorSpecFor(
+    { kind: 'task', id: 't1', status: 'failed', params: { prompt: '猫' }, error: 'x' },
+    { editing: true },
+  )
+  assert.deepEqual(editing.actions.map((action) => action.id), ['generate', 'retry', 'edit', 'remove'])
+  assert.equal(editing.fields.every((field) => field.editable), true, '编辑参数 makes the snapshot an editor')
+  const running = inspectorSpecFor({ kind: 'task', id: 't2', status: 'running', params: { prompt: '猫' }, progress: { percent: 40 } })
+  assert.deepEqual(running.actions.map((action) => action.id), ['cancel', 'remove'], 'a live run can be interrupted')
+
+  // A layout: generate, a disabled U06 entry, remove.
+  const layout = inspectorSpecFor({
+    kind: 'layout',
+    id: 'l1',
+    parents: [],
+    draft: { width: 1536, height: 1024, items: [{}, {}] },
+  })
+  assert.ok(String(layout.status).includes('2 个画框'))
+  assert.equal(fieldOf(layout, 'ratio').value, '3:2', 'a 1536×1024 draft maps onto the 3:2 tier')
+  assert.deepEqual(layout.actions.map((action) => action.id), ['layout-generate', 'open-detail', 'remove'])
+  assert.equal(layout.actions[1].disabled, true, 'U06’s node detail tab is not there yet')
+  // Off the ladder, the drawer says so instead of silently stretching (§8.4).
+  const skewed = inspectorSpecFor({ kind: 'layout', id: 'l2', draft: { width: 1000, height: 700, items: [] } })
+  assert.ok(String(fieldOf(skewed, 'ratio').value).includes('无法生成'), 'a 10:7 draft is not an official tier')
+})
+
+test('U05: one field edit maps onto the numbers the host validates', () => {
+  const base = { prompt: '猫', ratio: '1:1', steps: 8, count: 1, seed: 4 }
+  assert.equal(patchDraftParams(base, 'steps', '12').steps, 12)
+  assert.equal('steps' in patchDraftParams(base, 'steps', ''), false, 'blank means "use the config default"')
+  assert.equal('seed' in patchDraftParams(base, 'seed', '   '), false)
+  assert.equal(patchDraftParams(base, 'seed', '0').seed, 0, '0 is a seed, not a blank')
+  assert.equal(patchDraftParams(base, 'count', '99').count, STUDIO_MAX_COUNT, 'the count is clamped')
+  assert.equal(patchDraftParams(base, 'count', '0').count, 1)
+  assert.equal(patchDraftParams(base, 'steps', '9999').steps, INSPECTOR_MAX_STEPS, 'the step ceiling is the form’s')
+  assert.equal(patchDraftParams(base, 'seed', '99999999999999').seed, INSPECTOR_MAX_SEED)
+  assert.equal('steps' in patchDraftParams(base, 'steps', 'nope'), false, 'garbage is a blank, never a NaN')
+  assert.equal(patchDraftParams(base, 'ratio', '5:4').ratio, '1:1', 'an unknown ratio falls back to 1:1')
+  assert.equal(inspectorRatio('16:9'), '16:9')
+  assert.equal(
+    patchDraftParams(base, 'prompt', 'x'.repeat(STUDIO_MAX_PROMPT_CHARS + 50)).prompt.length,
+    STUDIO_MAX_PROMPT_CHARS,
+  )
+  assert.equal(patchDraftParams(base, 'nope', 'x'), base, 'an unknown field never rewrites the snapshot')
+  // The assembler is the same mapping, from the drawer's string inputs.
+  assert.deepEqual(inspectorValuesOf({ kind: 'task', params: { prompt: '猫', steps: 8, count: 2, seed: 0 } }), {
+    prompt: '猫', ratio: '1:1', steps: '8', count: '2', seed: '0',
+  })
+  assert.deepEqual(inspectorValuesOf(undefined), EMPTY_DRAFT_VALUES)
+})
+
+test('U05: the drawer’s values are the generate body, key for key', () => {
+  const values = { prompt: '  一只橘猫坐在窗台上  ', ratio: '16:9', steps: '12', count: '2', seed: '7' }
+  assert.deepEqual(generateParamsBody(draftParamsOf(values)), {
+    prompt: '一只橘猫坐在窗台上',
+    ratio: '16:9',
+    count: 2,
+    steps: 12,
+    seed: 7,
+  })
+  // Omitted keys stay absent: the host reads a blank step count as "the profile's
+  // default" and reports the seed it actually drew with.
+  assert.deepEqual(generateParamsBody(draftParamsOf({ ...EMPTY_DRAFT_VALUES, prompt: '猫' })), {
+    prompt: '猫', ratio: '1:1', count: 1,
+  })
+  // A layout-derived task keeps its conditioning text through an edit.
+  assert.equal(generateParamsBody({ prompt: '猫', layout: '{"a":1}' }).layout, '{"a":1}')
+
+  assert.equal(canGenerateFromDrawer({ ...EMPTY_DRAFT_VALUES, prompt: '   ' }, 0), false)
+  assert.equal(canGenerateFromDrawer({ ...EMPTY_DRAFT_VALUES, prompt: '猫' }, 0), true)
+  assert.equal(canGenerateFromDrawer({ ...EMPTY_DRAFT_VALUES, prompt: '猫' }, 11), false, 'over the reference cap')
+})
+
+test('U05: the canvas tab has no left form, and the drawer stands in for it', async () => {
+  const { network, panel } = await mountWorkbench({ board: U05_BOARD })
+  try {
+    // §U05-1: the form is *gone* from this view, not hidden by CSS. Its textarea
+    // has a different class too, so a selector cannot accidentally match.
+    assert.equal(byClassNow(panel, 'dsh-forge-studio-form'), undefined, 'the canvas tab has no left form')
+    assert.equal(byClassNow(panel, 'dsh-forge-textarea'), undefined, 'and no prompt box of its own')
+    assert.ok(byClassNow(panel, 'dsh-forge-canvas-shell') !== undefined, 'the canvas keeps its box')
+    const drawer = inspectorElement(panel)
+    assert.ok(drawer !== undefined, 'the drawer is a standing part of the canvas tab')
+    assert.ok(drawer.props.className.split(' ').includes('is-empty'), 'with nothing selected it is only the hint')
+    assert.ok(fakeText(drawer).includes(INSPECTOR_EMPTY_HINT), 'and the hint says what to do')
+
+    // §U05-2: the other two views are untouched — they still own the old form.
+    buttonWithText(panel, '列表').props.onClick()
+    await settle(panel)
+    assert.ok(byClassNow(panel, 'dsh-forge-studio-form') !== undefined, '列表 keeps the form')
+    assert.ok(byClassNow(panel, 'dsh-forge-textarea') !== undefined)
+    assert.equal(inspectorElement(panel), undefined, 'and the drawer belongs to the canvas tab alone')
+  } finally {
+    network.restore()
+  }
+})
+
+test('U05: 新建生成 → draw in the drawer → 生成 sends exactly those values', async () => {
+  const requests = []
+  const { network, panel } = await mountWorkbench({
+    board: U05_BOARD,
+    generate: (init) => {
+      requests.push(JSON.parse(init.body))
+      return fakeResponse(generateResult([resultImage('u05i1')]))
+    },
+  })
+  try {
+    buttonWithText(panel, '新建生成').props.onClick()
+    await settle(panel)
+    assert.equal(inspectorElement(panel).props['data-inspector-kind'], 'draft', 'the new node is the subject')
+    assert.equal(inspectorAction(panel, 'generate').props.disabled, true, 'an empty prompt cannot be submitted')
+
+    inspectorInput(panel, 'prompt').props.onChange({ target: { value: '一只橘猫坐在窗台上' } })
+    await settle(panel)
+    inspectorRatioButton(panel, '16:9').props.onClick()
+    await settle(panel)
+    inspectorInput(panel, 'steps').props.onChange({ target: { value: '12' } })
+    inspectorInput(panel, 'count').props.onChange({ target: { value: '2' } })
+    inspectorInput(panel, 'seed').props.onChange({ target: { value: '7' } })
+    await settle(panel)
+    // The edits are on the node, not in a panel buffer: the inputs read back.
+    assert.equal(inspectorInput(panel, 'steps').props.value, '12')
+    assert.equal(inspectorInput(panel, 'count').props.value, '2')
+    assert.equal(inspectorInput(panel, 'seed').props.value, '7')
+    assert.equal(
+      inspectorRatioButton(panel, '16:9').props.className.split(' ').includes('is-active'),
+      true,
+      'the chosen ratio is the active one',
+    )
+
+    assert.equal(inspectorAction(panel, 'generate').props.disabled, false)
+    inspectorAction(panel, 'generate').props.onClick()
+    await settle(panel)
+
+    assert.equal(requests.length, 1, 'exactly one submission')
+    const body = requests[0]
+    assert.equal(body.prompt, '一只橘猫坐在窗台上')
+    assert.equal(body.ratio, '16:9')
+    assert.equal(body.steps, 12)
+    assert.equal(body.count, 2)
+    assert.equal(body.seed, 7)
+    assert.equal(body.references, undefined, 'no reference list means a text-to-image run')
+    assert.equal(body.parents, undefined, 'a node with no source has no lineage')
+    assert.equal(body.board, U05_BOARD.id)
+    assert.match(body.clientId, /^c[0-9a-z]+$/, 'the canvas id rides along so the stream can find it')
+
+    // The draft became the picture in place (the §4.5 replace channel), and the
+    // drawer followed the selection onto the result.
+    assert.equal(inspectorElement(panel).props['data-inspector-kind'], 'image')
+  } finally {
+    network.restore()
+  }
+})
+
+test('U05: a multi-selection puts the drawer away again', async () => {
+  const mounted = await mountCanvasWorkbench()
+  try {
+    flowContainer(mounted.panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
+    await settle(mounted.panel)
+    const drawer = inspectorElement(mounted.panel)
+    assert.ok(drawer !== undefined, 'the drawer slot stays')
+    assert.ok(
+      drawer.props.className.split(' ').includes('is-empty'),
+      'but three selected nodes are not one node’s properties',
+    )
+  } finally {
+    mounted.restoreFrames()
+    mounted.network.restore()
+  }
+})
+
+test('U05: the drawer’s wiring ships — its edits land on the node, not on a form', () => {
+  assert.ok(CLIENT_SOURCE.includes('inspectorSpecFor('), 'the drawer renders the tested spec')
+  assert.ok(CLIENT_SOURCE.includes('data-inspector-action'), 'its buttons are addressable')
+  assert.ok(CLIENT_SOURCE.includes('data-inspector-input'), 'and so are its inputs')
+  // The one editor: a field edit goes through the tested mapping and onto the node.
+  const patch = sourceBlock('patchInspectorField')
+  assert.ok(patch.includes('patchDraftParams('), 'a field edit uses the tested mapping')
+  assert.ok(patch.includes('writeNodes('), 'and lands on the node list')
+  assert.ok(!patch.includes('setPrompt('), 'never on the list/asset form')
+  // The one submit: values → params → body, replacing the draft in place.
+  const submit = sourceBlock('generateDraftNode')
+  assert.ok(submit.includes('draftParamsOf('), 'the request is assembled from the node’s values')
+  assert.ok(submit.includes('replaceId: node.id'), 'and replaces the draft in place')
+  assert.ok(submit.includes('canGenerateFromDrawer('), 'with the same emptiness rule the button uses')
+  // The wire body itself is the drawer's builder — one mapping, not two.
+  assert.ok(sourceBlock('startGeneration').includes('...generateParamsBody(params)'))
 })
 
 

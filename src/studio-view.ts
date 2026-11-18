@@ -34,9 +34,22 @@
  *
  * Nor is this a Comfy-style parameter graph. Edges mean "this came from that" —
  * derivation, references, layouts — never "output A feeds input B of node C";
- * the generation request stays a form, not a wiring diagram, and the backend
- * (HTTP/MCP) is untouched by this canvas. The loop is still prompt → optimise →
- * ratio/steps/references → generate → inspect → reuse.
+ * the generation request is a node's properties, not a wiring diagram, and the
+ * backend (HTTP/MCP) is untouched by this canvas.
+ *
+ * ## U05: the canvas tab's editor is the node, not the form
+ *
+ * The canvas tab used to open on a form down its left half — prompt, ratio, steps,
+ * count, references, generate — which made the tab say "here is the one thing I am
+ * about to make" while the canvas said "here are the many things I have". U05
+ * settles it the way the design asks (D12): **select a node and edit it in a
+ * drawer on the right**. The drawer is `./node-inspector.ts`; a draft node is what
+ * the drawer's editor is for, and it carries its own parameters, so two drafts can
+ * be described at once and the 生成 button lives next to the values it sends.
+ *
+ * The list and asset views keep the old form (they have no canvas and no nodes to
+ * select), so this file still owns that form's state as well. The two editors do
+ * not share a buffer: a canvas edit is written to the node.
  *
  * ## State discipline
  *
@@ -124,6 +137,24 @@ import {
 } from './canvas-connections.ts'
 import { planReveal, type FlowRevealCanvas } from './canvas-flow-model.ts'
 import type { FlowConnectionEvent } from './canvas-flow-model.ts'
+// U05: the node property drawer. Everything it decides lives in its own module
+// so the drawer's rules are testable without a DOM (see `node-inspector.ts`).
+import {
+  INSPECTOR_EMPTY_HINT,
+  NodeInspector,
+  canGenerateFromDrawer,
+  draftParamsOf,
+  generateParamsBody,
+  inspectorTargetOf,
+  inspectorValuesOf,
+  inspectorVisible,
+  patchDraftParams,
+  type InspectorAction,
+  type InspectorFieldId,
+  type InspectorInputEvent,
+  type InspectorNodeLike,
+  type InspectorOptions,
+} from './node-inspector.ts'
 import {
   DEFAULT_LAYOUT_HEIGHT,
   DEFAULT_LAYOUT_WIDTH,
@@ -275,6 +306,17 @@ interface TaskCanvasNode extends CanvasNodeBase {
  */
 interface DraftCanvasNode extends CanvasNodeBase {
   readonly kind: 'draft'
+  /**
+   * The parameters this draft would submit (U05).
+   *
+   * A draft is the node the drawer exists for: the user drops a wire, picks 图片
+   * 生成, types a prompt in the drawer and presses 生成. The parameters live on
+   * the node — not in the old form's panel state — so two drafts can be described
+   * at the same time and selecting one shows *its* prompt.
+   */
+  readonly params?: BoardTaskParams
+  /** References held for this draft only; edits are local to the node. */
+  readonly references?: readonly HeldReference[]
 }
 
 type CanvasNode = ImageCanvasNode | TaskCanvasNode | LayoutCanvasNode | DraftCanvasNode
@@ -1342,7 +1384,15 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // G26: the prompt field. A node created by dropping a wire is a promise that
   // the next thing the user does is describe a picture, so the drop moves the
   // cursor there instead of leaving them to find the form.
+  //
+  // U05: "there" is the drawer now. The list/asset views keep the form, so both
+  // fields exist; a drop selects the draft node, whose editor is the drawer's.
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
+  const drawerPromptRef = useRef<HTMLTextAreaElement | null>(null)
+  // U05: the task node whose parameters the drawer is editing (「编辑参数」). The
+  // parameter *values* are the node's own `params`, so this is only the mode bit;
+  // it is compared by id, so it can never leak onto a different node.
+  const [taskEditId, setTaskEditId] = useState<string | undefined>(undefined)
   // The marquee rectangle is screen-space DOM, not part of the scaled layer
   // (§6.1: its border must not zoom).
   const [marquee, setMarquee] = useState<MarqueeBox | undefined>(undefined)
@@ -1868,12 +1918,15 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     setOptimizing(false)
   }, [])
 
-  /** Add picked files to the reference row, honouring the count cap. */
-  const addReferences = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    const picked = [...(event.target.files ?? [])]
-    event.target.value = ''
-    if (picked.length === 0) return
-    void Promise.all(picked.map(async (file) => {
+  /**
+   * Turn picked files into held references (base64 payload + blob preview).
+   *
+   * Shared by the two surfaces that can hold references — the list/asset form and
+   * the node drawer (U05) — because "read a file into a reference" has exactly one
+   * correct implementation and a second copy would drift.
+   */
+  const readReferenceFiles = useCallback(async (files: readonly File[]): Promise<HeldReference[]> => {
+    return Promise.all(files.map(async (file) => {
       const bytes = new Uint8Array(await file.arrayBuffer())
       return {
         id: `${file.name}-${String(file.size)}-${String(Date.now())}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1881,7 +1934,15 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         previewUrl: URL.createObjectURL(file),
         payload: { data: toBase64(bytes), mediaType: mediaTypeOf(file), name: file.name },
       } satisfies HeldReference
-    })).then((added) => {
+    }))
+  }, [])
+
+  /** Add picked files to the reference row, honouring the count cap. */
+  const addReferences = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const picked = [...(event.target.files ?? [])]
+    event.target.value = ''
+    if (picked.length === 0) return
+    void readReferenceFiles(picked).then((added) => {
       setReferences((current) => {
         const room = STUDIO_MAX_REFERENCES - current.length
         if (room <= 0) {
@@ -1894,7 +1955,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         return [...current, ...added.slice(0, room)]
       })
     })
-  }, [])
+  }, [readReferenceFiles])
 
   /** Drop one reference and free its preview URL. */
   const removeReference = useCallback((id: string) => {
@@ -2288,12 +2349,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         signal: controller.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          prompt: params.prompt,
-          ratio: params.ratio ?? '1:1',
-          ...(params.steps === undefined ? {} : { steps: params.steps }),
-          count: params.count ?? 1,
+          // U05: the parameter half comes from the drawer's own pure function, so
+          // what the drawer shows and what the host parses cannot drift (see
+          // `generateParamsBody`). Everything else on the wire is canvas context.
+          ...generateParamsBody(params),
           ...(wireReferences.length === 0 ? {} : { references: wireReferences }),
-          ...(params.layout === undefined ? {} : { layout: params.layout }),
           // C14: the canvas parents ride along as board item ids so the recorded
           // picture keeps the edge to a layout node (which has no path to resolve).
           ...(taskNode.parents.length === 0 ? {} : { parents: [...taskNode.parents] }),
@@ -2336,39 +2396,23 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     })
   }, [startGeneration])
 
-  /** §4.5 edit-and-resend: refill the form; the next generate replaces this node. */
+  /**
+   * §4.5 edit-and-resend, U05's way: put the node's own snapshot in the drawer.
+   *
+   * It used to refill the left form and leave a `pendingReplaceRef` behind. The
+   * canvas no longer shows a form, so the parameters stay where they are — on the
+   * node — and the drawer switches to an editor over that same snapshot. The
+   * following 重新生成 is `retryTask`, so the replacement semantics are unchanged
+   * (in place, same lineage, layout text kept because it is part of the snapshot).
+   *
+   * The list/asset form keeps `pendingReplaceRef` for its own replacement path.
+   */
   const editTaskParams = useCallback((id: string) => {
     const node = nodesRef.current.find((entry) => entry.id === id)
     if (node === undefined || !isTaskNode(node)) return
-    setPrompt(node.params.prompt)
-    setRatio(node.params.ratio ?? '1:1')
-    setSteps(node.params.steps === undefined ? '' : String(node.params.steps))
-    setCount(node.params.count ?? 1)
-    setReferences((current) => {
-      for (const reference of current) URL.revokeObjectURL(reference.previewUrl)
-      const restored: HeldReference[] = []
-      for (const [index, entry] of (node.params.references ?? []).entries()) {
-        if (typeof entry.path !== 'string' || entry.path.length === 0) continue
-        if (restored.length >= STUDIO_MAX_REFERENCES) break
-        restored.push({
-          id: node.id + '-param-' + String(index),
-          name: entry.name ?? (entry.path.split('/').pop() ?? '参考图'),
-          previewUrl: studioFileUrl(entry.path.replace(/\\/g, '/')),
-          payload: {
-            path: entry.path,
-            ...(entry.mediaType === undefined ? {} : { mediaType: entry.mediaType }),
-          },
-        })
-      }
-      return restored
-    })
-    // The compiled layout is part of the request snapshot; a form edit must not
-    // silently drop the conditioning when the user re-sends.
-    pendingReplaceRef.current = {
-      id: node.id,
-      ...(node.params.layout === undefined ? {} : { layout: node.params.layout }),
-    }
-    setNote('参数已回填表单；改完再点「生成」会替换这个失败节点（布局参数保留）。')
+    setTaskEditId(id)
+    setSelection(new Set([id]))
+    setNote('参数已在右侧抽屉里；改完点「重新生成」会原地替换这个节点（布局参数保留）。')
   }, [])
 
   /** Abort one task node's own run (§4.2 lands it on `interrupted`). */
@@ -3596,7 +3640,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       created.push(node.id)
       offset += 40
     }
-    if (created.length > 0) setSelection(new Set(created))
+    if (created.length > 0) setSelection(new Set(created.map((node) => node.id)))
   }, [appendBoardItem])
 
   /**
@@ -3905,24 +3949,36 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     }
   }, [])
 
-  /** Hand a canvas result back to the form as an edit reference. */
-  const referenceNode = useCallback((node: CanvasNode) => {
-    // Only a picture can be a reference; a task node has no file to point at.
-    if (!isImageNode(node)) return
-    setReferences((current) => {
-      if (current.length >= STUDIO_MAX_REFERENCES) return current
-      if (hasReference(current, { nodeId: node.id })) return current
-      const name = node.image.path.split('/').pop() ?? '参考图'
-      return [...current, {
-        id: `${node.id}-ref`,
-        name,
-        previewUrl: studioFileUrl(node.image.markdownPath),
-        // `path` instead of base64: the browser never had these bytes, and the
-        // host can read its own output without a round trip through the page.
-        payload: { path: node.image.path, mediaType: node.image.mediaType, name },
-        nodeId: node.id,
-      }]
-    })
+  /**
+   * Put the caret in the drawer's prompt field (G26's "the next thing is typing").
+   *
+   * Deferred once because the caller usually *selects a node* in the same click,
+   * so the drawer is still mounting when this runs: the immediate attempt covers
+   * an already-open editor, the second one the editor that is one commit away.
+   */
+  const focusPrompt = useCallback(() => {
+    const focus = (): void => { drawerPromptRef.current?.focus?.() }
+    focus()
+    setTimeout(focus, 0)
+  }, [])
+
+  /**
+   * One picture as a held reference (§4.5's "edit from this result").
+   *
+   * `path` instead of base64: the browser never had these bytes, and the host can
+   * read its own output without a round trip through the page. A task node has no
+   * file, so it can never be a reference.
+   */
+  const referenceOf = useCallback((node: CanvasNode): HeldReference | undefined => {
+    if (!isImageNode(node)) return undefined
+    const name = node.image.path.split(/[\\/]/).pop() ?? '参考图'
+    return {
+      id: `${node.id}-ref`,
+      name,
+      previewUrl: studioFileUrl(node.image.markdownPath),
+      payload: { path: node.image.path, mediaType: node.image.mediaType, name },
+      nodeId: node.id,
+    }
   }, [])
 
   /** Zoom around the viewport centre, for the toolbar buttons. */
@@ -3965,18 +4021,27 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    *
    * The drop says "here, and it came from there"; the picture does not exist yet.
    * So this writes a node and **nothing else** — no board entry, no request, no
-   * `persistedIds`. The next form generation replaces it in place through the
-   * existing `pendingReplaceRef` path, which already knows how to swap a node for
-   * the picture that lands on it (the §4.5 edit-and-resend channel), and the
-   * picture takes `parents` with it.
+   * `persistedIds`. Since U05 the placeholder is also the thing the user *edits*:
+   * it carries its own `params`/`references`, the drawer writes them, and its
+   * 生成 replaces the node in place through the §4.5 edit-and-resend channel, so
+   * the picture takes `parents` with it. (The old form's `pendingReplaceRef`
+   * still serves the list/asset views; this path names its target explicitly.)
    */
-  const addDraftNode = useCallback((spot: Point, sourceId: string) => {
+  const addDraftNode = useCallback((spot: Point, sourceId?: string, options: {
+    /** References the drop carried — a wire from a picture pre-fills them (U05). */
+    readonly references?: readonly HeldReference[]
+    readonly params?: BoardTaskParams
+  } = {}) => {
     const node: DraftCanvasNode = {
       kind: 'draft',
       id: makeClientId(),
       x: spot.x,
       y: spot.y,
-      parents: [sourceId],
+      parents: sourceId === undefined ? [] : [sourceId],
+      params: options.params ?? { prompt: '', ratio: '1:1' },
+      ...(options.references === undefined || options.references.length === 0
+        ? {}
+        : { references: options.references }),
     }
     const before = nodesRef.current
     const after = [...before, node]
@@ -3987,6 +4052,187 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     setSelection(new Set([node.id]))
     return node
   }, [pushCommand, writeNodes])
+
+  /* ------------------------------------------------------------------------ */
+  /* U05: the node property drawer                                            */
+  /* ------------------------------------------------------------------------ */
+  //
+  // The drawer is the canvas tab's editor now. Its values belong to the node (a
+  // draft's `params`/`references`, an edited task's `params`), so every callback
+  // below finds its subject from the selection and writes through `writeNodes`.
+  // Nothing here touches the panel's form state — that belongs to the list and
+  // asset views, which keep the old form untouched.
+
+  /**
+   * "Continue from this picture" (U05).
+   *
+   * The list/asset form used to be where a reference landed, which made 用作参考
+   * on the canvas a write into a buffer the canvas user cannot see. The drawer
+   * gives the reference a home: a draft node beside the picture, wired to it, with
+   * the picture already in its reference row — ready to describe and generate.
+   *
+   * Declared after `addDraftNode` on purpose: a `useCallback` reads its
+   * dependency array immediately, so naming a `const` from further down would be
+   * a temporal-dead-zone error at render time.
+   */
+  const continueFromNode = useCallback((node: CanvasNode) => {
+    const reference = referenceOf(node)
+    if (reference === undefined) return
+    const spot = nextNodeSpot(
+      nodesRef.current.map(nodeRect),
+      nodeRect(node),
+      { width: CANVAS_NODE_WIDTH, height: CANVAS_NODE_HEIGHT },
+    )
+    addDraftNode(spot, node.id, { references: [reference] })
+    setNote('已在右侧放一个待生成节点，参考图就是这张；在抽屉里写下要改什么，再点「生成」。')
+    focusPrompt()
+  }, [addDraftNode, focusPrompt, referenceOf])
+
+  /**
+   * The canvas tab's create entry (U05).
+   *
+   * With the left form gone, an empty board had no way to start: a draft node used
+   * to require a wire drop. This is the same node without a source — no lineage,
+   * default `1:1`, caret in the drawer — so "新建 → 写提示词 → 生成" is the whole
+   * first-run path.
+   */
+  const addDraftNodeAt = useCallback(() => {
+    const spot = nextNodeSpot(nodesRef.current.map(nodeRect))
+    addDraftNode(spot)
+    setNote('已新建一个待生成节点：在右侧抽屉里写提示词、选画幅，再点「生成」。')
+    focusPrompt()
+  }, [addDraftNode, focusPrompt])
+
+  /** Write one drawer field into the selected node — the drawer's "保存". */
+  const patchInspectorField = useCallback((field: InspectorFieldId, value: string) => {
+    const id = singleSelection(selection)
+    if (id === undefined) return
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined) return
+    // A draft always edits itself; a task only while 「编辑参数」 put it in edit
+    // mode, so a running task's snapshot can not be rewritten mid-flight.
+    if (!isDraftNode(node) && !(isTaskNode(node) && taskEditId === id)) return
+    const params = patchDraftParams(node.params ?? { prompt: '' }, field, value)
+    writeNodes(nodesRef.current.map((entry) => (entry.id === id ? { ...node, params } : entry)))
+  }, [selection, taskEditId, writeNodes])
+
+  /** Add picked files to the selected draft's reference row (§4.5's edit channel). */
+  const addInspectorReferences = useCallback((event: InspectorInputEvent) => {
+    const picked = [...((event.target.files ?? []) as unknown as File[])]
+    if (picked.length === 0) return
+    void readReferenceFiles(picked).then((added) => {
+      const id = singleSelection(selection)
+      const node = id === undefined ? undefined : nodesRef.current.find((entry) => entry.id === id)
+      const release = (list: readonly HeldReference[]): void => {
+        for (const reference of list) URL.revokeObjectURL(reference.previewUrl)
+      }
+      if (node === undefined || !isDraftNode(node)) {
+        release(added)
+        return
+      }
+      const current = node.references ?? []
+      const room = STUDIO_MAX_REFERENCES - current.length
+      if (room <= 0) {
+        release(added)
+        setError(`最多 ${String(STUDIO_MAX_REFERENCES)} 张参考图`)
+        return
+      }
+      if (added.length > room) setError(`最多 ${String(STUDIO_MAX_REFERENCES)} 张参考图，多出的已忽略`)
+      release(added.slice(room))
+      writeNodes(nodesRef.current.map((entry) => (entry.id === node.id
+        ? { ...node, references: [...current, ...added.slice(0, room)] }
+        : entry)))
+    })
+  }, [readReferenceFiles, selection, writeNodes])
+
+  /** Drop one reference from the selected draft and free its preview URL. */
+  const removeInspectorReference = useCallback((referenceId: string) => {
+    const id = singleSelection(selection)
+    if (id === undefined) return
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined || !isDraftNode(node)) return
+    const current = node.references ?? []
+    const target = current.find((entry) => entry.id === referenceId)
+    if (target !== undefined) URL.revokeObjectURL(target.previewUrl)
+    writeNodes(nodesRef.current.map((entry) => (entry.id === id
+      ? { ...node, references: current.filter((entry) => entry.id !== referenceId) }
+      : entry)))
+  }, [selection, writeNodes])
+
+  /**
+   * Submit the drawer's draft node in place (U05's main generation entry).
+   *
+   * Same run path as the form (§4.1): `startGeneration` with a `replaceId` swaps
+   * this node for the task that replaces it, so the picture lands where the draft
+   * sat and keeps its `parents`. The body is built by the drawer's own pure
+   * function, so what the drawer shows is what the host receives.
+   */
+  const generateDraftNode = useCallback((id: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined || !isDraftNode(node)) return
+    const values = inspectorValuesOf(node)
+    const references = node.references ?? []
+    if (!canGenerateFromDrawer(values, references.length)) {
+      setError('请输入提示词')
+      return
+    }
+    setError(undefined)
+    setNote(undefined)
+    setTaskEditId(undefined)
+    void startGeneration(draftParamsOf(values), {
+      references: references.map((reference) => reference.payload),
+      parents: [...node.parents],
+      replaceId: node.id,
+      report: (message) => { setError(message) },
+    })
+  }, [startGeneration])
+
+  /** One click of a drawer button, dispatched onto the callbacks that own it. */
+  const runInspectorAction = useCallback((action: InspectorAction) => {
+    const id = singleSelection(selection)
+    if (id === undefined) return
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined) return
+    switch (action) {
+      case 'generate':
+        // A draft starts the run; an edited task re-sends its own snapshot, which
+        // is exactly the retry path (§4.5) — one submit, not two.
+        if (isDraftNode(node)) generateDraftNode(id)
+        else retryTask(id)
+        break
+      case 'retry':
+        retryTask(id)
+        break
+      case 'edit':
+        setTaskEditId(id)
+        setNote('参数已在右侧抽屉里；改完点「重新生成」会原地替换这个节点。')
+        break
+      case 'cancel':
+        cancelTask(id)
+        break
+      case 'remove':
+        setTaskEditId(undefined)
+        removeNode(id)
+        break
+      case 'open':
+        if (isImageNode(node) && typeof window.open === 'function') {
+          window.open(studioFileUrl(node.image.markdownPath), '_blank', 'noreferrer')
+        }
+        break
+      case 'continue':
+        continueFromNode(node)
+        break
+      case 'layout-generate':
+        generateLayoutNode(id)
+        break
+      case 'open-detail':
+        // U06's node detail tab does not exist yet; the button says so by being
+        // disabled in the spec, and this branch is what keeps the union total.
+        break
+      default:
+        break
+    }
+  }, [cancelTask, continueFromNode, generateDraftNode, generateLayoutNode, removeNode, retryTask, selection])
 
   /**
    * Run one choice of the node-type menu (G26 §1).
@@ -4011,16 +4257,20 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     setWireMenu(undefined)
     const source = nodesRef.current.find((node) => node.id === open.sourceId)
     if (target === 'image') {
-      // Pre-fill the form with the source as a reference: the wire says "make
-      // the next thing from this one", and a reference is how this workbench
-      // expresses that. A layout node has no file, so it contributes the parent
-      // id through the draft node instead (see `startGeneration`).
-      if (source !== undefined) referenceNode(source)
-      const draft = addDraftNode(open.world, open.sourceId)
-      // The very next form generation lands on this node instead of appending.
+      // U05: the drop says "make the next thing from this one", and the thing it
+      // makes is the draft node the drawer edits. The source's picture rides into
+      // the draft's own reference row (a layout node has no file, so it only
+      // contributes the lineage through the draft node's `parents`).
+      const reference = source === undefined ? undefined : referenceOf(source)
+      const draft = addDraftNode(open.world, open.sourceId, reference === undefined
+        ? {}
+        : { references: [reference] })
+      // The list/asset form still honours "the next generation lands here", and
+      // for a draft the drawer passes its own id explicitly — either way the
+      // picture that lands inherits the lineage.
       pendingReplaceRef.current = { id: draft.id }
-      setNote('已在这里放一个待生成的节点（血缘指向来源）。写下提示词再点「生成」，图会落在这个位置。')
-      promptRef.current?.focus()
+      setNote('已在这里放一个待生成的节点（血缘指向来源）。在右侧抽屉里写下提示词再点「生成」，图会落在这个位置。')
+      focusPrompt()
       return
     }
     if (target === 'layout') {
@@ -4028,17 +4278,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       setNote('已在这里建布局节点，血缘指向来源节点；在里面拖画框、写 summary.caption 再点「生成」。')
       return
     }
-  }, [addDraftNode, addLayoutNode, referenceNode, wireMenu])
-
-  /**
-   * Focus the prompt for the node the user is about to describe.
-   *
-   * Kept as a callback so the draft node's own action row can reuse it: the point
-   * of a draft is that the next thing the user does is type.
-   */
-  const focusPrompt = useCallback(() => {
-    promptRef.current?.focus()
-  }, [])
+  }, [addDraftNode, addLayoutNode, focusPrompt, referenceOf, wireMenu])
 
   /**
    * The §6.3 keyboard, dispatched through the C08 table.
@@ -4096,6 +4336,65 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const lightboxIndex = lightboxNode === undefined ? -1 : boardPictures.indexOf(lightboxNode)
   /** Its stored prompt, which is the only human-readable title a result has. */
   const lightboxItem = lightboxNode === undefined ? undefined : boardItemsRef.current.get(lightboxNode.id)
+
+  /**
+   * U05: the drawer's subject.
+   *
+   * Single selection only (`inspectorVisible`), resolved against the current node
+   * list so a node that was removed between render and click cannot be edited.
+   * Everything the drawer needs is derived here; the component itself is pure.
+   */
+  const inspectorNode = useMemo<CanvasNode | undefined>(
+    () => inspectorTargetOf(nodes, selection),
+    [nodes, selection],
+  )
+  /** A task's parameters are editable only while 「编辑参数」 put it in that mode. */
+  const inspectorEditing = inspectorNode !== undefined && taskEditId === inspectorNode.id
+  /** The board item behind a picture: its steps, seed and ratio are history. */
+  const inspectorItem = inspectorNode === undefined
+    ? undefined
+    : boardItemsRef.current.get(inspectorNode.id)
+  const inspectorOptions: InspectorOptions = {
+    ...(inspectorItem === undefined ? {} : { item: inspectorItem }),
+    ...(typeof config?.models?.unet !== 'string' ? {} : { model: config.models.unet }),
+    ...(typeof config?.defaultSteps !== 'number' ? {} : { defaultSteps: config.defaultSteps }),
+    editing: inspectorEditing,
+  }
+  /** The drawer, or the line that says how to get one (§U05-4). */
+  const inspectorPane = createElement(
+    'aside',
+    { className: 'dsh-forge-canvas-side' },
+    inspectorVisible(selection) && inspectorNode !== undefined
+      ? createElement(NodeInspector, {
+        node: inspectorNode,
+        options: inspectorOptions,
+        busy,
+        promptRef: drawerPromptRef,
+        onField: patchInspectorField,
+        onAddReferences: addInspectorReferences,
+        onRemoveReference: removeInspectorReference,
+        onAction: runInspectorAction,
+        onClose: () => {
+          setSelection(new Set())
+          setTaskEditId(undefined)
+        },
+      })
+      : createElement('div', { className: 'dsh-forge-inspector is-empty' }, INSPECTOR_EMPTY_HINT),
+  )
+
+  /** The panel's own last word, kept above the canvas now that the form is gone. */
+  const canvasStatus = error === undefined && note === undefined
+    ? null
+    : createElement(
+      'div',
+      { className: 'dsh-forge-canvas-status' },
+      error === undefined
+        ? null
+        : createElement('div', { className: 'dsh-forge-studio-alert' }, error),
+      note === undefined
+        ? null
+        : createElement('div', { className: 'dsh-forge-studio-hint' }, note),
+    )
 
   const onCanvasKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     // G22: while the lightbox is open it owns the three keys that mean something
@@ -4311,10 +4610,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         break
       case 'reference':
       case 'branch': {
-        // "Branch from this image": prefill the form with it as the reference,
-        // which is what starting an edit from a result means here (§6.4).
+        // "Branch from this image": U05 makes that a node, not a form field — a
+        // draft beside the picture holding it as a reference, which the drawer
+        // then edits (§6.4's 用参考图再画一张).
         const node = nodesRef.current.find((entry) => entry.id === target)
-        if (node !== undefined) referenceNode(node)
+        if (node !== undefined) continueFromNode(node)
         break
       }
       case 'original': {
@@ -4344,6 +4644,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         break
       case 'draft-focus':
         // G26: the placeholder's only real action is "go describe the picture".
+        // U05: "there" is the drawer, so the node has to be the selected one.
+        if (target !== undefined) setSelection(new Set([target]))
         focusPrompt()
         break
       case 'copy-item':
@@ -4387,7 +4689,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     menuIds,
     openLightbox,
     pasteClipboard,
-    referenceNode,
+    continueFromNode,
     removeNodes,
     retryTask,
   ])
@@ -4896,10 +5198,16 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
 
     createElement(
       'div',
-      { className: 'dsh-forge-studio-body' },
+      // U05: on the canvas the body is one column — the canvas plus its drawer.
+      // The left form lives only with the list and asset views now, so a
+      // two-column grid there would leave half the body empty.
+      { className: view === 'canvas' ? 'dsh-forge-studio-body is-canvas' : 'dsh-forge-studio-body' },
 
-      // ---- form -----------------------------------------------------------
-      createElement(
+      // ---- form (list and asset views only; U05 moved the canvas tab's ----)
+      // ---- editor into the node drawer ------------------------------------
+      view === 'canvas'
+        ? null
+        : createElement(
         'div',
         { className: 'dsh-forge-studio-form' },
         createElement(
@@ -5179,6 +5487,19 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 },
                 '平移',
               ),
+              // U05: the canvas tab's own creation entry. The list/asset form was
+              // the only way to start a generation before; on the canvas the
+              // equivalent is a draft node whose parameters the drawer edits.
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-forge-btn is-ghost',
+                  title: '新建一个待生成节点，在右侧抽屉里写参数',
+                  onClick: () => { addDraftNodeAt() },
+                },
+                '新建生成',
+              ),
               // §8.1's creation entry. The blank right-click menu item that
               // §13 C13 step 5 names lives in the frozen C09 menu table
               // (canvas-interactions.ts, outside C13's write scope), so the
@@ -5222,6 +5543,10 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               view === 'assets' ? `${String(assetsTotal)} 张素材` : `${String(batches.length)} 批`,
             ),
         ),
+        // U05: the panel's own note/error, above the canvas. It used to live in
+        // the left form; with the form gone from this view it is the canvas's
+        // own line, so it is visible whatever is selected (or nothing is).
+        view === 'canvas' ? canvasStatus : null,
         view === 'canvas'
           // U04 step 2: **one** canvas container for both engines.
           //
@@ -5238,6 +5563,14 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
           // the gesture refs), the flow canvas owns its own and forwards the keys
           // back here through `onKeyDown` (see `./canvas-pane.ts`).
           ? createElement(
+            'div',
+            // U05: the canvas and its drawer share one row. They are siblings, not
+            // one overlaying the other, so the drawer can never sit on top of a
+            // node the user is trying to click; the narrow-panel media query in
+            // `client-styles.ts` turns the drawer into an overlay only when there
+            // is no room for both.
+            { className: 'dsh-forge-canvas-shell' },
+            createElement(
             'div',
             canvasSlot === undefined
               ? {
@@ -5432,10 +5765,10 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                           {
                             type: 'button',
                             className: 'dsh-forge-node-btn',
-                            title: '把这张图放进参考图，下一轮按它改',
-                            onClick: () => { referenceNode(node) },
+                            title: '按这张再画一张：建一个以它为参考的待生成节点',
+                            onClick: () => { continueFromNode(node) },
                           },
-                          '用作参考',
+                          '按这张继续',
                         ),
                         createElement(
                           'a',
@@ -5520,14 +5853,17 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 // a note to the user, not metadata.
                 if (isDraftNode(node)) {
                   const source = nodesRef.current.find((entry) => entry.id === node.parents[0])
+                  const described = (node.params?.prompt ?? '').split(/\r?\n/)[0]?.trim() ?? ''
                   return createElement(
                     'div',
-                    { ...frame, title: '待生成：写下提示词，图会落在这个位置' },
+                    { ...frame, title: '待生成：在右侧抽屉里写参数，图会落在这个位置' },
                     createElement('div', { className: 'dsh-forge-draft-head' }, '待生成'),
                     createElement(
                       'div',
-                      { className: 'dsh-forge-draft-body' },
-                      source === undefined ? '来源节点已不在画布上' : '来源：' + describeNode(source),
+                      { className: 'dsh-forge-draft-body', title: node.params?.prompt ?? '' },
+                      described.length > 0
+                        ? described
+                        : source === undefined ? '还没有参数：在右侧抽屉里写' : '来源：' + describeNode(source),
                     ),
                     createElement(
                       'div',
@@ -5537,8 +5873,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                         {
                           type: 'button',
                           className: 'dsh-forge-node-btn',
-                          title: '把光标放到提示词输入框',
-                          onClick: () => { focusPrompt() },
+                          title: '选中它，把光标放到右侧抽屉的提示词里',
+                          onClick: () => { setSelection(new Set([node.id])); focusPrompt() },
                         },
                         '写提示词',
                       ),
@@ -5928,12 +6264,17 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               'div',
               { className: 'dsh-forge-canvas-foot' },
               references.length === 0
-                ? '选中图片后可「用作参考」，下一轮会从它拉一条线出来。'
+                ? '点一个节点，右侧抽屉就是它的属性；选中图片后按「按这张继续」会从它拉一条线出来。'
                 : `已选 ${String(references.length)} 张参考图，下一轮将是改图。`,
               // G01: the one-line hint the new wheel split needs. Not a toast and
               // not a modal — the corner of the canvas is where the gesture is.
               createElement('span', { className: 'dsh-forge-canvas-foot-hint' }, '滚轮平移 · Ctrl/⌘+滚轮缩放'),
             ),
+            ),
+            // U05: the drawer sits beside the canvas, and is the whole editor of
+            // the canvas tab now (a draft node's parameters, a task's retry/edit,
+            // a picture's history). With nothing selected it is the hint line.
+            inspectorPane,
           )
           : view === 'assets'
             ? assetsPanel

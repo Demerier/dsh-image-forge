@@ -278,6 +278,42 @@ export const STUDIO_CSS = `
 .dsh-forge-step-detail{font-size:10.5px;line-height:1.45;opacity:.62;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
 .dsh-forge-step.is-failed .dsh-forge-step-detail{color:#dc2626;opacity:.95}
 .dsh-forge-step-retry{align-self:flex-end;margin-top:4px}
+/* U05: the node property drawer.
+   The canvas tab is one column now (the is-canvas modifier), and inside it the canvas and the
+   drawer are a flex row: two siblings, so the drawer shrinks the canvas instead of
+   covering a node. Below 760 px there is no room for both, and the drawer becomes
+   the overlay the brief allows — the same element, driven by one variable, so the
+   two layouts cannot drift apart. */
+.dsh-forge-studio-body.is-canvas{grid-template-columns:minmax(0,1fr)}
+.dsh-forge-canvas-status{display:flex;flex-direction:column;gap:6px;min-width:0}
+.dsh-forge-canvas-shell{display:flex;gap:10px;align-items:stretch;min-width:0;position:relative}
+.dsh-forge-canvas-shell>.dsh-forge-canvas{flex:1 1 auto;min-width:0}
+.dsh-forge-canvas-side{--dsh-forge-inspector-width:320px;flex:0 0 var(--dsh-forge-inspector-width);min-width:0;display:flex;flex-direction:column}
+.dsh-forge-inspector{display:flex;flex-direction:column;gap:8px;min-width:0;height:clamp(300px,50vh,540px);box-sizing:border-box;padding:10px 11px;border:1px solid rgba(127,127,127,.26);border-radius:10px;background:rgba(127,127,127,.035);overflow:auto;scrollbar-width:thin}
+.dsh-forge-inspector.is-empty{align-items:center;justify-content:center;text-align:center;font-size:11.5px;line-height:1.6;opacity:.55;border-style:dashed}
+.dsh-forge-inspector-head{display:flex;align-items:center;gap:6px;min-width:0}
+.dsh-forge-inspector-title{font-size:12.5px;font-weight:600;letter-spacing:.02em}
+.dsh-forge-inspector-badge{font-size:10px;line-height:1.5;padding:1px 6px;border-radius:4px;background:rgba(127,127,127,.16);opacity:.8;white-space:nowrap}
+.dsh-forge-inspector-status{font-size:11px;line-height:1.5;opacity:.68;overflow-wrap:anywhere}
+.dsh-forge-inspector-close{margin-left:auto;flex:none;width:20px;height:20px;line-height:1;padding:0;border-radius:50%;border:0;background:transparent;color:inherit;cursor:pointer;font-size:14px;opacity:.5;transition:opacity .15s,background .15s}
+.dsh-forge-inspector-close:hover{opacity:1;background:rgba(127,127,127,.14)}
+.dsh-forge-inspector-body{display:flex;flex-direction:column;gap:9px;min-width:0}
+.dsh-forge-inspector-row{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dsh-forge-inspector-value{font-size:11.5px;line-height:1.5;opacity:.82;overflow-wrap:anywhere;word-break:break-word;max-height:4.5em;overflow:hidden;-webkit-line-clamp:3;display:-webkit-box;-webkit-box-orient:vertical}
+.dsh-forge-inspector-lineage{display:flex;flex-wrap:wrap;align-items:center;gap:4px;min-width:0}
+.dsh-forge-inspector-parent{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px;line-height:1.6;padding:0 4px;border-radius:3px;background:rgba(127,127,127,.14);opacity:.8;max-width:9ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-forge-inspector-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto;padding-top:6px}
+.dsh-forge-textarea.is-inspector{min-height:76px;font-size:12px;padding:7px 9px}
+.dsh-forge-input.is-inspector{font-size:12px;padding:5px 8px}
+.dsh-forge-ratio-row.is-inspector{gap:4px}
+.dsh-forge-ratio-row.is-inspector .dsh-forge-ratio{padding:3px 7px}
+.dsh-forge-ref-row.is-inspector{gap:6px}
+.dsh-forge-inspector .dsh-forge-ref,.dsh-forge-inspector .dsh-forge-ref-add{width:46px;height:46px}
+@media (max-width:760px){
+  .dsh-forge-canvas-shell{display:block}
+  .dsh-forge-canvas-side{--dsh-forge-inspector-width:280px;position:absolute;right:0;top:0;bottom:0;pointer-events:none;z-index:3}
+  .dsh-forge-canvas-side>.dsh-forge-inspector{pointer-events:auto;height:100%;background:var(--dsh-forge-surface,rgba(24,24,27,.92));backdrop-filter:blur(2px);box-shadow:-6px 0 18px rgba(0,0,0,.22)}
+}
 `
 
 /**

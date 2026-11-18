@@ -14,21 +14,23 @@
  * last of which lives in `src/canvas-flow-model.ts` and is unit-tested without a
  * DOM.
  *
- * ## Why {@link CanvasPane} renders `StudioPanel` and not a bare canvas
+ * ## Why {@link CanvasPane} still renders `StudioPanel` (and what U05 changed)
  *
  * The tab has to own its board (§14.5: "画布页签换成 CanvasPane,传 boardId") *and*
- * keep the generation form, the result list, the asset page and the progress
- * line, which today all live in `src/studio-view.ts` — one component that also
- * hosts the canvas. Splitting that component is U05's job ("节点属性抽屉替代左半
- * 表单", D12), not this step's: doing it now would delete the only surface that
- * can start a generation, and there is no replacement for it yet.
+ * keep the result list, the asset page, the progress line, the undo stack and the
+ * board writers, which all live in `src/studio-view.ts` — one component that also
+ * hosts the canvas.
  *
- * So the seam is placed at the canvas itself: `StudioPanel` gained a `canvas`
- * slot, this module supplies {@link FlowCanvas} for it, and `CanvasPane` is the
- * composition the shell mounts — tab-owned `boardId`, studio chrome, React Flow
- * canvas. When U05 lands, `CanvasPane` drops `StudioPanel` and renders
- * {@link FlowCanvas} next to the node inspector; the props below already have
- * that shape.
+ * U05 ("节点属性抽屉替代左半表单", D12) has landed **inside** that component, not by
+ * splitting it: the canvas tab no longer renders the left form, and the selected
+ * node's properties live in a drawer on the right (`src/node-inspector.ts`). Doing
+ * the split here as well would mean moving the whole studio's state into a new
+ * component for no behavioural gain, which is S5's cleanup, not this step's.
+ *
+ * The seam stays where it was: `StudioPanel` has a `canvas` slot, this module
+ * supplies {@link FlowCanvas} for it, and `CanvasPane` is the composition the
+ * shell mounts — tab-owned `boardId`, studio chrome (result list, toolbar, drawer),
+ * React Flow canvas.
  *
  * ## Where interactions went
  *
