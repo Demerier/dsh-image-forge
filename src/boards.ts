@@ -747,7 +747,10 @@ function resolveParents(existing: readonly BoardItem[], incoming: NewBoardItem):
 export async function saveLayout(
   outputDir: string,
   id: string,
-  layout: { items?: readonly { id: string; x: number; y: number }[]; camera?: { x: number; y: number; zoom: number } | null },
+  layout: {
+    items?: readonly { id: string; x: number; y: number; parents?: readonly string[] }[]
+    camera?: { x: number; y: number; zoom: number } | null
+  },
 ): Promise<BoardSummary | undefined> {
   return serialized(boardsRoot(outputDir), async () => {
     const board = await readBoardFile(outputDir, id)
@@ -759,6 +762,17 @@ export async function saveLayout(
       if (!Number.isFinite(spot.x) || !Number.isFinite(spot.y)) continue
       item.x = spot.x
       item.y = spot.y
+      // G26: a canvas edge rides along with the position. The merge is a **union**,
+      // never a replacement: `parents` is a set of provenance links, and dropping
+      // the ones this request did not mention would erase lineage the user can no
+      // longer recreate (the picture is already on disk). An entry without
+      // `parents` leaves the stored list untouched, which is why every write that
+      // predates the gesture behaves exactly as it did.
+      if (spot.parents !== undefined && spot.parents.length > 0) {
+        const merged = [...item.parents]
+        for (const parent of spot.parents) if (!merged.includes(parent)) merged.push(parent)
+        item.parents = merged
+      }
     }
     if (layout.camera !== undefined) board.camera = isCamera(layout.camera) ? layout.camera : null
     board.updatedAt = new Date().toISOString()

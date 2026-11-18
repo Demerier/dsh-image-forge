@@ -880,13 +880,45 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
   }
 }
 
-function parsePosition(value: unknown): { id: string; x: number; y: number } | undefined {
+/**
+ * One layout entry: a position, and — since G26 — optionally the lineage it
+ * gained on the canvas.
+ *
+ * `parents` rides along because adding an edge is not a new board action: the
+ * canvas already writes positions through `layout`, and one write per change is
+ * what keeps the store from needing a second, conflicting ordering. The field is
+ * **optional and additive**: an entry without it produces exactly the object this
+ * parser produced before, so every existing caller (and every stored test) is
+ * byte-identical.
+ *
+ * Unlike the top-level `parents` of `save-task`/`save-layout-node`, a bad value
+ * here is **dropped, not refused**: a position is still worth saving even if the
+ * lineage payload is malformed, and refusing the whole write would lose the
+ * drag the user just made.
+ */
+function parsePosition(value: unknown): { id: string; x: number; y: number; parents?: string[] } | undefined {
   const entry = record(value)
   if (entry === undefined) return undefined
   if (typeof entry.id !== 'string' || entry.id.length === 0) return undefined
   if (typeof entry.x !== 'number' || !Number.isFinite(entry.x)) return undefined
   if (typeof entry.y !== 'number' || !Number.isFinite(entry.y)) return undefined
-  return { id: entry.id.slice(0, 80), x: entry.x, y: entry.y }
+  const parents = parsePositionParents(entry.parents)
+  return {
+    id: entry.id.slice(0, 80),
+    x: entry.x,
+    y: entry.y,
+    ...(parents === undefined ? {} : { parents }),
+  }
+}
+
+/** Parent ids of one layout entry, with anything unrecognisable dropped. */
+function parsePositionParents(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const ids = value
+    .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    .map((entry) => entry.trim().slice(0, 80))
+    .slice(0, STUDIO_MAX_PARENT_IDS)
+  return ids.length === 0 ? undefined : ids
 }
 
 function isPosition(value: { id: string; x: number; y: number } | undefined): value is { id: string; x: number; y: number } {

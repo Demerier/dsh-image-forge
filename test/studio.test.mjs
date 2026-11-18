@@ -87,6 +87,15 @@ import {
   stepperStepsOf,
 } from '../testlib/studio-shared.js'
 import { compileLayout } from '../src/layout-editor.ts'
+// G26: the edge's persistence is asserted against the *current* route parser and
+// board store rather than the `testlib/` snapshot — that snapshot is rebuilt only
+// when the whole host bundle is, and this contract is newer than it.
+import { parseBoardAction as parseBoardActionLive } from '../src/studio-routes.ts'
+import {
+  readBoard as readBoardLive,
+  recordItems as recordItemsLive,
+  saveLayout as saveLayoutLive,
+} from '../src/boards.ts'
 
 /** The authoritative compiled-layout sample (T21's format authority). */
 const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
@@ -2034,7 +2043,7 @@ function connectMenu(panel) {
  * does. A wire drag is the first gesture that needs several moves, so this
  * mount queues them and the test runs the frames a browser would have run.
  */
-async function mountWireWorkbench() {
+async function mountWireWorkbench(options) {
   const previous = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame }
   let nextId = 1
   let pending = []
@@ -2047,7 +2056,7 @@ async function mountWireWorkbench() {
   globalThis.cancelAnimationFrame = (id) => {
     pending = pending.filter((entry) => entry.id !== id)
   }
-  const mounted = await mountWorkbench({ board: HARNESS_BOARD })
+  const mounted = await mountWorkbench({ board: HARNESS_BOARD, ...(options ?? {}) })
   return {
     ...mounted,
     /** Run the frames a browser would have run before the next assertion. */
@@ -2236,6 +2245,271 @@ test('G26: a click, a drag below the threshold and a drag back home all cancel',
     releasePointer(mounted)
     await settle(panel)
     assert.equal(edgeCount(panel), 0, 'and the release after it does nothing')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// G26: what a wire dropped on blank canvas actually builds.
+//
+// The three choices are exercised through the real bundle: the menu the gesture
+// opens, the node each one creates at the drop point, the lineage they inherit,
+// and the one thing none of them may do — start a generation from a drop.
+// ---------------------------------------------------------------------------
+
+/** Drop a wire from node 0 onto blank canvas and click one choice. */
+async function dropAndChoose(mounted, label, point = { x: 400, y: 300 }) {
+  const { panel } = mounted
+  pressHandle(panel, 0, { x: 200, y: 120 })
+  movePointer(mounted, point)
+  await settle(panel)
+  releasePointer(mounted)
+  await settle(panel)
+  const menu = connectMenu(panel)
+  assert.ok(menu !== undefined, 'a blank drop opens the node-type menu')
+  const choice = menu.items.find((entry) => fakeText(entry) === label)
+  assert.ok(choice !== undefined, `the menu must offer ${label}`)
+  choice.props.onClick()
+  await settle(panel)
+}
+
+test('G26: 图片生成 leaves a draft at the drop point and prefills the source', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    await dropAndChoose(mounted, '图片生成')
+
+    const nodes = nodeElements(panel)
+    assert.equal(nodes.length, 4, 'the draft is a real node on the canvas')
+    const draft = nodes[3]
+    assert.ok(draft.props.className.includes('is-draft'), 'and it says it is not a picture yet')
+    assert.equal(draft.props.style.left, '400px', 'it lands where the wire was released')
+    assert.equal(draft.props.style.top, '300px')
+    assert.ok(fakeText(draft).includes('来源：iaaa1.png'), 'it names the node it came from')
+    assert.equal(connectMenu(panel), undefined, 'choosing closes the menu')
+
+    // The form now points at the source, which is how this workbench spells
+    // "make the next picture from that one".
+    assert.ok(noteText(panel).includes('待生成的节点'), 'the panel says what it just did')
+    assert.deepEqual(
+      network.calls.filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0),
+      [],
+      'dropping a wire never generates',
+    )
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G26: the draft is replaced in place, and the picture keeps the edge', async () => {
+  const mounted = await mountWireWorkbench({
+    generate: () => fakeResponse({
+      images: [{ id: 'inew1', path: 'C:/out/new.png', markdownPath: 'C:/out/new.png', width: 1024, height: 1024, bytes: 2048, mediaType: 'image/png' }],
+      prompt: '一只橘猫',
+      ratio: '1:1',
+      width: 1024,
+      height: 1024,
+      steps: 8,
+      seed: 1,
+      elapsedMs: 10,
+      endpoint: 'http://127.0.0.1:8188',
+      mode: 'generate',
+    }, 200),
+  })
+  const { network, panel } = mounted
+  try {
+    await dropAndChoose(mounted, '图片生成')
+    // The user writes the prompt and presses the form's generate button. The
+    // button reads 生成改图 rather than 生成 because the drop prefilled the
+    // reference row — which is itself proof that the prefill landed.
+    const textarea = fakeElementWithClass(panel.tree, 'dsh-forge-textarea')
+    textarea.props.onChange({ target: { value: '一只橘猫' } })
+    await settle(panel)
+    const run = buttonWithText(panel, '生成改图')
+    assert.ok(run !== undefined, 'the prefilled reference turns 生成 into 生成改图')
+    run.props.onClick()
+    await settle(panel)
+
+    const sent = network.calls
+      .filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0)
+      .map((call) => JSON.parse(call.body))
+    assert.equal(sent.length, 1, 'exactly one run')
+    assert.deepEqual(sent[0].parents, ['iaaa1'], 'the request carries the edge the wire expressed')
+    assert.deepEqual(
+      sent[0].references.map((entry) => entry.path),
+      ['C:/out/iaaa1.png'],
+      'and the source as a reference, which is what the prefill was for',
+    )
+
+    // The picture landed where the draft stood, not at the end of the board.
+    const picture = nodeElements(panel).find((entry) => entry.props['data-node-id'] === 'inew1')
+    assert.ok(picture !== undefined, 'the response converted the placeholder')
+    assert.equal(picture.props.style.left, '400px', 'at the drop point')
+    assert.equal(picture.props.style.top, '300px')
+    assert.equal(edgeCount(panel), 1, 'and the lineage edge is drawn from the source')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G26: 布局 builds a layout node there, parented to the source, and it is undoable', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    await dropAndChoose(mounted, '布局')
+    const nodes = nodeElements(panel)
+    assert.equal(nodes.length, 4)
+    assert.ok(nodes[3].props.className.includes('is-layout'))
+    assert.equal(nodes[3].props.style.left, '400px')
+    assert.equal(nodes[3].props.style.top, '300px')
+
+    // A layout node persists through its own writer, which has always carried
+    // parents — so this edge is durable without a new route.
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    await settle(panel)
+    const writes = boardMutations(network).filter((action) => action.action === 'save-layout-node')
+    assert.equal(writes.length, 1, 'the layout node is written once')
+    assert.deepEqual(writes[0].parents, ['iaaa1'], 'with the edge the wire expressed')
+    assert.equal(writes[0].x, 400)
+    assert.equal(writes[0].y, 300)
+
+    // §6.5: creation is undoable, and undo takes the node back off the canvas.
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 3, 'Ctrl+Z removes the node the wire created')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G26: a draft is undoable too, and undo leaves the form untouched', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    await dropAndChoose(mounted, '图片生成')
+    assert.equal(nodeElements(panel).length, 4)
+    canvasElement(panel).props.onKeyDown(keyEvent('z', { ctrl: true }))
+    await settle(panel)
+    assert.equal(nodeElements(panel).length, 3, 'the placeholder is one undo step')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// G26: the edge reaches the store.
+//
+// The gesture is only worth anything if the edge survives a reload, and that is
+// the half the pure functions cannot prove: the flush has to carry it, the route
+// has to pass it through, and `saveLayout` has to merge it without dropping what
+// was already there. Asserted against the real modules from `src/` — the testlib
+// bundles are a snapshot, and this contract is current.
+// ---------------------------------------------------------------------------
+
+/** A board on a temp dir with two recorded pictures. */
+async function seededBoard() {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-g26-'))
+  const write = await recordItemsLive(dir, undefined, [
+    { path: 'C:/out/iaaa1.png', markdownPath: 'C:/out/iaaa1.png', width: 1024, height: 1024, bytes: 1, mediaType: 'image/png', prompt: 'a' },
+    { path: 'C:/out/ibbb2.png', markdownPath: 'C:/out/ibbb2.png', width: 1024, height: 1024, bytes: 1, mediaType: 'image/png', prompt: 'b' },
+  ])
+  return { dir, boardId: write.board.id, items: write.items }
+}
+
+test('G26: a layout entry passes parents through, and drops junk instead of refusing', () => {
+  const withParents = parseBoardActionLive({
+    action: 'layout',
+    items: [{ id: 'ia', x: 1, y: 2, parents: ['ib', 'ib', '  ', 7] }],
+  })
+  assert.deepEqual(withParents.items, [{ id: 'ia', x: 1, y: 2, parents: ['ib', 'ib'] }])
+
+  // Without parents the entry is **byte-identical** to what this parser always
+  // produced — no empty `parents: []` appearing in every board write.
+  const bare = parseBoardActionLive({ action: 'layout', items: [{ id: 'ia', x: 1, y: 2 }] })
+  assert.deepEqual(bare.items, [{ id: 'ia', x: 1, y: 2 }])
+  assert.ok(!('parents' in bare.items[0]))
+
+  // A malformed lineage payload must not cost the user the position they dragged.
+  assert.deepEqual(
+    parseBoardActionLive({ action: 'layout', items: [{ id: 'ia', x: 1, y: 2, parents: 'nope' }] }).items,
+    [{ id: 'ia', x: 1, y: 2 }],
+  )
+  assert.deepEqual(
+    parseBoardActionLive({ action: 'layout', items: [{ id: 'ia', x: 1, y: 2, parents: [1, 2] }] }).items,
+    [{ id: 'ia', x: 1, y: 2 }],
+  )
+})
+
+test('G26: saveLayout merges parents as a union, and a position-only write changes nothing', async () => {
+  const seeded = await seededBoard()
+  try {
+    const [first, second] = seeded.items
+    // A pre-existing edge on the target, to prove the merge never replaces.
+    await saveLayoutLive(seeded.dir, seeded.boardId, { items: [{ id: second.id, x: 600, y: 0, parents: [first.id] }] })
+    let board = await readBoardLive(seeded.dir, seeded.boardId)
+    assert.deepEqual(board.items.find((item) => item.id === second.id).parents, [first.id])
+
+    // A position-only write (the pre-G26 request shape) leaves the edge alone.
+    await saveLayoutLive(seeded.dir, seeded.boardId, { items: [{ id: second.id, x: 640, y: 20 }] })
+    board = await readBoardLive(seeded.dir, seeded.boardId)
+    const moved = board.items.find((item) => item.id === second.id)
+    assert.deepEqual(moved.parents, [first.id], 'a drag must not erase lineage')
+    assert.equal(moved.x, 640, 'and the position still lands')
+
+    // Adding an edge is additive and de-duplicated; the stored order is kept.
+    await saveLayoutLive(seeded.dir, seeded.boardId, { items: [{ id: second.id, x: 640, y: 20, parents: ['iz9', first.id] }] })
+    board = await readBoardLive(seeded.dir, seeded.boardId)
+    assert.deepEqual(board.items.find((item) => item.id === second.id).parents, [first.id, 'iz9'])
+  } finally {
+    rmSync(seeded.dir, { recursive: true, force: true })
+  }
+})
+
+test('G26: the edge a drag creates survives the real flush, the route and a re-read', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    movePointer(mounted, { x: 700, y: 100 })
+    await settle(panel)
+    releasePointer(mounted)
+    await settle(panel)
+    assert.equal(edgeCount(panel), 1)
+
+    // DD12's debounce: one write, after the drag settles.
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    await settle(panel)
+    const flushes = boardMutations(network).filter((action) => action.action === 'layout')
+    assert.equal(flushes.length, 1, 'the edge rides on the layout flush, not a second mechanism')
+    assert.deepEqual(flushes[0].items, [{ id: 'ibbb2', x: 600, y: 0, parents: ['iaaa1'] }])
+
+    // The same body, through the real route parser and the real store. The
+    // harness board uses readable fixture ids ('iaaa1'/'ibbb2'); a real board
+    // keys its nodes by item id, so the ids are translated the way a real board
+    // would already agree on them.
+    const seeded = await seededBoard()
+    try {
+      const idOf = (name) => seeded.items.find((item) => item.path.endsWith(name)).id
+      const items = flushes[0].items.map((item) => ({
+        ...item,
+        id: idOf(item.id + '.png'),
+        ...(item.parents === undefined ? {} : { parents: item.parents.map((parent) => idOf(parent + '.png')) }),
+      }))
+      const action = parseBoardActionLive({ action: 'layout', board: seeded.boardId, items })
+      await saveLayoutLive(seeded.dir, seeded.boardId, { items: action.items })
+      const board = await readBoardLive(seeded.dir, seeded.boardId)
+      const target = board.items.find((item) => item.path === 'C:/out/ibbb2.png')
+      const source = board.items.find((item) => item.path === 'C:/out/iaaa1.png')
+      assert.deepEqual(target.parents, [source.id], 'after a reload the edge is still there')
+    } finally {
+      rmSync(seeded.dir, { recursive: true, force: true })
+    }
   } finally {
     mounted.restoreFrames()
     network.restore()

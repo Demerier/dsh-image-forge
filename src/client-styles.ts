@@ -108,6 +108,12 @@ export const STUDIO_CSS = `
 /* G26: where the wire would land. Same green the run states use for "will do
    the right thing", not a warning colour. */
 .dsh-forge-node.is-connect-target{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.35)}
+/* G26: the placeholder a wire creates. A dashed frame is the whole message: this
+   is a promise of a node, not a node with a picture in it. */
+.dsh-forge-node.is-draft{display:flex;flex-direction:column;gap:6px;padding:10px;border-style:dashed;border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.05);cursor:grab}
+.dsh-forge-draft-head{font-size:11.5px;font-weight:600;letter-spacing:.02em;color:#3b82f6}
+.dsh-forge-draft-body{font-size:10.5px;opacity:.7;line-height:1.5;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;word-break:break-all}
+.dsh-forge-draft-actions{display:flex;gap:4px;margin-top:auto;flex-wrap:wrap}
 .dsh-forge-node img{display:block;width:100%;height:200px;object-fit:contain;background:rgba(127,127,127,.14);pointer-events:none}
 .dsh-forge-node-meta{padding:4px 8px 5px;font-size:10px;opacity:.62;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-forge-node-actions{display:flex;gap:4px;padding:0 6px 6px;flex-wrap:wrap}

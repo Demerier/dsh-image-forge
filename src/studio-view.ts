@@ -261,7 +261,21 @@ interface TaskCanvasNode extends CanvasNodeBase {
   error?: string
 }
 
-type CanvasNode = ImageCanvasNode | TaskCanvasNode | LayoutCanvasNode
+/**
+ * A node that exists on the canvas but has no picture yet (G26).
+ *
+ * This is what a wire dropped on blank canvas creates when the choice is 「图片
+ * 生成」: a place on the board, holding the lineage the wire expressed, waiting
+ * for a prompt. It is deliberately **not** a board entry — nothing is written
+ * until the user really generates, so dropping a wire can never leave a phantom
+ * item behind. Selecting it and pressing 生成 replaces it in place with the
+ * picture, and the picture inherits `parents`, which is the whole point.
+ */
+interface DraftCanvasNode extends CanvasNodeBase {
+  readonly kind: 'draft'
+}
+
+type CanvasNode = ImageCanvasNode | TaskCanvasNode | LayoutCanvasNode | DraftCanvasNode
 
 /** Narrowing helper: the render and lineage paths only read pictures' files. */
 function isImageNode(node: CanvasNode): node is ImageCanvasNode {
@@ -276,6 +290,28 @@ function isTaskNode(node: CanvasNode): node is TaskCanvasNode {
 /** Narrowing helper for the layout node and its editor mount. */
 function isLayoutNode(node: CanvasNode): node is LayoutCanvasNode {
   return node.kind === 'layout'
+}
+
+/** Narrowing helper for the placeholder a wire creates before there is a picture. */
+function isDraftNode(node: CanvasNode): node is DraftCanvasNode {
+  return node.kind === 'draft'
+}
+
+/**
+ * A node named in one line, for captions that have to say where something came
+ * from (G26's draft node, and any future edge tooltip).
+ *
+ * A task node has no file, so its prompt is the only name it has; a layout node
+ * is named by what it is.
+ */
+function describeNode(node: CanvasNode): string {
+  if (isImageNode(node)) return node.image.path.split(/[\\/]/).pop() ?? '图片'
+  if (isLayoutNode(node)) return 'MOSS 布局'
+  if (isTaskNode(node)) {
+    const first = node.params.prompt.split('\n')[0]?.trim() ?? ''
+    return first.length === 0 ? '生成任务' : first.slice(0, 24)
+  }
+  return '待生成'
 }
 
 /**
@@ -1208,6 +1244,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   // to the centre rather than inventing a spot.
   const pointerScreenRef = useRef<Point | undefined>(undefined)
   const frameRef = useRef<number | undefined>(undefined)
+  // G26: the prompt field. A node created by dropping a wire is a promise that
+  // the next thing the user does is describe a picture, so the drop moves the
+  // cursor there instead of leaving them to find the form.
+  const promptRef = useRef<HTMLTextAreaElement | null>(null)
   // The marquee rectangle is screen-space DOM, not part of the scaled layer
   // (§6.1: its border must not zoom).
   const [marquee, setMarquee] = useState<MarqueeBox | undefined>(undefined)
@@ -1554,7 +1594,15 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       items: nodesRef.current
         .filter((node) => dirtyIdsRef.current.has(node.id))
         .filter((node) => isImageNode(node) || persistedIdsRef.current.has(node.id))
-        .map((node) => ({ id: node.id, x: node.x, y: node.y })),
+        // G26: an edge rides along with the position it was drawn at. `parents`
+        // is omitted for a node without lineage, so a board that never used the
+        // gesture sends byte-identical requests to the ones it always did.
+        .map((node) => ({
+          id: node.id,
+          x: node.x,
+          y: node.y,
+          ...(node.parents.length === 0 ? {} : { parents: [...node.parents] }),
+        })),
       ...(cameraChanged ? { camera } : {}),
     })
     if (error !== undefined) {
@@ -2662,23 +2710,6 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   }, [])
 
   /**
-   * Run one choice of the node-type menu (G26 §1).
-   *
-   * All three build *at the drop point*, with the source node as parent — that is
-   * the difference between this menu and the blank-canvas right-click menu, which
-   * has no origin to grow from.
-   */
-  const runConnectTarget = useCallback((target: ConnectTarget) => {
-    const open = wireMenu
-    setWireMenu(undefined)
-    if (open === undefined) return
-    const label = connectMenuItems().find((item) => item.id === target)?.label ?? target
-    // The three writers land with the next change; until then the menu says what
-    // it is about to do rather than pretending it did something.
-    setNote(`已选择「${label}」：落点已记录，建节点会在下个版本接线。`)
-  }, [wireMenu])
-
-  /**
    * Pointer-down on a node's output handle (G26 §1).
    *
    * `stopPropagation` is what keeps the node's own drag from starting — the
@@ -3339,6 +3370,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         })
         continue
       }
+      // G26: a draft has no board entry yet — nothing was written when the wire
+      // was dropped, so an export has nothing to export for it.
+      if (isDraftNode(node)) continue
       items.push({
         ...(base ?? placeholder(node.id, 'layout')),
         id: node.id,
@@ -3477,7 +3511,12 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   }, [pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes])
 
   /** Create a layout node with the default 1536×1024 draft (C13 step 5). */
-  const addLayoutNode = useCallback(() => {
+  const addLayoutNode = useCallback((options: {
+    /** Where it goes; omitted means "append to the board" (the toolbar path). */
+    readonly spot?: Point
+    /** Lineage the node is born with — a wire drop names its source (G26). */
+    readonly parents?: readonly string[]
+  } = {}) => {
     const draft: BoardLayoutDraft = {
       width: DEFAULT_LAYOUT_WIDTH,
       height: DEFAULT_LAYOUT_HEIGHT,
@@ -3486,13 +3525,13 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       summary: { caption: '' },
       items: [],
     }
-    const spot = nextNodeSpot(nodesRef.current.map(nodeRect))
+    const spot = options.spot ?? nextNodeSpot(nodesRef.current.map(nodeRect))
     const node: LayoutCanvasNode = {
       kind: 'layout',
       id: makeLayoutNodeId(),
       x: spot.x,
       y: spot.y,
-      parents: [],
+      parents: options.parents === undefined ? [] : [...options.parents],
       w: LAYOUT_NODE_DEFAULT_WIDTH,
       h: layoutNodeHeight(LAYOUT_NODE_DEFAULT_WIDTH, draft),
       draft,
@@ -3580,6 +3619,79 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         payload: { path: asset.path, mediaType: asset.mediaType, name },
       }]
     })
+  }, [])
+
+  /**
+   * Put an uncommitted placeholder on the canvas (G26).
+   *
+   * The drop says "here, and it came from there"; the picture does not exist yet.
+   * So this writes a node and **nothing else** — no board entry, no request, no
+   * `persistedIds`. The next form generation replaces it in place through the
+   * existing `pendingReplaceRef` path, which already knows how to swap a node for
+   * the picture that lands on it (the §4.5 edit-and-resend channel), and the
+   * picture takes `parents` with it.
+   */
+  const addDraftNode = useCallback((spot: Point, sourceId: string) => {
+    const node: DraftCanvasNode = {
+      kind: 'draft',
+      id: makeClientId(),
+      x: spot.x,
+      y: spot.y,
+      parents: [sourceId],
+    }
+    const before = nodesRef.current
+    const after = [...before, node]
+    writeNodes(after)
+    // §6.5 lists "add node" among the undoable commands, and a draft costs even
+    // less to revert than a layout node: nothing was ever written.
+    pushCommand(snapshotCommand('add-draft', before, after, (list) => { writeNodes([...list]) }))
+    setSelection(new Set([node.id]))
+    return node
+  }, [pushCommand, writeNodes])
+
+  /**
+   * Run one choice of the node-type menu (G26 §1).
+   *
+   * All three build at the drop point with the source node as parent — that is
+   * what makes this menu different from the blank-canvas right-click menu, which
+   * has no origin to grow from.
+   */
+  const runConnectTarget = useCallback((target: ConnectTarget) => {
+    const open = wireMenu
+    setWireMenu(undefined)
+    if (open === undefined) return
+    const source = nodesRef.current.find((node) => node.id === open.sourceId)
+    if (target === 'image') {
+      // Pre-fill the form with the source as a reference: the wire says "make
+      // the next thing from this one", and a reference is how this workbench
+      // expresses that. A layout node has no file, so it contributes the parent
+      // id through the draft node instead (see `startGeneration`).
+      if (source !== undefined) referenceNode(source)
+      const draft = addDraftNode(open.world, open.sourceId)
+      // The very next form generation lands on this node instead of appending.
+      pendingReplaceRef.current = { id: draft.id }
+      setNote('已在这里放一个待生成的节点（血缘指向来源）。写下提示词再点「生成」，图会落在这个位置。')
+      promptRef.current?.focus()
+      return
+    }
+    if (target === 'layout') {
+      addLayoutNode({ spot: open.world, parents: [open.sourceId] })
+      setNote('已在这里建布局节点，血缘指向来源节点；在里面拖画框、写 summary.caption 再点「生成」。')
+      return
+    }
+    // 'asset' is rendered disabled; reaching here means the menu changed without
+    // a handler, so say so instead of silently doing nothing.
+    setNote('「放入素材」还没有接线：先在素材页选图，再用 Ctrl+V 放到画布。')
+  }, [addDraftNode, addLayoutNode, referenceNode, wireMenu])
+
+  /**
+   * Focus the prompt for the node the user is about to describe.
+   *
+   * Kept as a callback so the draft node's own action row can reuse it: the point
+   * of a draft is that the next thing the user does is type.
+   */
+  const focusPrompt = useCallback(() => {
+    promptRef.current?.focus()
   }, [])
 
   /**
@@ -3856,6 +3968,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       case 'new-layout':
         addLayoutNode()
         break
+      case 'draft-focus':
+        // G26: the placeholder's only real action is "go describe the picture".
+        focusPrompt()
+        break
       case 'copy-item':
       case 'move-item': {
         // G25: the picker, not a dialog. It opens where the menu was and lists
@@ -3889,6 +4005,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     exportBoardJson,
     exportContactSheet,
     fitView,
+    focusPrompt,
     generateLayoutNode,
     menu?.target,
     menu?.x,
@@ -4457,6 +4574,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
           ),
           createElement('textarea', {
             className: 'dsh-forge-textarea',
+            ref: promptRef,
             value: prompt,
             placeholder: '描述你想要的画面。写完可以点「优化提示词」，让对话模型按 Qwen-Image 的写法改写一遍再生成。',
             maxLength: STUDIO_MAX_PROMPT_CHARS,
@@ -4813,6 +4931,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                     selected ? 'is-selected' : '',
                     node.kind === 'task' ? 'is-task' : '',
                     node.kind === 'layout' ? 'is-layout' : '',
+                    node.kind === 'draft' ? 'is-draft' : '',
                     // G26: the node the wire would land on, so the drop is not a
                     // surprise — the wire snaps to this node's input handle too.
                     wire !== undefined && wire.targetId === node.id ? 'is-connect-target' : '',
@@ -4944,6 +5063,47 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                       title: '拖动改变显示宽度（高度随 draft 比例）',
                       onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { startLayoutResize(event, node) },
                     }),
+                    connectHandle(node),
+                  )
+                }
+                // G26: the placeholder a wire creates. It says what it is waiting
+                // for, and nothing about it is a board entry yet — the caption is
+                // a note to the user, not metadata.
+                if (isDraftNode(node)) {
+                  const source = nodesRef.current.find((entry) => entry.id === node.parents[0])
+                  return createElement(
+                    'div',
+                    { ...frame, title: '待生成：写下提示词，图会落在这个位置' },
+                    createElement('div', { className: 'dsh-forge-draft-head' }, '待生成'),
+                    createElement(
+                      'div',
+                      { className: 'dsh-forge-draft-body' },
+                      source === undefined ? '来源节点已不在画布上' : '来源：' + describeNode(source),
+                    ),
+                    createElement(
+                      'div',
+                      { className: 'dsh-forge-draft-actions' },
+                      createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-forge-node-btn',
+                          title: '把光标放到提示词输入框',
+                          onClick: () => { focusPrompt() },
+                        },
+                        '写提示词',
+                      ),
+                      createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-forge-node-btn is-danger',
+                          title: '从画布移除（不删文件）',
+                          onClick: () => { removeNode(node.id) },
+                        },
+                        '移除',
+                      ),
+                    ),
                     connectHandle(node),
                   )
                 }

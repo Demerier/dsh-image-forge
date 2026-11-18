@@ -640,8 +640,11 @@ export function shortcutContext(flags: ShortcutTargetFlags): ShortcutContext {
 /* Context menu (§6.4)                                                        */
 /* -------------------------------------------------------------------------- */
 
-/** The node kinds of §3.3; this build only ever makes image nodes. */
-export type NodeKind = 'image' | 'task' | 'layout'
+/**
+ * The node kinds of §3.3, plus the uncommitted placeholder G26 puts on the
+ * canvas: a node that exists but has no picture yet, and no board entry either.
+ */
+export type NodeKind = 'image' | 'task' | 'layout' | 'draft'
 
 /** What a right-click landed on, flattened out of the DOM event. */
 export interface ContextMenuTarget {
@@ -730,6 +733,14 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
       { id: 'layout-export-draft', label: '导出 draft', disabled: true, hint: '尚未接线：内嵌编辑器底部有导出按钮' },
       { id: 'layout-export-compiled', label: '导出 compiled', disabled: true, hint: '尚未接线：内嵌编辑器底部有导出按钮' },
       { id: 'remove', label: '删除节点' },
+    ]
+  }
+  if (kind === 'draft') {
+    // G26: a placeholder has no picture, so none of the image actions mean
+    // anything on it — offering them would be a menu that lies.
+    return [
+      { id: 'draft-focus', label: '去填提示词', hint: '光标跳到提示词输入框；生成会落在它的位置' },
+      { id: 'remove', label: '从画布移除' },
     ]
   }
   const count = Math.max(1, Math.floor(target.selectionSize ?? 1))
