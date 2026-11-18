@@ -78,6 +78,7 @@ import {
   visibleNodes,
   visibleWorldRect,
   wheelIntent,
+  worldToScreen,
   zoomAt,
   zoomLabel,
   type Camera,
@@ -110,6 +111,17 @@ import {
   type DistributeAxis,
   type NodeRect,
 } from './canvas-interactions.ts'
+import {
+  beginConnection,
+  connectMenuItems,
+  linkParents,
+  previewPath,
+  resolveDrop,
+  updateConnection,
+  type ConnectTarget,
+  type ConnectNode,
+  type ConnectionState,
+} from './canvas-connections.ts'
 import {
   DEFAULT_LAYOUT_HEIGHT,
   DEFAULT_LAYOUT_WIDTH,
@@ -307,6 +319,20 @@ type Gesture =
     readonly startW: number
     /** Node list at pointer-down, for the one undo step (§6.5). */
     readonly before: readonly CanvasNode[]
+  }
+  | {
+    kind: 'connect'
+    /**
+     * The state machine's current step (G26).
+     *
+     * Mutable on purpose — the gesture object lives in a ref and every pointer
+     * move advances this one field, exactly like `NudgeSession.after`. The React
+     * mirror in `wire` is replaced wholesale so the preview repaints.
+     */
+    state: ConnectionState
+    /** The canvas box's client offset, so a move converts without a reflow. */
+    readonly left: number
+    readonly top: number
   }
 
 /** A marquee's on-screen rectangle, in viewport-relative pixels. */
@@ -1206,6 +1232,21 @@ export function StudioPanel(): ReturnType<typeof createElement> {
   // and losing the canvas; this is the node id being looked at, and everything
   // else (the picture, its title, its neighbours) is derived from the board.
   const [lightboxId, setLightboxId] = useState<string | undefined>(undefined)
+  // G26: the wire being dragged out of a node's output handle. `undefined` when
+  // no wire is in flight; the state machine itself lives in
+  // `./canvas-connections.ts` and this is only the render mirror of it.
+  const [wire, setWire] = useState<ConnectionState | undefined>(undefined)
+  // G26: where a wire dropped on blank canvas landed, and what it may become.
+  // Screen-space like the context menu, because a menu that scaled with the zoom
+  // would be unreadable at 0.1.
+  const [wireMenu, setWireMenu] = useState<{
+    readonly x: number
+    readonly y: number
+    /** Release point in world units: the new node's top-left corner. */
+    readonly world: Point
+    /** The node the wire came from, which becomes the new node's parent. */
+    readonly sourceId: string
+  } | undefined>(undefined)
   // Space is a *held* state, so it lives in a ref the pointer handler can read at
   // pointer-down and in state only for the cursor affordance (§6.3, §6.6).
   const panRef = useRef(false)
@@ -2565,6 +2606,126 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     setSelection(id === undefined ? new Set() : new Set([id]))
   }, [])
 
+  /* ------------------------------------------------------------------------ */
+  /* G26: dragging a wire out of a handle                                      */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Every node as the connection layer needs it: geometry plus lineage.
+   *
+   * Deliberately the **full** board, not `shown`: a wire may be dropped on a node
+   * the culling pass left out (a huge board scrolled away from its parent), and
+   * the cycle check has to see the parents of nodes that are not painted.
+   */
+  const connectNodes = useCallback((): Array<ConnectNode & { readonly parents: readonly string[] }> => (
+    nodesRef.current.map((node) => ({ ...nodeRect(node), id: node.id, parents: node.parents }))
+  ), [])
+
+  /**
+   * Turn a released wire into an edge: `to.parents += from`.
+   *
+   * No request is made. That is the whole point of the gesture (G26): "this one
+   * came from that one" used to be expressible only by generating a picture, so
+   * recording lineage cost a GPU run. Persistence rides on the same write the
+   * position does — `persistLayout` for pictures, `scheduleLayoutPersist` for a
+   * layout node, and the picture a task becomes for a task node — so there is one
+   * board write per change, not a second mechanism.
+   *
+   * A re-drop of the same wire changes nothing, and `linkParents` returning the
+   * identical array is how that is detected: no undo step, no save, no note.
+   */
+  const commitWireEdge = useCallback((fromId: string, toId: string) => {
+    const target = nodesRef.current.find((node) => node.id === toId)
+    const source = nodesRef.current.find((node) => node.id === fromId)
+    if (target === undefined || source === undefined) return
+    const parents = linkParents(target.parents, fromId)
+    if (parents === target.parents) {
+      setNote('这两个节点已经连着了。')
+      return
+    }
+    const before = nodesRef.current
+    const after = before.map((node) => (node.id === toId ? { ...node, parents } : node))
+    writeNodes(after)
+    pushCommand(snapshotCommand('connect-edge', before, after, (list) => { writeNodes([...list]) }))
+    // A picture's lineage is part of its board entry, so the same debounced
+    // layout write that carries positions carries the edge (G26 + DD12).
+    markDirty([toId])
+    scheduleLayout()
+    // A layout node persists through its own writer, which already sends parents.
+    if (isLayoutNode(target)) scheduleLayoutPersist(toId)
+    setNote('已连线：' + (isImageNode(source) ? '来源图' : '来源节点') + ' → 这个节点；不会触发生成。')
+  }, [markDirty, pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes])
+
+  /** Release a wire on blank canvas: ask what to build there (G26). */
+  const openWireMenu = useCallback((world: Point, sourceId: string, screen: Point) => {
+    setWireMenu({ x: screen.x, y: screen.y, world, sourceId })
+  }, [])
+
+  /**
+   * Run one choice of the node-type menu (G26 §1).
+   *
+   * All three build *at the drop point*, with the source node as parent — that is
+   * the difference between this menu and the blank-canvas right-click menu, which
+   * has no origin to grow from.
+   */
+  const runConnectTarget = useCallback((target: ConnectTarget) => {
+    const open = wireMenu
+    setWireMenu(undefined)
+    if (open === undefined) return
+    const label = connectMenuItems().find((item) => item.id === target)?.label ?? target
+    // The three writers land with the next change; until then the menu says what
+    // it is about to do rather than pretending it did something.
+    setNote(`已选择「${label}」：落点已记录，建节点会在下个版本接线。`)
+  }, [wireMenu])
+
+  /**
+   * Pointer-down on a node's output handle (G26 §1).
+   *
+   * `stopPropagation` is what keeps the node's own drag from starting — the
+   * handle sits inside the node frame, so without it grabbing the dot would also
+   * grab the picture. Pointer capture goes on the handle: the moves then bubble
+   * through the node and the canvas layer to the one `onCanvasPointerMove`, which
+   * is where every other gesture is flushed too.
+   */
+  const onHandlePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>, node: CanvasNode) => {
+    if (event.button !== 0) return
+    event.stopPropagation()
+    event.preventDefault()
+    setMenu(undefined)
+    setTransfer(undefined)
+    setWireMenu(undefined)
+    event.currentTarget.setPointerCapture(event.pointerId)
+    // The canvas box, not the handle's: the handle is a 10-px dot on a scaled
+    // layer, so its own rectangle says nothing about where the pointer is in the
+    // viewport. Before the canvas has been measured (first frame, and the test
+    // harness, which has no DOM) the handle's box is the only one there is.
+    const box = canvasRef.current?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect()
+    const screen = { x: event.clientX - box.left, y: event.clientY - box.top }
+    const state = beginConnection({
+      source: { id: node.id, ...nodeRect(node) },
+      point: screenToWorld(cameraRef.current, screen),
+      screen,
+    })
+    gestureRef.current = { kind: 'connect', state, left: box.left, top: box.top }
+    setWire(state)
+  }, [])
+
+  /**
+   * The output dot every node wears (G26).
+   *
+   * One element, three node kinds: the handle is about *lineage*, not about what
+   * the node holds, so an image, a task and a layout node all pull a wire the
+   * same way. `data-connect="out"` is the stable hook the panel tests address —
+   * a class name can change, a data contract should not.
+   */
+  const connectHandle = useCallback((node: CanvasNode) => createElement('div', {
+    className: 'dsh-forge-handle',
+    'data-connect': 'out',
+    'data-node-id': node.id,
+    title: '拖出连线：拖到空白处新建节点，拖到已有节点上只连边（不生成）',
+    onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { onHandlePointerDown(event, node) },
+  }), [onHandlePointerDown])
+
   /**
    * Pointer-down on blank canvas: marquee by default, pan on Space / middle.
    *
@@ -2578,9 +2739,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     if (event.button !== 0 && event.button !== 1) return
     const target = event.target as HTMLElement
     // Any click outside the menu dismisses it (§6.4), and the same goes for the
-    // board picker a copy/move entry opens (G25).
+    // board picker a copy/move entry opens (G25) and for the node-type menu a
+    // wire drop opens (G26).
     setMenu(undefined)
     setTransfer(undefined)
+    setWireMenu(undefined)
     // G12: remember where the pointer is, in viewport pixels, so a later paste
     // lands under it. Recorded before the node check because a click on a node
     // is just as good a "the user is looking here" signal as a click on blank.
@@ -2696,6 +2859,21 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       )))
       return
     }
+    if (gesture.kind === 'connect') {
+      // G26: the pointer arrives in client pixels; the state machine wants both
+      // spaces — screen for the threshold (so the gesture feels identical at any
+      // zoom) and world for the hit test. `updateConnection` is the only place
+      // that decides which phase the wire is in.
+      const screen = { x: pointer.x - gesture.left, y: pointer.y - gesture.top }
+      const next = updateConnection(gesture.state, {
+        point: screenToWorld(cameraRef.current, screen),
+        screen,
+        nodes: connectNodes(),
+      })
+      gesture.state = next
+      setWire(next)
+      return
+    }
     // Marquee: the two corners are viewport-relative, so the world rectangle is
     // exactly what `screenToWorld` says it is (C08 `marqueeWorldRect`). Hits are
     // tested against the full board, and the selection updates live so the
@@ -2711,7 +2889,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       width: Math.abs(current.x - start.x),
       height: Math.abs(current.y - start.y),
     })
-  }, [applyPositions, writeNodes])
+  }, [applyPositions, connectNodes, writeNodes])
 
   /**
    * Buffer the pointer and let one animation frame apply it.
@@ -2758,6 +2936,25 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       // save, and nothing for the undo stack (§6.5 lists node changes only).
       return
     }
+    if (gesture.kind === 'connect') {
+      // G26: the release is classified by the same pure function the unit tests
+      // pin down. Nothing is created here unless the wire really travelled and
+      // really landed somewhere — a click, an Esc and a drag back onto the source
+      // all fall out as `cancel`.
+      setWire(undefined)
+      const result = resolveDrop(gesture.state, connectNodes())
+      if (result.kind === 'edge') {
+        commitWireEdge(gesture.state.sourceId, result.toId)
+        return
+      }
+      if (result.kind === 'menu') {
+        // The menu is screen-space (it must not scale), the new node is
+        // world-space (the drop point is where the user pointed).
+        openWireMenu(result.worldPoint, gesture.state.sourceId, worldToScreen(cameraRef.current, result.worldPoint))
+      }
+      // `cancel`: the wire is dropped and nothing else happens.
+      return
+    }
     if (gesture.kind === 'layout-resize') {
       const resized = nodesRef.current.find((node) => node.id === gesture.id)
       if (resized === undefined || !isLayoutNode(resized) || resized.w === gesture.startW) return
@@ -2790,7 +2987,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
     // A drag moved node positions, a pan moved the camera — both are worth
     // keeping, and both go through the one debounced save.
     scheduleLayout()
-  }, [flushPointer, moveCommand, pushCommand, scheduleLayout, scheduleLayoutPersist])
+  }, [commitWireEdge, connectNodes, flushPointer, moveCommand, openWireMenu, pushCommand, scheduleLayout, scheduleLayoutPersist])
 
   /* ------------------------------------------------------------------------ */
   /* Asset flow (C12 §7): cards → canvas, cross-board copy/move, OS drops      */
@@ -3492,7 +3689,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
       case 'escape':
         // §6.3: Esc clears the selection, closes the menu and exits a marquee.
         // Dropping the gesture is what stops the next move from reopening the box.
-        if (gestureRef.current?.kind === 'marquee') {
+        if (gestureRef.current?.kind === 'marquee' || gestureRef.current?.kind === 'connect') {
           gestureRef.current = undefined
           pointerRef.current = undefined
           if (frameRef.current !== undefined) {
@@ -3500,6 +3697,10 @@ export function StudioPanel(): ReturnType<typeof createElement> {
             frameRef.current = undefined
           }
         }
+        // G26: Esc mid-drag drops the wire; nothing is created and nothing is
+        // saved, which is exactly the cancel the state machine would report.
+        setWire(undefined)
+        setWireMenu(undefined)
         setMenu(undefined)
         setTransfer(undefined)
         setMarquee(undefined)
@@ -3932,6 +4133,11 @@ export function StudioPanel(): ReturnType<typeof createElement> {
         )),
       ),
   )
+
+  // G26: the wire's `<path d>`, computed once per frame instead of twice. It is
+  // `undefined` while the gesture is armed — a click on a handle must not paint a
+  // zero-length path, which is what an empty `d` attribute would be.
+  const wirePath = wire === undefined ? undefined : previewPath(wire, graph.views)
 
   return createElement(
     'div',
@@ -4576,6 +4782,18 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                   d: edgePath(edge.from, edge.to),
                   className: 'dsh-forge-edge',
                 })),
+                // G26: the wire being dragged. Same cubic as a committed edge
+                // (`previewPath`), so release does not make it jump; it is drawn
+                // from the full node list because the target may be a node the
+                // culling pass left out.
+                wirePath === undefined
+                  ? null
+                  : createElement('path', {
+                    key: 'wire-preview',
+                    className: 'dsh-forge-edge is-preview',
+                    'data-connect-preview': wire?.phase,
+                    d: wirePath,
+                  }),
               ),
               ...shown.map((item) => {
                 const node = item.node
@@ -4595,6 +4813,9 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                     selected ? 'is-selected' : '',
                     node.kind === 'task' ? 'is-task' : '',
                     node.kind === 'layout' ? 'is-layout' : '',
+                    // G26: the node the wire would land on, so the drop is not a
+                    // surprise — the wire snaps to this node's input handle too.
+                    wire !== undefined && wire.targetId === node.id ? 'is-connect-target' : '',
                   ].filter((part) => part.length > 0).join(' '),
                   // What `onCanvasContextMenu` reads back to find the node it
                   // can only identify through `closest`.
@@ -4670,6 +4891,8 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                         ),
                       )
                       : null,
+                    // G26: the output handle, on every node kind.
+                    connectHandle(node),
                   )
                 }
                 // §8.1's layout node: the title bar is the drag handle, the
@@ -4721,6 +4944,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                       title: '拖动改变显示宽度（高度随 draft 比例）',
                       onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { startLayoutResize(event, node) },
                     }),
+                    connectHandle(node),
                   )
                 }
                 // §4.2's task node: state, parameter summary, progress, and the
@@ -4769,6 +4993,7 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                       createElement('button', { key: 'remove', type: 'button', className: 'dsh-forge-node-btn is-danger', title: '从画布移除（不会删文件）', onClick: () => { removeNode(node.id) } }, '移除'),
                     )
                     : null,
+                  connectHandle(node),
                 )
               }),
             ),
@@ -4814,6 +5039,42 @@ export function StudioPanel(): ReturnType<typeof createElement> {
                     disabled: item.disabled === true,
                     title: item.hint ?? item.label,
                     onClick: () => { runContextAction(item.id) },
+                  },
+                  item.label,
+                )),
+              ),
+            // G26: what a wire dropped on blank canvas can become. The same card
+            // family as the right-click menu (§6.4), placed at the release point:
+            // the user has already said "here" with the pointer, so a menu that
+            // opened anywhere else would ask the question twice.
+            wireMenu === undefined
+              ? null
+              : createElement(
+                'div',
+                {
+                  className: 'dsh-forge-context',
+                  role: 'menu',
+                  'data-connect-menu': 'open',
+                  'aria-label': '在这里新建',
+                  style: { left: `${String(wireMenu.x)}px`, top: `${String(wireMenu.y)}px` },
+                  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { event.stopPropagation() },
+                  onContextMenu: (event: ReactPointerEvent<HTMLDivElement>) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                  },
+                },
+                createElement('div', { className: 'dsh-forge-context-head' }, '在这里新建（血缘指向来源）'),
+                ...connectMenuItems().map((item) => createElement(
+                  'button',
+                  {
+                    key: item.id,
+                    type: 'button',
+                    role: 'menuitem',
+                    'data-connect-target': item.id,
+                    className: 'dsh-forge-context-item',
+                    disabled: item.disabled === true,
+                    title: item.hint,
+                    onClick: () => { runConnectTarget(item.id) },
                   },
                   item.label,
                 )),

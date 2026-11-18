@@ -92,8 +92,22 @@ export const STUDIO_CSS = `
 .dsh-forge-canvas-layer{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
 .dsh-forge-canvas-edges{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
 .dsh-forge-edge{fill:none;stroke:rgba(59,130,246,.5);stroke-width:2;stroke-dasharray:6 5;stroke-linecap:round;vector-effect:non-scaling-stroke}
+/* G26: the wire during the drag. Solid and a notch brighter than a committed
+   edge, because it is the one thing in flight — and dashed-free so "this is not
+   saved yet" reads through the colour, not through a second dash pattern. */
+.dsh-forge-edge.is-preview{stroke:rgba(59,130,246,.92);stroke-width:2.5;stroke-dasharray:4 4}
 .dsh-forge-node{position:absolute;box-sizing:border-box;border-radius:10px;overflow:hidden;border:1px solid rgba(127,127,127,.34);background:rgba(127,127,127,.08);cursor:grab;box-shadow:0 1px 5px rgba(0,0,0,.09)}
 .dsh-forge-node.is-selected{border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,.22),0 2px 10px rgba(0,0,0,.12);z-index:2}
+/* G26: the output handle. Invisible until it is wanted — a dot on every node
+   would compete with the picture, and the affordance belongs to hover and to the
+   selection. Pointer events follow the opacity, so an invisible dot cannot be
+   grabbed by accident. */
+.dsh-forge-handle{position:absolute;right:2px;top:50%;width:11px;height:11px;margin-top:-5.5px;border-radius:50%;border:1.5px solid #fff;background:#3b82f6;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:crosshair;opacity:0;pointer-events:none;transition:opacity .12s ease;touch-action:none}
+.dsh-forge-node:hover .dsh-forge-handle,.dsh-forge-node.is-selected .dsh-forge-handle,.dsh-forge-handle:focus-visible{opacity:1;pointer-events:auto}
+.dsh-forge-handle:hover{transform:scale(1.18)}
+/* G26: where the wire would land. Same green the run states use for "will do
+   the right thing", not a warning colour. */
+.dsh-forge-node.is-connect-target{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.35)}
 .dsh-forge-node img{display:block;width:100%;height:200px;object-fit:contain;background:rgba(127,127,127,.14);pointer-events:none}
 .dsh-forge-node-meta{padding:4px 8px 5px;font-size:10px;opacity:.62;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsh-forge-node-actions{display:flex;gap:4px;padding:0 6px 6px;flex-wrap:wrap}

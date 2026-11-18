@@ -1971,6 +1971,278 @@ test('right-click offers the §6.4 menu for blank canvas and for an image node',
 })
 
 // ---------------------------------------------------------------------------
+// G26: drag a wire out of a node's handle.
+//
+// The pointer plumbing is executed for real (the handlers the browser would
+// call are called directly), so what a drag decides — an edge, a menu, or
+// nothing at all — is asserted end to end through the bundle. What this cannot
+// prove is the feel: capture, paint and the hover reveal stay a manual check
+// (§14.5), exactly like every other gesture here.
+// ---------------------------------------------------------------------------
+
+/** Every output handle on the canvas, in render order. */
+function handleElements(panel) {
+  const handles = []
+  fakeVisit(panel.tree, (entry) => {
+    if (entry.props['data-connect'] === 'out') handles.push(entry)
+  })
+  return handles
+}
+
+/** The wire being dragged, or `undefined` when none is in flight. */
+function previewWire(panel) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.props['data-connect-preview'] !== undefined) found = entry
+  })
+  return found
+}
+
+/** How many committed lineage edges the canvas paints. */
+function edgeCount(panel) {
+  let count = 0
+  fakeVisit(panel.tree, (entry) => {
+    if (entry.props['data-connect-preview'] !== undefined) return
+    const className = entry.props.className
+    if (typeof className === 'string' && className.split(' ')[0] === 'dsh-forge-edge') count += 1
+  })
+  return count
+}
+
+/** The node-type menu a blank drop opens, or `undefined`. */
+function connectMenu(panel) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found === undefined && entry.props['data-connect-menu'] === 'open') found = entry
+  })
+  if (found === undefined) return undefined
+  const items = []
+  fakeVisit(found, (entry) => {
+    if (entry.type === 'button') items.push(entry)
+  })
+  return { card: found, items }
+}
+
+/**
+ * Mount the canvas board with a **queued** animation frame.
+ *
+ * §10.3 coalesces pointer moves into one frame, and the two other gesture tests
+ * drive that with `requestAnimationFrame(callback)` running the callback
+ * immediately. That stub cannot express two moves in a row: the id is assigned
+ * *after* the synchronous callback has already cleared the slot, so the next move
+ * would be read as "a frame is pending" and swallowed, which a browser never
+ * does. A wire drag is the first gesture that needs several moves, so this
+ * mount queues them and the test runs the frames a browser would have run.
+ */
+async function mountWireWorkbench() {
+  const previous = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame }
+  let nextId = 1
+  let pending = []
+  globalThis.requestAnimationFrame = (callback) => {
+    const id = nextId
+    nextId += 1
+    pending.push({ id, callback })
+    return id
+  }
+  globalThis.cancelAnimationFrame = (id) => {
+    pending = pending.filter((entry) => entry.id !== id)
+  }
+  const mounted = await mountWorkbench({ board: HARNESS_BOARD })
+  return {
+    ...mounted,
+    /** Run the frames a browser would have run before the next assertion. */
+    frames() {
+      const run = pending
+      pending = []
+      for (const entry of run) entry.callback()
+    },
+    restoreFrames() {
+      if (previous.raf === undefined) delete globalThis.requestAnimationFrame
+      else globalThis.requestAnimationFrame = previous.raf
+      if (previous.caf === undefined) delete globalThis.cancelAnimationFrame
+      else globalThis.cancelAnimationFrame = previous.caf
+    },
+  }
+}
+
+/** Press a node's handle at a screen point (the canvas box is 0,0 in the harness). */
+function pressHandle(panel, index, point) {
+  const handle = handleElements(panel)[index]
+  assert.ok(handle !== undefined, 'every node must carry an output handle')
+  handle.props.onPointerDown(pointerEvent({ clientX: point.x, clientY: point.y }))
+  return handle
+}
+
+/** Drag the pointer across the canvas and run the frame that applies it. */
+function movePointer(mounted, point) {
+  canvasElement(mounted.panel).props.onPointerMove(pointerEvent({ clientX: point.x, clientY: point.y }))
+  mounted.frames()
+}
+
+/** Release the pointer on the canvas. */
+function releasePointer(mounted) {
+  canvasElement(mounted.panel).props.onPointerUp({})
+}
+
+test('G26: every node wears an output handle, and it never starts a node drag', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    assert.equal(handleElements(panel).length, 3, 'one handle per node, on the right edge')
+    // The handle sits inside the node frame; grabbing it must not also grab the
+    // picture, or a wire drag would move the node it was pulled from.
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    movePointer(mounted, { x: 700, y: 100 })
+    await settle(panel)
+    assert.deepEqual(
+      nodeElements(panel).map((entry) => entry.props.style.left),
+      ['0px', '600px', '1200px'],
+      'a wire drag leaves every node where it was',
+    )
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G26: a drag shows a preview wire in flight and drops it on release', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    assert.equal(previewWire(panel), undefined, 'no wire before the gesture')
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    await settle(panel)
+    // Armed but not moving: a click on the dot must stay visually quiet.
+    assert.equal(previewWire(panel), undefined, 'a press alone draws nothing')
+
+    movePointer(mounted, { x: 400, y: 300 })
+    await settle(panel)
+    const preview = previewWire(panel)
+    assert.ok(preview !== undefined, 'the wire is visible while dragging')
+    assert.equal(preview.props['data-connect-preview'], 'blank')
+    assert.ok(preview.props.d.startsWith('M 200 120'), 'it starts at the source output handle')
+
+    releasePointer(mounted)
+    await settle(panel)
+    assert.equal(previewWire(panel), undefined, 'releasing clears the wire')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G26: dropping on an existing node only draws the edge — it never generates', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    assert.equal(edgeCount(panel), 0, 'this board starts with no lineage')
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    movePointer(mounted, { x: 700, y: 100 })
+    await settle(panel)
+    assert.equal(previewWire(panel).props['data-connect-preview'], 'hoverTarget', 'the target is live')
+    assert.ok(
+      nodeElements(panel)[1].props.className.includes('is-connect-target'),
+      'the node that would receive the edge says so',
+    )
+
+    releasePointer(mounted)
+    await settle(panel)
+    assert.equal(edgeCount(panel), 1, 'the edge is committed and painted')
+    assert.equal(connectMenu(panel), undefined, 'a node drop does not open the node-type menu')
+    assert.deepEqual(
+      network.calls.filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0),
+      [],
+      'connecting two nodes must not burn a GPU run',
+    )
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G26: dropping on blank canvas asks what to build there, and builds nothing yet', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    movePointer(mounted, { x: 400, y: 300 })
+    await settle(panel)
+    releasePointer(mounted)
+    await settle(panel)
+
+    const menu = connectMenu(panel)
+    assert.ok(menu !== undefined, 'a blank drop opens the node-type menu')
+    assert.deepEqual(
+      menu.items.map((entry) => fakeText(entry)),
+      ['图片生成', '布局', '放入素材'],
+    )
+    assert.equal(menu.items[2].props.disabled, true, '放入素材 is still a placeholder, and says so')
+    assert.equal(nodeElements(panel).length, 3, 'opening the menu creates nothing on its own')
+    assert.deepEqual(
+      network.calls.filter((call) => call.url.indexOf(STUDIO_GENERATE_ROUTE) === 0),
+      [],
+      'and it certainly does not generate',
+    )
+
+    // A click on the canvas dismisses it, like the right-click menu (§6.4).
+    canvasElement(panel).props.onPointerDown(pointerEvent({ clientX: 20, clientY: 20 }))
+    await settle(panel)
+    assert.equal(connectMenu(panel), undefined)
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+test('G26: a click, a drag below the threshold and a drag back home all cancel', async () => {
+  const mounted = await mountWireWorkbench()
+  const { network, panel } = mounted
+  try {
+    // 1. A plain click on the handle: no wire, no menu, no edge.
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    releasePointer(mounted)
+    await settle(panel)
+    assert.equal(connectMenu(panel), undefined)
+    assert.equal(edgeCount(panel), 0)
+
+    // 2. A twitch of two pixels is not a drag.
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    movePointer(mounted, { x: 202, y: 120 })
+    await settle(panel)
+    releasePointer(mounted)
+    await settle(panel)
+    assert.equal(connectMenu(panel), undefined)
+    assert.equal(edgeCount(panel), 0)
+
+    // 3. Dragging back over the source cancels: put it back, do not build here.
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    movePointer(mounted, { x: 700, y: 100 })
+    await settle(panel)
+    movePointer(mounted, { x: 100, y: 120 })
+    await settle(panel)
+    assert.equal(previewWire(panel).props['data-connect-preview'], 'dragging')
+    releasePointer(mounted)
+    await settle(panel)
+    assert.equal(connectMenu(panel), undefined, 'the source is not a place to build a child')
+    assert.equal(edgeCount(panel), 0)
+
+    // 4. Esc mid-drag drops the wire entirely.
+    pressHandle(panel, 0, { x: 200, y: 120 })
+    movePointer(mounted, { x: 700, y: 100 })
+    await settle(panel)
+    canvasElement(panel).props.onKeyDown(keyEvent('Escape'))
+    await settle(panel)
+    assert.equal(previewWire(panel), undefined, 'Esc drops the wire')
+    releasePointer(mounted)
+    await settle(panel)
+    assert.equal(edgeCount(panel), 0, 'and the release after it does nothing')
+  } finally {
+    mounted.restoreFrames()
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // G01/G23/G05/G12: canvas feel — wheel semantics, edge width, zoom ceiling and
 // where a paste lands. The camera maths is unit-tested in studio-canvas.test.mjs;
 // what these assert is that the *bundle* actually ships that behaviour and that
