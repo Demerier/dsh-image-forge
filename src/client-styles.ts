@@ -16,6 +16,7 @@
  */
 
 import { HANDLE_SCREEN_HIT, HANDLE_SCREEN_SIZE } from './canvas-connections.ts'
+import { XYFLOW_CSS } from './xyflow-styles.ts'
 
 /** DOM id of the injected sheet; also the idempotence guard. */
 export const CLIENT_STYLE_ID = 'dsh-image-forge-client-styles'
@@ -719,6 +720,7 @@ export const CLIENT_CSS = `
 }
 ${STUDIO_CSS}
 ${WORKBENCH_CSS}
+${XYFLOW_CSS}
 `
 
 /**

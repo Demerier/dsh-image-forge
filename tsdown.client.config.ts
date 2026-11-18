@@ -1,4 +1,8 @@
 import { defineConfig } from 'tsdown'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * The **browser half** is built separately from the host half, because it is a
@@ -41,6 +45,72 @@ import { defineConfig } from 'tsdown'
 const CLIENT_ID = 'dsh-image-forge'
 
 /**
+ * Absolute path of the installed React Flow stylesheet.
+ *
+ * Resolved through `require.resolve` on the package's own manifest so the plugin
+ * follows whatever the package manager actually installed (hoisted, pnpm virtual
+ * store, nested) instead of assuming `node_modules/@xyflow/react`.
+ */
+const XYFLOW_STYLE_PATH = join(
+  dirname(createRequire(import.meta.url).resolve('@xyflow/react/package.json')),
+  'dist',
+  'style.css',
+)
+
+/**
+ * Absolute path of the module this plugin substitutes.
+ *
+ * `src/xyflow-styles.ts` reads that stylesheet through `node:fs` so that **Node**
+ * can import it — `test/studio.test.mjs` reaches it through `client-styles.ts` via
+ * type stripping, where a `virtual:` specifier or a `?raw` import would be
+ * unresolvable. The browser build has no `fs`, so this hook answers for the file
+ * and ships the text as a literal instead.
+ */
+const XYFLOW_STYLES_MODULE = join(dirname(fileURLToPath(import.meta.url)), 'src', 'xyflow-styles.ts')
+
+/** Windows paths differ in case; compare them folded, with one separator. */
+function samePath(left: string, right: string): boolean {
+  return left.replace(/\\/g, '/').toLowerCase() === right.replace(/\\/g, '/').toLowerCase()
+}
+
+/**
+ * Replace `src/xyflow-styles.ts` with the stylesheet as a string export.
+ *
+ * The client has no stylesheet hook, so the rules must travel inside the bundle;
+ * and the loader materializes exactly one file, so they cannot be a sibling
+ * `.js`/`.css` chunk either. Reading the file here — at build time — also means
+ * the text is the CSS of the installed version, never a stale checked-in copy.
+ *
+ * The markup is a plain double-quoted string literal via `JSON.stringify`: the
+ * sheet contains quotes, `\` escapes and `url(data:…)` payloads, and a template
+ * literal would have to survive `${` sequences in raw CSS.
+ *
+ * `buildEnd` fails the build when the substitution never happened. Without that
+ * check a mis-resolved path would leave `node:fs` in a browser artifact — a
+ * broken bundle that still builds, which is the failure mode this whole file
+ * exists to prevent.
+ */
+function inlineXyflowStyles() {
+  let substituted = false
+  return {
+    name: 'dsh-forge:inline-xyflow-styles',
+    load(id: string) {
+      if (!samePath(id, XYFLOW_STYLES_MODULE)) return null
+      substituted = true
+      const css = readFileSync(XYFLOW_STYLE_PATH, 'utf8')
+      return `export const XYFLOW_CSS = ${JSON.stringify(css)};`
+    },
+    buildEnd() {
+      if (!substituted) {
+        throw new Error(
+          `inline-xyflow-styles: never saw ${XYFLOW_STYLES_MODULE} — the client bundle would keep node:fs`,
+        )
+      }
+    },
+  }
+}
+
+/**
  * Opens the factory: the shape the loader expects, byte-for-byte compatible.
  *
  * It stops short of declaring `Symbol.toStringTag` — the CJS emitter adds that
@@ -72,7 +142,28 @@ export default defineConfig({
   sourcemap: false,
   dts: { enabled: false },
   // React comes from the shell's baseline module table. Keep it a bare request.
-  deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom/client'] },
+  //
+  // `react-dom` is listed **bare**, not just `react-dom/client`: React Flow
+  // reaches for `createPortal` through `import { … } from 'react-dom'`, and a
+  // list that only names the `/client` subpath lets that second copy of React DOM
+  // be inlined into this bundle — two React DOM instances in one page throw on
+  // every portal and every event, and the failure surfaces far from here.
+  deps: {
+    neverBundle: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client'],
+    // `@xyflow/react` sits in `dependencies`, which tsdown's deps plugin
+    // externalizes by default; the whole point of this build is that React Flow
+    // *is* the artifact's content, so it has to be opted back in explicitly.
+    // Without this the bundle ships `require("@xyflow/react")` and the client
+    // fails at materialization with a module the loader cannot resolve.
+    alwaysBundle: ['@xyflow/react'],
+  },
+  plugins: [inlineXyflowStyles()],
+  // React Flow (and zustand under it) branch on `process.env.NODE_ENV`. There is
+  // no `process` in the browser, and the factory body runs at materialization —
+  // so an unreplaced oven-ready `process.env.NODE_ENV` is an immediate
+  // `ReferenceError: process is not defined` the moment the client loads this
+  // module. Substituting a literal also folds the development branches away.
+  define: { 'process.env.NODE_ENV': '"production"' },
   // `studio-shared.ts` is imported by both halves. Without this it becomes a
   // sibling chunk, and the loader materializes exactly one bundle — see the
   // structural constraints above. One entry, so rolldown accepts the flag.
