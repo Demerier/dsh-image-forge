@@ -292,6 +292,8 @@ export interface FlowEdgeSpec {
   readonly sourceHandle?: string
   readonly targetHandle?: string
   readonly data: { readonly label?: string }
+  /** Arrow marker for the child end; filled in by the pane, not the pure model. */
+  readonly markerEnd?: unknown
 }
 
 /** The whole canvas, ready to hand to React Flow. */

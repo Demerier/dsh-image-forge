@@ -461,7 +461,7 @@ export const CANVAS_FLOW_CSS = `
 .dsh-forge-flow-node.is-draft{gap:6px;padding:10px;border-style:dashed;border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.05)}
 .dsh-forge-flow-draft-title{font-size:11px;font-weight:600;opacity:.8}
 .dsh-forge-flow-draft-body{font-size:10.5px;line-height:1.5;opacity:.6}
-.dsh-forge-flow-edge{stroke:rgba(127,127,127,.55);stroke-width:1.5;fill:none}
+.dsh-forge-flow-edge{stroke:#3b82f6;stroke-width:2;fill:none;stroke-opacity:.7;vector-effect:non-scaling-stroke}
 .react-flow__edge.selected .dsh-forge-flow-edge{stroke:#3b82f6;stroke-width:2}
 .dsh-forge-flow-edge-label{position:absolute;padding:1px 5px;border-radius:4px;background:color-mix(in srgb,Canvas 88%,transparent);color:inherit;font-size:10px;line-height:1.4;opacity:.8;white-space:nowrap;pointer-events:none;box-shadow:0 0 0 1px rgba(127,127,127,.24)}
 /* U04 step 3: the wire. Painted by the pane in container pixels (see paintWire

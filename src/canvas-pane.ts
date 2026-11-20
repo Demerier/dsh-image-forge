@@ -66,6 +66,7 @@ import {
   BaseEdge,
   EdgeLabelRenderer,
   Handle,
+  MarkerType,
   Position,
   ReactFlow,
   applyNodeChanges,
@@ -110,6 +111,7 @@ import {
   type FlowDragState,
   type FlowInitialView,
   type FlowNodeSpec,
+  type FlowEdgeSpec,
   type FlowSourceNode,
   type FlowTaskAction,
   type FlowTaskStatus,
@@ -1100,7 +1102,9 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
           ReactFlow,
           {
             nodes: flowNodes,
-            edges: model.edges,
+            // A lineage wire owes the reader a direction: parent → child.
+            // React Flow builds the <marker> defs from these values.
+            edges: edgesWithArrows(model.edges),
             nodeTypes: FLOW_NODE_TYPES,
             edgeTypes: FLOW_EDGE_TYPES,
             ...interaction,
@@ -1608,6 +1612,22 @@ export const FLOW_NODE_TYPES = {
  * through `EdgeLabelRenderer` so it stays screen-sized instead of scaling with
  * the zoom.
  */
+/**
+ * Give every lineage edge a closed arrow at the child end. Kept out of the
+ * pure model (`canvas-flow-model.ts`) so that module stays free of React Flow
+ * imports and its Node-only tests keep working.
+ */
+export const LINEAGE_ARROW = {
+  type: MarkerType.ArrowClosed,
+  width: 14,
+  height: 14,
+  color: '#3b82f6',
+} as const
+
+function edgesWithArrows(edges: readonly FlowEdgeSpec[]): readonly FlowEdgeSpec[] {
+  return edges === undefined ? edges : edges.map((edge) => ({ ...edge, markerEnd: LINEAGE_ARROW }))
+}
+
 export function LineageEdge(props: EdgeProps): ReactNode {
   const [path, labelX, labelY] = getBezierPath({
     sourceX: props.sourceX,
