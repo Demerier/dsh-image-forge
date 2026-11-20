@@ -229,8 +229,10 @@ export function registerStudioRoutes(
         if (!isJson(req)) return jsonError(res, 415, 'json-required')
 
         let request: StudioEnvironmentRequest
+        let showLogRequested = false
         try {
           request = parseEnvironmentAction(JSON.parse(await readBody(req, ENVIRONMENT_MAX_BODY_BYTES)))
+          showLogRequested = request.showLog === true
         } catch (error) {
           return jsonError(res, 400, firstLine(error))
         }
@@ -262,7 +264,7 @@ export function registerStudioRoutes(
         }, HEARTBEAT_MS)
         try {
           if (action === 'start') {
-            const status = await ensureEnvironment(options, machine)
+            const status = await ensureEnvironment(options, machine, showLogRequested)
             if (!res.destroyed && !res.writableEnded) {
               const body: StudioEnvironmentResponse = { environment: environmentSnapshotOf(status) }
               res.end(JSON.stringify(body))
@@ -1156,7 +1158,8 @@ export function parseEnvironmentAction(value: unknown): StudioEnvironmentRequest
   if (typeof action !== 'string' || !(STUDIO_ENVIRONMENT_ACTIONS as readonly string[]).includes(action)) {
     throw new Error(`未知的环境操作：${String(action)}`)
   }
-  return { action: action as StudioEnvironmentAction }
+  const showLog = body.showLog === true
+  return { action: action as StudioEnvironmentAction, ...(showLog ? { showLog } : {}) }
 }
 
 /** The environment report, narrowed to the fields the panel renders. */

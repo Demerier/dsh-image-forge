@@ -186,6 +186,15 @@ PNG 落在同一个 `outputDir` 里，但「哪几张图属于同一件事」由
 - **拼版 PNG**：把画板里的图片按 4 列、256 px 缩略图拼成一张图（≤200 张，超出截断并在提示里说明），每格下方是 prompt 首行。图片经插件同源文件路由加载，正常情况**不会被跨源污染**；某张加载失败只留灰块 + 文件名，不中断整版；若 `canvas.toBlob` 仍因污染失败，面板会明确报错而不是给一张空图。
 - **增量保存口径**：拖动/对齐/微移只把变化的节点 ID 与（变化了的）相机发给服务端，700 ms 防抖，页面关闭时冲刷。用户可见的结果不变：拖完很快落盘，重开画板恢复排布与相机。
 
+## ComfyUI 的两种启动方式
+
+工作台状态行的启动入口给两种选择：
+
+- **后台启动**（默认）：ComfyUI 完全后台运行，不弹任何窗口，输出写入 `logs/dsh-image-forge-launch-*.log`。这是推荐方式——没有可被误关的窗口。
+- **启动并看日志**：同样后台拉起 ComfyUI，但另开一个 **实时刷新的日志窗口**（Windows 上用 PowerShell `Get-Content -Wait` tail 日志）。这个窗口只是**查看器**，关掉它不会停止 ComfyUI；要看回日志，用状态行的日志路径。
+
+两种方式下 ComfyUI 进程本身都是 detached + 隐藏的：面板关闭、日志窗口关闭都不影响它继续跑。工具侧 `qwen_image_setup` 的 `action="start"` 也支持 `showLog: true` 选择第二种。
+
 ## 执行后端与受管环境（T22）
 
 ### 三条运输方式，一条图
@@ -227,7 +236,8 @@ MCP `fetch_outputs` 与 CLI `download` 的 `out_dir` 指向**工作区内**的
 
 | 显示 | 含义 | 点了会发生什么 |
 |---|---|---|
-| **启动**（主按钮） | 没探到在跑的 ComfyUI | `POST /studio/environment {"action":"start"}`：按 Comfy Desktop 记录的 Python 与参数后台拉起，等 `/system_stats` 就绪；`comfyEndpoint` 配了 loopback 端口就以它为 `--port` |
+| **后台启动**（主按钮） | 没探到在跑的 ComfyUI | `POST /studio/environment {"action":"start"}`：完全后台拉起，不弹窗口；等 `/system_stats` 就绪；`comfyEndpoint` 配了 loopback 端口就以它为 `--port` |
+| **启动并看日志** | 同上 | `POST /studio/environment {"action":"start","showLog":true}`：后台拉起 + 另开实时日志窗口；窗口是独立查看器，关掉不影响 ComfyUI |
 | **停止**（次按钮） | 在跑，且**归属确认**（启动记录的 pid 还活着、命令行里仍是那个 `main.py`） | 先 `window.confirm`，再停；停完回报 `taskkill` 退出码并复核端口已关，成功则删启动记录 |
 | **停止**（禁用）+「由你自己启动的实例，插件不提供停止」 | 在跑，但不是本插件拉起的 | 什么都不会发生。插件不杀无法证明归属的进程 |
 | **启动中… / 停止中…** | 请求在路上（宿主侧单飞：连点第二次会被 409 拒绝） | 等它回来；面板不会拉起第二个实例 |

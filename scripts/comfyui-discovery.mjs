@@ -455,6 +455,47 @@ export async function systemStats(endpoint, { timeoutMs = 2500, fetchImpl = fetc
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * Open a **separate, disposable** terminal window that tails a launch log.
+ *
+ * The ComfyUI child itself is always started detached and hidden — its window
+ * would be an empty console that a user can close by accident, taking the GPU
+ * process with it. This helper opens a second process that only *reads* the log,
+ * so closing it is harmless: ComfyUI keeps running. On Windows PowerShell's
+ * `Get-Content -Wait` is a live tail; on POSIX we try a few common terminals
+ * and report which one we found. The returned child is unref'd, so the plugin
+ * can exit without holding it.
+ *
+ * @returns {object} { opened, command } — `opened` is false when no terminal
+ *   could be found; `command` is what was tried (for the report).
+ */
+export function openLogTerminal(logPath, { platform = osPlatform(), spawn: spawnImpl = spawn } = {}) {
+  let command
+  if (platform === 'win32') {
+    // -NoProfile keeps it fast; -Wait tails; -Tail caps the initial backscroll.
+    command = {
+      bin: 'powershell.exe',
+      args: ['-NoProfile', '-Command', `Get-Content -LiteralPath '${logPath}' -Wait -Tail 80`],
+    }
+  } else if (platform === 'darwin') {
+    command = { bin: 'open', args: ['-a', 'Terminal', logPath] }
+  } else {
+    command = { bin: 'x-terminal-emulator', args: ['-e', 'tail', '-f', logPath] }
+  }
+  try {
+    const child = spawnImpl(command.bin, command.args, {
+      detached: true,
+      windowsHide: false,
+      stdio: 'ignore',
+      shell: false,
+    })
+    child.unref()
+    return { opened: true, command: command.bin }
+  } catch {
+    return { opened: false, command: command.bin }
+  }
+}
+
+/**
  * Start a planned install **detached**, with its output in a log file and the pid
  * recorded next to it, and return immediately.
  *

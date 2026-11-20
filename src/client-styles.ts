@@ -354,6 +354,7 @@ export const WORKBENCH_CSS = `
 .dsh-forge-workbench-assets-entry{margin-left:auto}
 .dsh-forge-workbench-env{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 9px;border-radius:6px;font-size:11.5px;line-height:1.5;border:1px dashed rgba(127,127,127,.4);background:rgba(127,127,127,.04)}
 .dsh-forge-workbench-env-text{flex:1 1 16ch;min-width:0;opacity:.82;overflow-wrap:anywhere}
+.dsh-forge-env-start-group{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
 .dsh-forge-workbench-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;min-width:0}
 .dsh-forge-workbench-card{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:9px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.03);min-width:0}
 .dsh-forge-workbench-card:hover{border-color:rgba(59,130,246,.45)}

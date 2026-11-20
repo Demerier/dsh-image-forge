@@ -824,7 +824,7 @@ async function postBoard(body: Record<string, unknown>): Promise<string | undefi
  * the fresh snapshot describes what is left, while the stop note describes what
  * just happened.
  */
-async function postEnvironment(action: 'status' | 'start' | 'stop'): Promise<{
+async function postEnvironment(action: 'status' | 'start' | 'stop', showLog: boolean = false): Promise<{
   environment?: StudioEnvironmentSnapshot
   stopNote?: string
   error?: string
@@ -834,7 +834,7 @@ async function postEnvironment(action: 'status' | 'start' | 'stop'): Promise<{
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify(action === 'start' && showLog ? { action, showLog: true } : { action }),
     })
     const payload = (await readJson(response)) as StudioEnvironmentResponse | undefined
     if (!response.ok || payload === undefined) {
@@ -1701,12 +1701,12 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * decides whether the form is usable, so a finished start that left `ready`
    * false would show every control disabled next to a running renderer.
    */
-  const runEnvironmentAction = useCallback(async (action: 'start' | 'stop') => {
+  const runEnvironmentAction = useCallback(async (action: 'start' | 'stop', showLog: boolean = false) => {
     setEnvironmentBusy(action)
     setEnvironmentError(undefined)
     setEnvironmentNote(undefined)
     try {
-      const result = await postEnvironment(action)
+      const result = await postEnvironment(action, showLog)
       if (result.environment !== undefined) setEnvironment(result.environment)
       if (result.error !== undefined) {
         setEnvironmentError(result.error)
@@ -5036,17 +5036,32 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               '停止',
             )
             : createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-forge-btn is-primary dsh-forge-env-btn',
-                'data-env-action': 'start',
-                title: environmentArgvTitle === undefined
-                  ? '按 Comfy Desktop 记录的启动参数后台拉起 ComfyUI'
-                  : `按 Comfy Desktop 记录的参数后台拉起 ComfyUI（argv：${environmentArgvTitle}）`,
-                onClick: () => { void runEnvironmentAction('start') },
-              },
-              '启动',
+              'div',
+              { className: 'dsh-forge-env-start-group' },
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-forge-btn is-primary dsh-forge-env-btn',
+                  'data-env-action': 'start',
+                  title: environmentArgvTitle === undefined
+                    ? '完全后台拉起 ComfyUI：不弹窗口，输出写入日志文件（推荐）'
+                    : `完全后台拉起 ComfyUI（argv：${environmentArgvTitle}）`,
+                  onClick: () => { void runEnvironmentAction('start') },
+                },
+                '后台启动',
+              ),
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-forge-btn is-ghost dsh-forge-env-btn',
+                  'data-env-action': 'start-log',
+                  title: '后台拉起 ComfyUI，并另开一个实时刷新的日志窗口；该窗口只是查看器，关掉它不会停止 ComfyUI',
+                  onClick: () => { void runEnvironmentAction('start', true) },
+                },
+                '启动并看日志',
+              ),
             ),
         ready && !environmentOwned && environment?.ownershipNote === undefined
           ? createElement('span', { className: 'dsh-forge-studio-hint' }, '由你自己启动的实例，插件不提供停止')

@@ -50,6 +50,7 @@ import {
   isProcessAlive,
   launchComfyPlan,
   loopbackPortOf,
+  openLogTerminal,
   planForRun,
   processCommandLine,
   readLaunchRecord,
@@ -602,6 +603,7 @@ export async function inspectEnvironment(
 export async function ensureEnvironment(
   options: EnvironmentOptions,
   deps: EnvironmentDeps = {},
+  showLog: boolean = false,
 ): Promise<EnvironmentStatus> {
   const startedAt = nowOf(deps)()
   const inspected = await inspectEnvironment(options, deps)
@@ -741,9 +743,14 @@ export async function ensureEnvironment(
         },
       },
     )
+    // The log window is a *viewer*, never the process: ComfyUI stays detached
+    // and hidden, so closing the window cannot kill the renderer.
+    const logWindow = showLog ? openLogTerminal(launch.logPath, { platform: deps.platform ?? process.platform, spawn: deps.spawn }) : { opened: false, command: '' }
     return {
       ...ready,
-      note: `已后台拉起 ComfyUI：${endpoint}（pid ${String(launch.pid)}，面板关闭后它继续跑）。`,
+      note: logWindow.opened
+        ? `已后台拉起 ComfyUI：${endpoint}（pid ${String(launch.pid)}，面板关闭后它继续跑）。已打开实时日志窗口——它是独立的查看器，关掉它不会停止 ComfyUI。`
+        : `已后台拉起 ComfyUI：${endpoint}（pid ${String(launch.pid)}，面板关闭后它继续跑）。日志：${launch.logPath}`,
       logPath: launch.logPath,
       pid: launch.pid ?? null,
     }
@@ -1422,6 +1429,10 @@ export function registerEnvironmentTools(ctx: Context, getConfig: () => Config):
           type: 'integer',
           description: 'start 时等 /system_stats 就绪的预算（毫秒，5 秒–15 分钟），默认 180000。',
         },
+        showLog: {
+          type: 'boolean',
+          description: '仅 start 使用：true = 后台拉起 ComfyUI 后另开一个实时刷新日志的终端窗口。该窗口只是查看器，关掉它不会停止 ComfyUI；缺省 false = 完全后台、不弹窗口。',
+        },
         confirm: {
           type: 'boolean',
           description: '仅 download 使用：缺省 false = dry-run 只返回计划；true 才真的下载并落盘（体积可达 16 GiB 以上，支持断点续传）。',
@@ -1447,7 +1458,7 @@ export function registerEnvironmentTools(ctx: Context, getConfig: () => Config):
           const stop = await stopEnvironment()
           return jsonSafe({ action, environment: null, stop, summary: stop.note, elapsed_ms: Date.now() - startedAt })
         }
-        const environment = action === 'start' ? await ensureEnvironment(options) : await inspectEnvironment(options)
+        const environment = action === 'start' ? await ensureEnvironment(options, {}, args?.showLog === true) : await inspectEnvironment(options)
         const endpoint = environment.state === 'ready' ? environment.endpoint : null
         if (action === 'install') {
           const install = installGuidanceOf({}, environment.state !== 'not-installed')

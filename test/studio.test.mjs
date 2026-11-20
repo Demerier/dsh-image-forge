@@ -3324,7 +3324,7 @@ test('P2: the environment route answers status, and a second start in flight is 
   }
 })
 
-test('P2: a not-ready panel offers 启动, and clicking it posts the action', async () => {
+test('P2: a not-ready panel offers both start modes, and the background one posts the action', async () => {
   const { network, panel } = await mountWorkbench({
     configOverrides: { ready: false, reason: 'ComfyUI 没在跑（connect ECONNREFUSED）' },
     environment: (body) => (body.action === 'start'
@@ -3332,8 +3332,10 @@ test('P2: a not-ready panel offers 启动, and clicking it posts the action', as
       : { environment: { state: 'not-running', owned: false, note: '找到安装，可以启动' } }),
   })
   try {
-    const start = buttonWithText(panel, '启动')
-    assert.ok(start !== undefined, 'a not-ready status line must offer 启动')
+    const start = buttonWithText(panel, '后台启动')
+    assert.ok(start !== undefined, 'a not-ready status line must offer 后台启动')
+    const logStart = buttonWithText(panel, '启动并看日志')
+    assert.ok(logStart !== undefined, 'the live-log start mode must be offered too')
     assert.equal(start.props.disabled, undefined, 'the start button is enabled')
 
     start.props.onClick()
@@ -3361,7 +3363,7 @@ test('P2: a failed start prints the host note and the log path verbatim', async 
       : { environment: { state: 'not-running', owned: false } }),
   })
   try {
-    const start = buttonWithText(panel, '启动')
+    const start = buttonWithText(panel, '后台启动')
     assert.ok(start !== undefined)
     start.props.onClick()
     await settle(panel)
@@ -4537,3 +4539,24 @@ test('U06: the detail pane ships, and the canvas keeps its half of the single-ed
 
 
 
+
+test('P2: the live-log start posts showLog:true; background start does not', async () => {
+  const { network, panel } = await mountWorkbench({
+    configOverrides: { ready: false, reason: 'ComfyUI 没在跑' },
+    environment: (body) => (body.action === 'start'
+      ? { environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: '已后台拉起 ComfyUI。已打开实时日志窗口——它是独立的查看器，关掉它不会停止 ComfyUI。' } }
+      : { environment: { state: 'not-running', owned: false } }),
+  })
+  try {
+    const logStart = buttonWithText(panel, '启动并看日志')
+    assert.ok(logStart !== undefined)
+    logStart.props.onClick()
+    await settle(panel)
+    const posts = network.calls.filter((call) => call.url.indexOf(STUDIO_ENVIRONMENT_ROUTE) === 0 && call.method === 'POST')
+    const withLog = posts.find((call) => call.body === JSON.stringify({ action: 'start', showLog: true }))
+    assert.ok(withLog !== undefined, 'the live-log mode must post showLog:true')
+    assert.match(String(noteText(panel)), /查看器/, 'the host note explains the window is disposable')
+  } finally {
+    network.restore()
+  }
+})

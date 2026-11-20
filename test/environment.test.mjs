@@ -978,3 +978,47 @@ test('the setup tool exposes install/download and keeps the retired name banned'
   assert.match(description, /object_info/)
   assert.match(description, /computer use/)
 })
+
+test('showLog opens a separate live-log viewer without unhiding the renderer', async () => {
+  const fake = await startStatsServer()
+  try {
+    const closed = await freePort()
+    const machine = makeMachine(freshDir(), { port: fake.port })
+    const spawnCalls = []
+    const child = { pid: 4242, exitCode: null, unref() {} }
+    const viewer = { pid: 4243, exitCode: null, unref() {} }
+    let nextChild = child
+    const spawn = (...args) => { spawnCalls.push(args); return nextChild }
+    let probes = 0
+    const fetchImpl = async () => {
+      probes += 1
+      if (probes <= 1) throw new Error('connect ECONNREFUSED (fake pre-flight)')
+      return new Response(JSON.stringify({ system: { comfyui_version: 'fake-0.0' }, devices: [] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    }
+    // After the ComfyUI spawn, make the next spawn return the viewer (disposable).
+    const options = {
+      ...environmentOptionsOf({ comfyEndpoint: '', comfyPorts: String(closed), timeoutMs: 1000 }),
+      installTimeoutMs: 5000, waitIntervalMs: 20,
+    }
+    const spawnWithViewer = (...args) => {
+      const result = spawn(...args)
+      if (spawnCalls.length === 1) nextChild = viewer
+      return result
+    }
+    const status = await ensureEnvironment(options, depsOf(machine, { spawn: spawnWithViewer, fetchImpl, portProbe: async () => false }), true)
+    assert.equal(status.state, 'ready')
+    assert.equal(spawnCalls.length, 2, 'renderer + one disposable log viewer')
+    const [rendererBin, rendererArgv, rendererOpts] = spawnCalls[0]
+    const [viewerBin, viewerArgv, viewerOpts] = spawnCalls[1]
+    assert.equal(rendererBin, machine.winPython)
+    assert.equal(rendererOpts.windowsHide, true, 'the renderer stays hidden')
+    assert.match(String(viewerBin), /powershell/i)
+    assert.ok(viewerArgv.some((a) => String(a).includes('Get-Content')), 'viewer tails the log')
+    assert.equal(viewerOpts.windowsHide, false, 'the viewer is a visible window')
+    assert.match(String(status.note), /查看器|关掉/)
+  } finally {
+    await fake.close()
+  }
+})

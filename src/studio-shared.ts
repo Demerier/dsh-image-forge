@@ -348,6 +348,8 @@ export interface StudioEnvironmentStop {
  */
 export interface StudioEnvironmentRequest {
   action?: StudioEnvironmentAction
+  /** `start` only: open a disposable live-log window alongside the hidden renderer. */
+  showLog?: boolean
 }
 
 /** Answer of {@link STUDIO_ENVIRONMENT_ROUTE}. */
