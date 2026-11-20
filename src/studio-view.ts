@@ -197,6 +197,7 @@ import {
   STUDIO_GENERATE_ROUTE,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
+  STUDIO_LOG_ROUTE,
   STUDIO_NODE_THUMB_WIDTH,
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
@@ -824,7 +825,7 @@ async function postBoard(body: Record<string, unknown>): Promise<string | undefi
  * the fresh snapshot describes what is left, while the stop note describes what
  * just happened.
  */
-async function postEnvironment(action: 'status' | 'start' | 'stop', showLog: boolean = false): Promise<{
+async function postEnvironment(action: 'status' | 'start' | 'stop'): Promise<{
   environment?: StudioEnvironmentSnapshot
   stopNote?: string
   error?: string
@@ -834,7 +835,7 @@ async function postEnvironment(action: 'status' | 'start' | 'stop', showLog: boo
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(action === 'start' && showLog ? { action, showLog: true } : { action }),
+      body: JSON.stringify({ action }),
     })
     const payload = (await readJson(response)) as StudioEnvironmentResponse | undefined
     if (!response.ok || payload === undefined) {
@@ -848,6 +849,20 @@ async function postEnvironment(action: 'status' | 'start' | 'stop', showLog: boo
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : String(cause) }
   }
+}
+
+/**
+ * Read the tail of a ComfyUI launch log through the same-origin route. The
+ * panel shows it inline — no external terminal window is opened. `logPath` is
+ * the absolute path the launch report gave us; the route validates it.
+ */
+async function fetchLaunchLog(logPath: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${STUDIO_LOG_ROUTE}?path=${encodeURIComponent(logPath)}`, {
+    credentials: 'same-origin',
+    ...(signal === undefined ? {} : { signal }),
+  })
+  if (!response.ok) throw new Error(`日志读取失败（HTTP ${String(response.status)}）`)
+  return await response.text()
 }
 
 /** The props the sidebar slots hand a `sidebar.panellist` entry. */
@@ -1377,6 +1392,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const [environmentBusy, setEnvironmentBusy] = useState<'start' | 'stop' | undefined>(undefined)
   const [environmentError, setEnvironmentError] = useState<string | undefined>(undefined)
   const [environmentNote, setEnvironmentNote] = useState<string | undefined>(undefined)
+  // Inline log viewer: no external terminal window. `logOpen` is the drawer,
+  // `logText` the last-fetched tail, `logBusy` the in-flight fetch.
+  const [logOpen, setLogOpen] = useState(false)
+  const [logText, setLogText] = useState<string>('')
+  const [logBusy, setLogBusy] = useState(false)
   const [prompt, setPrompt] = useState('')
   const [ratio, setRatio] = useState<string>('1:1')
   const [steps, setSteps] = useState<string>('')
@@ -1701,12 +1721,12 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * decides whether the form is usable, so a finished start that left `ready`
    * false would show every control disabled next to a running renderer.
    */
-  const runEnvironmentAction = useCallback(async (action: 'start' | 'stop', showLog: boolean = false) => {
+  const runEnvironmentAction = useCallback(async (action: 'start' | 'stop') => {
     setEnvironmentBusy(action)
     setEnvironmentError(undefined)
     setEnvironmentNote(undefined)
     try {
-      const result = await postEnvironment(action, showLog)
+      const result = await postEnvironment(action)
       if (result.environment !== undefined) setEnvironment(result.environment)
       if (result.error !== undefined) {
         setEnvironmentError(result.error)
@@ -1729,6 +1749,22 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       setEnvironmentBusy(undefined)
     }
   }, [loadConfig])
+
+  /**
+   * Open/refresh the inline log drawer. Fetches the tail through the same-origin
+   * route; no external terminal is ever spawned. A failed read shows the error
+   * inside the drawer rather than as a global banner.
+   */
+  const refreshLog = useCallback(async (path: string) => {
+    setLogBusy(true)
+    try {
+      setLogText(await fetchLaunchLog(path))
+    } catch (cause) {
+      setLogText(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setLogBusy(false)
+    }
+  }, [])
 
   // Subscribe to the live progress stream. This is an enhancement, never a
   // dependency: a host that cannot serve the stream, or a browser without
@@ -5036,36 +5072,38 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               '停止',
             )
             : createElement(
-              'div',
-              { className: 'dsh-forge-env-start-group' },
-              createElement(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-forge-btn is-primary dsh-forge-env-btn',
-                  'data-env-action': 'start',
-                  title: environmentArgvTitle === undefined
-                    ? '完全后台拉起 ComfyUI：不弹窗口，输出写入日志文件（推荐）'
-                    : `完全后台拉起 ComfyUI（argv：${environmentArgvTitle}）`,
-                  onClick: () => { void runEnvironmentAction('start') },
-                },
-                '后台启动',
-              ),
-              createElement(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-forge-btn is-ghost dsh-forge-env-btn',
-                  'data-env-action': 'start-log',
-                  title: '后台拉起 ComfyUI，并另开一个实时刷新的日志窗口；该窗口只是查看器，关掉它不会停止 ComfyUI',
-                  onClick: () => { void runEnvironmentAction('start', true) },
-                },
-                '启动并看日志',
-              ),
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-forge-btn is-primary dsh-forge-env-btn',
+                'data-env-action': 'start',
+                title: environmentArgvTitle === undefined
+                  ? '后台拉起 ComfyUI：不弹任何窗口，输出写入日志文件；需要看时用状态行的「看日志」'
+                  : `后台拉起 ComfyUI（argv：${environmentArgvTitle}）`,
+                onClick: () => { void runEnvironmentAction('start') },
+              },
+              '启动',
             ),
         ready && !environmentOwned && environment?.ownershipNote === undefined
           ? createElement('span', { className: 'dsh-forge-studio-hint' }, '由你自己启动的实例，插件不提供停止')
           : null,
+        environment?.logPath === undefined
+          ? null
+          : createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-forge-btn is-ghost dsh-forge-env-log-btn',
+              'data-env-action': 'log',
+              title: '在工作台内查看 ComfyUI 启动日志（不弹外部窗口）',
+              onClick: () => {
+                const path = environment.logPath as string
+                setLogOpen((open) => !open)
+                if (!logOpen) void refreshLog(path)
+              },
+            },
+            logOpen ? '收起日志' : '看日志',
+          ),
         createElement(
           'button',
           {
@@ -5087,6 +5125,38 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     environmentNote === undefined
       ? null
       : createElement('div', { className: 'dsh-forge-studio-hint dsh-forge-env-note' }, environmentNote),
+
+    // Inline log drawer — the log is read through STUDIO_LOG_ROUTE and shown
+    // here; no external terminal window is ever opened.
+    logOpen
+      ? createElement(
+        'div',
+        { className: 'dsh-forge-log-drawer', 'data-log-path': environment?.logPath ?? '' },
+        createElement(
+          'div',
+          { className: 'dsh-forge-log-head' },
+          createElement('span', {}, 'ComfyUI 启动日志（尾部 200 行）'),
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-forge-btn is-ghost',
+              disabled: logBusy,
+              onClick: () => {
+                if (environment?.logPath !== undefined) void refreshLog(environment.logPath)
+              },
+            },
+            logBusy ? '读取中…' : '刷新',
+          ),
+          createElement(
+            'button',
+            { type: 'button', className: 'dsh-forge-btn is-ghost', onClick: () => { setLogOpen(false) } },
+            '关闭',
+          ),
+        ),
+        createElement('pre', { className: 'dsh-forge-log-body' }, logText.length === 0 ? '（空日志或尚未读取）' : logText),
+      )
+      : null,
 
     // ---- install → first picture stepper (T22) -----------------------------
     //

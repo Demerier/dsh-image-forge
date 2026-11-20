@@ -46,6 +46,7 @@ import {
   STUDIO_IMPORT_MAX_BODY_BYTES,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
+  STUDIO_LOG_ROUTE,
   STUDIO_MAX_BODY_BYTES,
   STUDIO_MAX_LAYOUT_CHARS,
   STUDIO_MAX_PARENT_IDS,
@@ -212,6 +213,47 @@ export function registerStudioRoutes(
       }),
     }),
 
+
+    // ---- launch log ------------------------------------------------------
+    // A panel-side log viewer, no external window. Reads the tail of a launch
+    // log as UTF-8 text. Hardened: same-origin GET, path must be absolute, the
+    // basename must be a dsh-image-forge launch log, and the resolved path must
+    // live under a 'logs' directory — a hostile page cannot read arbitrary files.
+    server.register({
+      kind: 'exact',
+      path: STUDIO_LOG_ROUTE,
+      handler: guard(async (req, res) => {
+        if (req.method !== 'GET') return jsonError(res, 405, 'method-not-allowed')
+        if (!sameOrigin(req)) return jsonError(res, 403, 'origin-rejected')
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+        const requested = url.searchParams.get('path') ?? ''
+        if (requested.length === 0) return jsonError(res, 400, '缺少 path 参数')
+        if (!isAbsolute(requested)) return jsonError(res, 400, '必须是绝对路径')
+        const name = basename(requested)
+        if (!name.startsWith('dsh-image-forge-launch-') || !name.endsWith('.log')) {
+          return jsonError(res, 400, '只允许读取 ComfyUI 启动日志')
+        }
+        const target = resolvePath(requested)
+        if (!target.includes('/logs/') && !target.includes('\\logs\\')) {
+          return jsonError(res, 400, '日志文件必须位于 logs 目录内')
+        }
+        let text: string
+        try {
+          const buf = await readFile(target)
+          text = buf.toString('utf8')
+        } catch {
+          return jsonError(res, 404, '日志文件不存在或不可读')
+        }
+        const lines = text.split(/\r?\n/)
+        const tail = lines.slice(-200).join('\n')
+        res.writeHead(200, {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(tail)
+      }),
+    }),
+
     // ---- environment: start / stop / status ------------------------------
     //
     // The one route that may touch the machine. Three guards make that safe:
@@ -229,10 +271,8 @@ export function registerStudioRoutes(
         if (!isJson(req)) return jsonError(res, 415, 'json-required')
 
         let request: StudioEnvironmentRequest
-        let showLogRequested = false
         try {
           request = parseEnvironmentAction(JSON.parse(await readBody(req, ENVIRONMENT_MAX_BODY_BYTES)))
-          showLogRequested = request.showLog === true
         } catch (error) {
           return jsonError(res, 400, firstLine(error))
         }
@@ -264,7 +304,7 @@ export function registerStudioRoutes(
         }, HEARTBEAT_MS)
         try {
           if (action === 'start') {
-            const status = await ensureEnvironment(options, machine, showLogRequested)
+            const status = await ensureEnvironment(options, machine)
             if (!res.destroyed && !res.writableEnded) {
               const body: StudioEnvironmentResponse = { environment: environmentSnapshotOf(status) }
               res.end(JSON.stringify(body))
@@ -1158,8 +1198,7 @@ export function parseEnvironmentAction(value: unknown): StudioEnvironmentRequest
   if (typeof action !== 'string' || !(STUDIO_ENVIRONMENT_ACTIONS as readonly string[]).includes(action)) {
     throw new Error(`未知的环境操作：${String(action)}`)
   }
-  const showLog = body.showLog === true
-  return { action: action as StudioEnvironmentAction, ...(showLog ? { showLog } : {}) }
+  return { action: action as StudioEnvironmentAction }
 }
 
 /** The environment report, narrowed to the fields the panel renders. */

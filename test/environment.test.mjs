@@ -979,16 +979,14 @@ test('the setup tool exposes install/download and keeps the retired name banned'
   assert.match(description, /computer use/)
 })
 
-test('showLog opens a separate live-log viewer without unhiding the renderer', async () => {
+test('start spawns only the hidden renderer — no external log window', async () => {
   const fake = await startStatsServer()
   try {
     const closed = await freePort()
     const machine = makeMachine(freshDir(), { port: fake.port })
     const spawnCalls = []
     const child = { pid: 4242, exitCode: null, unref() {} }
-    const viewer = { pid: 4243, exitCode: null, unref() {} }
-    let nextChild = child
-    const spawn = (...args) => { spawnCalls.push(args); return nextChild }
+    const spawn = (...args) => { spawnCalls.push(args); return child }
     let probes = 0
     const fetchImpl = async () => {
       probes += 1
@@ -997,34 +995,17 @@ test('showLog opens a separate live-log viewer without unhiding the renderer', a
         status: 200, headers: { 'content-type': 'application/json' },
       })
     }
-    // After the ComfyUI spawn, make the next spawn return the viewer (disposable).
     const options = {
       ...environmentOptionsOf({ comfyEndpoint: '', comfyPorts: String(closed), timeoutMs: 1000 }),
       installTimeoutMs: 5000, waitIntervalMs: 20,
     }
-    const spawnWithViewer = (...args) => {
-      const result = spawn(...args)
-      if (spawnCalls.length === 1) nextChild = viewer
-      return result
-    }
-    const status = await ensureEnvironment(options, depsOf(machine, { spawn: spawnWithViewer, fetchImpl, portProbe: async () => false }), true)
+    const status = await ensureEnvironment(options, depsOf(machine, { spawn, fetchImpl, portProbe: async () => false }))
     assert.equal(status.state, 'ready')
-    assert.equal(spawnCalls.length, 2, 'renderer + one disposable log viewer')
-    const [rendererBin, rendererArgv, rendererOpts] = spawnCalls[0]
-    const [viewerBin, viewerArgv, viewerOpts] = spawnCalls[1]
+    assert.equal(spawnCalls.length, 1, 'only the renderer is spawned — no terminal window')
+    const [rendererBin, , rendererOpts] = spawnCalls[0]
     assert.equal(rendererBin, machine.winPython)
-    assert.equal(rendererOpts.windowsHide, true, 'the renderer stays hidden')
-    // Windows opens the tail in its own console via cmd /c start; the shell's
-    // own output is ignored on purpose so the child's console owns the stream.
-    assert.match(String(viewerBin), /cmd/i)
-    assert.ok(viewerArgv.some((a) => String(a).includes('start')), 'a new console window is started')
-    assert.ok(viewerArgv.some((a) => String(a).includes('Get-Content')), 'viewer tails the log')
-    assert.ok(viewerArgv.some((a) => String(a).includes('UTF8')), 'the log is read as UTF-8 (no CJK mojibake)')
-    assert.ok(viewerArgv.some((a) => String(a).includes('chcp 65001')), 'the console code page is UTF-8')
-    assert.ok(viewerArgv.some((a) => String(a).includes('powershell')), 'the tail runs in PowerShell')
-    assert.equal(viewerOpts.windowsHide, false, 'the viewer is a visible window')
-    assert.equal(viewerOpts.stdio, 'ignore', 'the launcher output is discarded; the child console owns the stream')
-    assert.match(String(status.note), /查看器|关掉/)
+    assert.equal(rendererOpts.windowsHide, true, 'the renderer stays fully hidden')
+    assert.match(String(status.note), /日志：/, 'the note points at the log path for the in-panel viewer')
   } finally {
     await fake.close()
   }

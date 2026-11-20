@@ -77,6 +77,14 @@ export const STUDIO_IMPORT_ROUTE = '/plugins/dsh-image-forge/studio/import'
  * by a browser.
  */
 export const STUDIO_ENVIRONMENT_ROUTE = '/plugins/dsh-image-forge/studio/environment'
+/**
+ * Same-origin GET route that tails a ComfyUI launch log into the panel.
+ * `STUDIO_LOG_ROUTE?path=<encoded absolute path>` returns the last N lines as
+ * plain UTF-8 text. It never opens an external terminal window: the panel reads
+ * it and shows it inline. Only launch logs under the Desktop `logs/` dir are
+ * served (see studio-routes).
+ */
+export const STUDIO_LOG_ROUTE = '/plugins/dsh-image-forge/studio/log'
 
 /** Actions {@link STUDIO_ENVIRONMENT_ROUTE} accepts. */
 export const STUDIO_ENVIRONMENT_ACTIONS = ['status', 'start', 'stop'] as const
@@ -348,8 +356,6 @@ export interface StudioEnvironmentStop {
  */
 export interface StudioEnvironmentRequest {
   action?: StudioEnvironmentAction
-  /** `start` only: open a disposable live-log window alongside the hidden renderer. */
-  showLog?: boolean
 }
 
 /** Answer of {@link STUDIO_ENVIRONMENT_ROUTE}. */
