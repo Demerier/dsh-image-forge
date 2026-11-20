@@ -475,7 +475,10 @@ export function openLogTerminal(logPath, { platform = osPlatform(), spawn: spawn
     // window. A bare spawn(powershell, { stdio: 'ignore' }) throws the tail
     // output away to NUL, which is exactly the empty-window symptom.
     // The quoted first argument is the window title; Node quotes it for us.
-    const tail = `Get-Content -LiteralPath '${String(logPath).replace(/'/g, "''")}' -Wait -Tail 80`
+    // ComfyUI writes UTF-8 (the launch env sets PYTHONUTF8=1). Windows PowerShell
+    // decodes with the system ANSI code page by default, so CJK turns to mojibake
+    // in the window. Force UTF-8 both on the console output and on the reader.
+    const tail = `[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null; Get-Content -LiteralPath '${String(logPath).replace(/'/g, "''")}' -Encoding UTF8 -Wait -Tail 80`
     command = {
       bin: 'cmd.exe',
       args: ['/d', '/c', 'start', 'ComfyUI 实时日志', 'powershell.exe', '-NoProfile', '-Command', tail],

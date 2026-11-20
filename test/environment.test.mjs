@@ -1019,6 +1019,8 @@ test('showLog opens a separate live-log viewer without unhiding the renderer', a
     assert.match(String(viewerBin), /cmd/i)
     assert.ok(viewerArgv.some((a) => String(a).includes('start')), 'a new console window is started')
     assert.ok(viewerArgv.some((a) => String(a).includes('Get-Content')), 'viewer tails the log')
+    assert.ok(viewerArgv.some((a) => String(a).includes('UTF8')), 'the log is read as UTF-8 (no CJK mojibake)')
+    assert.ok(viewerArgv.some((a) => String(a).includes('chcp 65001')), 'the console code page is UTF-8')
     assert.ok(viewerArgv.some((a) => String(a).includes('powershell')), 'the tail runs in PowerShell')
     assert.equal(viewerOpts.windowsHide, false, 'the viewer is a visible window')
     assert.equal(viewerOpts.stdio, 'ignore', 'the launcher output is discarded; the child console owns the stream')
