@@ -635,13 +635,14 @@ test('flowInteractionProps turns off every key the library would handle itself',
   assert.equal(props.selectionKeyCode, null)
   assert.equal(props.selectionOnDrag, false, 'the marquee is marqueeWorldRect’s, not the library’s')
   assert.equal(props.elementsSelectable, true, 'and with a selection callback the clicks still report')
-  assert.deepEqual(props.panOnDrag, [1], 'middle-drag pans, like the DOM canvas')
+  assert.equal(props.panOnDrag, true, 'a blank left-drag pans — the natural canvas gesture')
   assert.equal(props.zoomOnDoubleClick, false, 'a double click opens the lightbox, it does not zoom')
   assert.equal(props.minZoom, CANVAS_MIN_ZOOM)
   assert.equal(props.maxZoom, CANVAS_MAX_ZOOM)
 
-  // Sticky hand mode: a left-drag pans instead. `panOnDrag: true` also suppresses
-  // the library's own marquee, which is the whole reason it is safe to switch.
+  // Shift is the marquee trigger: while held, React Flow must not pan on left.
+  assert.deepEqual(flowInteractionProps({ selectable: true, suppressLeftPan: true }).panOnDrag, [1])
+  // Hand mode keeps every button panning.
   assert.equal(flowInteractionProps({ selectable: true, panMode: true }).panOnDrag, true)
   // No selection callback, no selectable elements.
   assert.equal(flowInteractionProps().elementsSelectable, false)

@@ -233,7 +233,7 @@ test('the interaction config ships with the library’s own bindings switched of
   )
   // Hand mode and middle-drag panning: one expression, so a later edit cannot
   // make the pane pan on left-drag and tear a marquee at the same time.
-  assert.ok(BUNDLE.includes('panOnDrag: options.panMode === true ? true : [1]'))
+  assert.ok(BUNDLE.includes('panOnDrag: options.suppressLeftPan === true ? [1] : true'))
   // The keyboard and the drag write-back must be in the shipped bundle.
   assert.ok(BUNDLE.includes('foldDragChanges'), 'the one-commit-per-drag reducer must ship')
   assert.ok(BUNDLE.includes('marqueeWorldRect'), 'the marquee must reuse the tested screen→world conversion')

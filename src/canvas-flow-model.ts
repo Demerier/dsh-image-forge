@@ -741,14 +741,20 @@ function sameFlowNode(left: FlowNodeSpec, right: FlowNodeSpec): boolean {
  *   pans its own viewport.
  * - `selectionOnDrag: false` — the marquee is ours (§6.1's positive-area rule and
  *   its Shift-union), so the library must not draw a second one.
- * - `panOnDrag` — middle-drag pans, like the hand-rolled canvas, unless the
- *   toolbar's sticky hand mode is on, in which case a left-drag pans too.
+ * - `panOnDrag` — left-drag pans by default (v2: blank-drag is pan, not marquee);
+ *   Shift+left is the marquee, handled by the pane so the library never draws a
+ *   second one. Middle-drag still pans, and hand mode keeps every button panning.
  */
 export interface FlowInteractionOptions {
   /** Whether a selection callback exists at all; drives `elementsSelectable`. */
   readonly selectable?: boolean
   /** Sticky hand mode (`panHeld`, or the toolbar toggle). */
   readonly panMode?: boolean
+  /**
+   * While Shift is held the pane must not pan on left-drag: that gesture is the
+   * custom marquee. Middle-drag and Space+drag still pan (React Flow's own keys).
+   */
+  readonly suppressLeftPan?: boolean
   readonly minZoom?: number
   readonly maxZoom?: number
 }
@@ -807,9 +813,11 @@ export function flowInteractionProps(options: FlowInteractionOptions = {}): Flow
     multiSelectionKeyCode: null,
     selectionKeyCode: null,
     selectionOnDrag: false,
-    // `true` also suppresses `selectionOnDrag` inside the library, which is why
-    // hand mode cannot accidentally leave a marquee armed.
-    panOnDrag: options.panMode === true ? true : [1],
+    // `true` means every button pans, including left — a blank left-drag moves
+    // the view, which is the default people expect from an infinite canvas.
+    // Shift+left stays a marquee because `selectionOnDrag` is false and the pane
+    // owns that gesture; the library never draws a competing box.
+    panOnDrag: options.suppressLeftPan === true ? [1] : true,
     zoomOnDoubleClick: false,
     minZoom,
     maxZoom,

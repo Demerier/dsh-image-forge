@@ -521,6 +521,10 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
   // studio must not see a board write per frame (see the props' `onMoveNodes`).
   const [live, setLive] = useState<ReadonlyMap<string, Point>>(() => new Map<string, Point>())
   const [marqueeBox, setMarqueeBox] = useState<MarqueeBox | undefined>(undefined)
+  // Shift suppresses React Flow's own left-drag pan so the custom marquee below
+  // owns that gesture. Tracked at the window: a drag can start before the canvas
+  // has focus, and the pane's own key handler only sees focused keys.
+  const [shiftHeld, setShiftHeld] = useState(false)
   // The wire being dragged: its `<path d>` and how it reads (a valid target, a
   // refused one, or open canvas). Screen-space on purpose — see `paintWire`.
   const [wire, setWire] = useState<{ readonly path: string; readonly look: WireLook } | undefined>(undefined)
@@ -559,6 +563,21 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     }
   }, [])
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+    const down = (event: KeyboardEvent): void => { if (event.shiftKey) setShiftHeld(true) }
+    const up = (event: KeyboardEvent): void => { if (!event.shiftKey) setShiftHeld(false) }
+    const blur = (): void => { setShiftHeld(false) }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    window.addEventListener('blur', blur)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', blur)
+    }
+  }, [])
+
   // The imperative handle dies with the flow: a studio that keeps calling it
   // after unmount must be a no-op, not a throw.
   useEffect(() => () => {
@@ -577,10 +596,11 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     () => flowInteractionProps({
       selectable: props.onSelect !== undefined,
       panMode: props.panMode === true,
+      suppressLeftPan: shiftHeld,
       minZoom: FLOW_MIN_ZOOM,
       maxZoom: FLOW_MAX_ZOOM,
     }),
-    [props.onSelect, props.panMode],
+    [props.onSelect, props.panMode, shiftHeld],
   )
 
   // The model is pure data; the handlers ride along in `data` because React
@@ -896,8 +916,10 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
       }
     }
     if (event.button !== 0) return
-    // Hand mode pans instead (React Flow's own gesture), so no marquee.
-    if (latest.current.panMode === true) return
+    // v2 default: a plain left-drag pans (React Flow's own gesture). Only
+    // Shift+left is the marquee — the old default drew a box on every blank
+    // drag, which read as "the view cannot be moved" to a first-time user.
+    if (event.shiftKey !== true) return
     const pane = paneElementOf(event.target)
     if (pane === undefined) return
     if (typeof pane.getBoundingClientRect !== 'function') return
@@ -964,7 +986,8 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     // edge of the viewport must still catch what is there (§6.1).
     const hits = nodesInRect(flowNodeRects(latest.current.nodes), world)
     const current = latest.current.selection ?? new Set<string>()
-    latest.current.onSelect?.([...marqueeSelection(current, hits, event.shiftKey === true)])
+    // Shift is the marquee trigger, so Ctrl/Meta is the additive modifier now.
+    latest.current.onSelect?.([...marqueeSelection(current, hits, event.ctrlKey === true || event.metaKey === true)])
   }
 
   /* ---- selection: click, toggle, clear ------------------------------------ */

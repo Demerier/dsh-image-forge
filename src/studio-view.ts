@@ -3053,13 +3053,13 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   }), [onHandlePointerDown])
 
   /**
-   * Pointer-down on blank canvas: marquee by default, pan on Space / middle.
+   * Pointer-down on blank canvas: pan by default, Shift+left boxes a selection.
    *
-   * §6.6 changes the old default on purpose — a blank drag used to pan and now
-   * boxes a selection, because that is the commoner gesture on a generation
-   * canvas. All three pan entries survive: Space+drag, middle-button drag, and
-   * the toolbar's hand toggle (`panRef`). The right-click menu is the other
-   * blank-canvas gesture and is handled by `onCanvasContextMenu`.
+   * v2 restores the natural infinite-canvas gesture — a blank left-drag moves the
+   * view, which is what a first-time user tries. The marquee moves to Shift+left
+   * (additive) so selection is still one gesture away. Space+drag, middle-button
+   * drag and the toolbar's hand toggle remain pan entries. The right-click menu
+   * is the other blank-canvas gesture (`onCanvasContextMenu`).
    */
   const onCanvasPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 && event.button !== 1) return
@@ -3083,6 +3083,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     event.currentTarget.focus()
     event.currentTarget.setPointerCapture(event.pointerId)
     pointerRef.current = undefined
+    // Shift+left is the marquee; every other blank drag pans the view.
+    if (event.button !== 1 && event.shiftKey !== true) {
+      gestureRef.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, camera }
+      return
+    }
     if (event.button === 1 || panRef.current || handMode) {
       gestureRef.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, camera }
       return
@@ -3093,13 +3098,14 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       startX: event.clientX - box.left,
       startY: event.clientY - box.top,
       base: selection,
-      additive: event.shiftKey,
+      // Shift is the marquee trigger, so Ctrl/Meta is the additive modifier now.
+      additive: event.ctrlKey || event.metaKey,
       left: box.left,
       top: box.top,
     }
-    // §6.1: a blank click clears the selection. A Shift drag keeps it, because
-    // it is adding to what is already there.
-    if (!event.shiftKey) setSelection(new Set())
+    // §6.1: a plain blank click clears the selection. With Ctrl/Meta the drag
+    // adds to what is already there.
+    if (!(event.ctrlKey || event.metaKey)) setSelection(new Set())
   }, [camera, handMode, selection])
 
   /**
@@ -5653,7 +5659,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 ? createElement(
                   'p',
                   { className: 'dsh-forge-canvas-hint' },
-                  busy ? '正在生成…' : '这个画板还是空的。生成的第一张图会落在这里；拖空白处框选，Space 或中键平移，滚轮缩放，拖图可改位置。',
+                  busy ? '正在生成…' : '这个画板还是空的。生成的第一张图会落在这里；拖空白处平移，Shift+拖框选，滚轮缩放，拖图可改位置。',
                 )
                 : null)
               // The engine the shell supplies (`FlowCanvas`): it draws the board

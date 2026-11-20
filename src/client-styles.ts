@@ -106,7 +106,8 @@ export const STUDIO_CSS = `
 .dsh-forge-zoom{display:flex;align-items:center;gap:1px}
 .dsh-forge-zoom-label{font-size:10.5px;opacity:.6;min-width:36px;text-align:center;font-variant-numeric:tabular-nums}
 .dsh-forge-list{display:flex;flex-direction:column;gap:12px;min-width:0}
-.dsh-forge-canvas{position:relative;height:clamp(300px,50vh,540px);overflow:hidden;border:1px solid rgba(127,127,127,.28);border-radius:10px;background-color:rgba(127,127,127,.035);background-image:radial-gradient(rgba(127,127,127,.3) 1px,transparent 1px);background-size:22px 22px;cursor:crosshair;touch-action:none;user-select:none}
+.dsh-forge-canvas{position:relative;height:clamp(300px,50vh,540px);overflow:hidden;border:1px solid rgba(127,127,127,.28);border-radius:10px;background-color:rgba(127,127,127,.035);background-image:radial-gradient(rgba(127,127,127,.3) 1px,transparent 1px);background-size:22px 22px;cursor:grab;touch-action:none;user-select:none}
+.dsh-forge-canvas:active{cursor:grabbing}
 .dsh-forge-canvas.is-pan{cursor:grab}
 .dsh-forge-canvas.is-pan:active{cursor:grabbing}
 .dsh-forge-canvas:focus{outline:none}
