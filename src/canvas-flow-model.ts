@@ -1071,6 +1071,22 @@ export function canAcceptConnection(kind: FlowSourceNode['kind']): boolean {
   return kind === 'image'
 }
 
+/**
+ * Which kinds render an **inbound** handle.
+ *
+ * A wire may only be *dropped* on a picture ({@link canAcceptConnection}), but a
+ * lineage edge may also *point at* a task or a draft: that is exactly what a wire
+ * dropped on blank canvas creates — a placeholder whose `parents` name the source
+ * (see `addDraftNode` in studio-view). React Flow only draws an edge when the
+ * target node has a handle with the edge's `targetHandle` id, so without this the
+ * edge exists in the board data yet renders as nothing. Rendering the handle is
+ * therefore a drawing concern, deliberately wider than the drop rule. The
+ * handle is non-connectable from the inside, so it cannot become a new wire.
+ */
+export function hasInboundHandle(kind: FlowSourceNode['kind']): boolean {
+  return kind === 'image' || kind === 'task' || kind === 'draft' || kind === 'layout'
+}
+
 /** Why a connection was refused; `ok` means it may be drawn. */
 export type FlowConnectVerdict = 'ok' | 'missing' | 'self' | 'kind' | 'cycle'
 

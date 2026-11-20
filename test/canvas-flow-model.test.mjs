@@ -68,6 +68,7 @@ import {
   fitWouldClamp,
   fitZoomFor,
   flowInteractionProps,
+  hasInboundHandle,
   flowModelFingerprint,
   flowNodeRects,
   flowViewportOf,
@@ -1042,3 +1043,16 @@ test('a reloaded layout node keeps its draft and the box its editor is mounted i
 })
 
 
+
+test('every lineage target kind renders an inbound handle, but only pictures accept a drop', () => {
+  // A wire dropped on blank canvas creates a task/draft with parents=[source].
+  // Its edge must be drawable, so the inbound handle is rendered for all kinds —
+  // while the drop rule stays strict (pictures only) and is enforced separately.
+  for (const kind of ['image', 'task', 'draft', 'layout']) {
+    assert.equal(hasInboundHandle(kind), true, kind + ' must render an inbound handle for its lineage edge')
+  }
+  assert.equal(canAcceptConnection('image'), true)
+  assert.equal(canAcceptConnection('task'), false, 'a task still cannot be a manual drop target')
+  assert.equal(canAcceptConnection('draft'), false)
+  assert.equal(canAcceptConnection('layout'), false)
+})

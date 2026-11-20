@@ -98,6 +98,7 @@ import {
   flowNodeRects,
   flowViewportProps,
   foldDragChanges,
+  hasInboundHandle,
   initialFlowView,
   judgeConnection,
   planConnectionDrop,
@@ -1224,7 +1225,11 @@ function nodeClassName(kind: string, selected: boolean): string {
  */
 function NodeHandles(props: { readonly kind: FlowSourceNode['kind'] }): ReactNode {
   const handles: ReactNode[] = []
-  if (canAcceptConnection(props.kind)) {
+  // Render the inbound handle for every kind a lineage edge can point at —
+  // including the task/draft a wire creates on blank canvas. The drop rule is
+  // stricter (pictures only) and is enforced by isValidConnection, so this extra
+  // handle only makes existing edges drawable; it cannot start a wire.
+  if (hasInboundHandle(props.kind)) {
     handles.push(createElement(Handle, {
       key: 'in',
       id: FLOW_TARGET_HANDLE,
@@ -1232,6 +1237,7 @@ function NodeHandles(props: { readonly kind: FlowSourceNode['kind'] }): ReactNod
       position: Position.Left,
       className: 'dsh-forge-flow-handle is-in',
       isConnectableStart: false,
+      isConnectableEnd: false,
     }))
   }
   if (canStartConnection(props.kind)) {

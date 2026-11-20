@@ -3639,9 +3639,10 @@ test('U04 S3: the pane’s side of the wire ships with a preview and a three-way
   assert.ok(CLIENT_SOURCE.includes('onDocumentKeyDown'), 'the pane listens for the abandon key itself')
   assert.ok(CLIENT_SOURCE.includes('Escape'), 'Esc must cancel an in-flight wire')
   assert.ok(CLIENT_SOURCE.includes('escapedRef'), 'and the release that follows must be ignored')
-  // Only the kinds that can do something carry a handle.
+  // Only pictures start a wire; every lineage target renders an inbound handle
+  // so a wire-created task/draft keeps its edge drawable.
   assert.ok(CLIENT_SOURCE.includes('canStartConnection(props.kind)'))
-  assert.ok(CLIENT_SOURCE.includes('canAcceptConnection(props.kind)'))
+  assert.ok(CLIENT_SOURCE.includes('hasInboundHandle(props.kind)'))
 })
 
 // ---------------------------------------------------------------------------
