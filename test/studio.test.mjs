@@ -1873,6 +1873,17 @@ function buttonWithText(panel, text) {
   return found
 }
 
+/** Find a button whose label *starts with* `prefix` (labels that carry a size). */
+function buttonStartingWith(panel, prefix) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found !== undefined || entry.type !== 'button') return
+    const label = fakeText(entry)
+    if (typeof label === 'string' && label.startsWith(prefix)) found = entry
+  })
+  return found
+}
+
 /** The open context menu's entries, or `undefined` when no menu is open. */function menuEntries(panel) {
   const menu = fakeElementWithClass(panel.tree, 'dsh-forge-context')
   if (menu === undefined) return undefined
@@ -4554,6 +4565,43 @@ test('P2: 看日志 opens an inline drawer and reads the log through the log rou
     assert.ok(logCalls.length >= 1, 'the drawer fetches the log through the same-origin route')
     const drawer = byClassNow(panel, 'dsh-forge-log-drawer')
     assert.ok(drawer !== undefined, 'the log is shown inline, not in an external window')
+  } finally {
+    network.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// P2b: the panel can download missing weights itself, and shows a live log.
+// ---------------------------------------------------------------------------
+
+test('P2b: the panel offers the download button, renders the plan, and posts confirm', async () => {
+  const { network, panel } = await mountWorkbench({
+    environment: () => ({
+      environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', logPath: 'C:/logs/dsh-image-forge-launch-1.log' },
+      weights: {
+        profile: 'qwen21-base',
+        base: 'D:/models',
+        dryRun: true,
+        state: 'partial',
+        note: '1/3 个权重被 /object_info 列出',
+        weights: [
+          { kind: 'unet', filename: 'qwen_image_2.1_int8_convrot.safetensors', bytes: 7256783064, targetPath: 'D:/models/diffusion_models/x.safetensors', state: 'present', note: '' },
+          { kind: 'clip', filename: 'qwen3vl_8b_int8_convrot.safetensors', bytes: 9350798360, targetPath: 'D:/models/text_encoders/y.safetensors', state: 'would-download', note: '' },
+          { kind: 'vae', filename: 'qwen_image_2.1_vae_bf16.safetensors', bytes: 675509688, targetPath: 'D:/models/vae/z.safetensors', state: 'present', note: '' },
+        ],
+      },
+    }),
+  })
+  try {
+    assert.ok(byClassNow(panel, 'dsh-forge-weights-drawer') !== undefined, 'the weight plan is rendered in the panel')
+    // The label carries the total size, so match on its stem.
+    const download = buttonStartingWith(panel, '下载缺失权重')
+    assert.ok(download !== undefined, 'a missing weight offers a download button inside the panel')
+    download.props.onClick()
+    await settle(panel)
+    const posts = network.calls.filter((call) => call.url.indexOf(STUDIO_ENVIRONMENT_ROUTE) === 0 && call.method === 'POST')
+    assert.ok(posts.some((call) => String(call.body).includes('download')), 'the click posts the download action')
+    assert.ok(posts.some((call) => String(call.body).includes('confirm')), 'the button downloads for real, not the plan again')
   } finally {
     network.restore()
   }

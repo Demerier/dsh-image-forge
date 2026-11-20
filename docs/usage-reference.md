@@ -224,9 +224,10 @@ MCP `fetch_outputs` 与 CLI `download` 的 `out_dir` 指向**工作区内**的
 工作台顶部常驻四步：**ComfyUI 运行 → 安装/受管环境 → 权重就绪 → 首次出图**。
 
 - 状态来自能力快照（环境探测 + `/object_info`）与实时 SSE；失败步骤显示原因首行。
-- 「重新检测」只重新读快照；**安装 / 下载**由 agent 调用 `qwen_image_setup`：
-  `status`（默认）、`start`/`stop`、`install`（未获 computer use 授权只给图文步骤）、
-  `download`（默认 dry-run，`confirm: true` 才下载当前 `comfyModel` 三权重）。
+- 「重新检测」只重新读快照。**权重下载在工作台内就能做**：缺权重时状态行下方出现
+  「下载缺失权重（约 N GB）」抽屉，先给「查看计划」（文件名、体积、目标目录），再点下载
+  才写字节；`POST /studio/environment {action:"download", confirm:true}` 以 NDJSON 回流
+  逐文件进度。同一个能力也可由 agent 调 `qwen_image_setup action=download`（默认 dry-run）。
 - 双底模口径：`qwen21-base` 40 步 / `qwen21-turbo` 8 步（缺 turbo 权重明确退化到 base）/ `moss-sft`
   MOSS-Image（25 步模板；缺权重直接报错，不静默）。
 
@@ -236,8 +237,8 @@ MCP `fetch_outputs` 与 CLI `download` 的 `out_dir` 指向**工作区内**的
 
 | 显示 | 含义 | 点了会发生什么 |
 |---|---|---|
-| **后台启动**（主按钮） | 没探到在跑的 ComfyUI | `POST /studio/environment {"action":"start"}`：完全后台拉起，不弹窗口；等 `/system_stats` 就绪；`comfyEndpoint` 配了 loopback 端口就以它为 `--port` |
-| **启动并看日志** | 同上 | `POST /studio/environment {"action":"start","showLog":true}`：后台拉起 + 另开实时日志窗口；窗口是独立查看器，关掉不影响 ComfyUI |
+| **后台启动**（主按钮） | 没探到在跑的 ComfyUI | `POST /studio/environment {"action":"start"}`：完全后台拉起，**不弹任何终端窗口**；输出写日志文件；等 `/system_stats` 就绪；`comfyEndpoint` 配了 loopback 端口就以它为 `--port` |
+| **看日志** | 有启动日志路径时 | 在工作台内展开日志抽屉：读 `GET /studio/log?path=…` 的尾部 200 行，抽屉打开时每 2 秒刷新一次；**不弹外部窗口** |
 | **停止**（次按钮） | 在跑，且**归属确认**（启动记录的 pid 还活着、命令行里仍是那个 `main.py`） | 先 `window.confirm`，再停；停完回报 `taskkill` 退出码并复核端口已关，成功则删启动记录 |
 | **停止**（禁用）+「由你自己启动的实例，插件不提供停止」 | 在跑，但不是本插件拉起的 | 什么都不会发生。插件不杀无法证明归属的进程 |
 | **启动中… / 停止中…** | 请求在路上（宿主侧单飞：连点第二次会被 409 拒绝） | 等它回来；面板不会拉起第二个实例 |

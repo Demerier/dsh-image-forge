@@ -1132,7 +1132,12 @@ export interface WeightDownloadOutcome {
   readonly note: string
 }
 
-async function streamIntoFile(response: any, partPath: string, append: boolean): Promise<number> {
+async function streamIntoFile(
+  response: any,
+  partPath: string,
+  append: boolean,
+  onProgress?: (written: number) => void,
+): Promise<number> {
   const handle = await open(partPath, append ? 'a' : 'w')
   let written = 0
   try {
@@ -1143,6 +1148,10 @@ async function streamIntoFile(response: any, partPath: string, append: boolean):
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as any)
       await handle.write(buffer)
       written += buffer.length
+      // Coarse on purpose: one notification per chunk is already enough for a
+      // panel that repaints at most once a second, and it keeps the seam free
+      // of timers a test would have to fake.
+      onProgress?.(written)
     }
   } finally {
     await handle.close()
@@ -1161,6 +1170,10 @@ export async function downloadOneWeight(input: {
   readonly expectedBytes: number
   readonly sha256?: string | null
   readonly fetchImpl?: typeof fetch
+  /** Bytes already on disk for this file, reported while it streams. */
+  readonly onProgress?: (written: number) => void
+  /** Cancels the transfer; the `.part` stays for a later resume. */
+  readonly signal?: AbortSignal
 }): Promise<WeightDownloadOutcome> {
   const fetchImpl = input.fetchImpl ?? fetch
   const filename = basename(input.targetPath)
@@ -1186,13 +1199,15 @@ export async function downloadOneWeight(input: {
     if (offset !== input.expectedBytes) {
       const headers: Record<string, string> = {}
       if (offset > 0) headers.Range = 'bytes=' + offset + '-'
-      const response = await fetchImpl(input.url, { method: 'GET', headers, signal: AbortSignal.timeout(30 * 60 * 1000) })
+      const timeout = AbortSignal.timeout(30 * 60 * 1000)
+      const signal = input.signal === undefined ? timeout : AbortSignal.any([input.signal, timeout])
+      const response = await fetchImpl(input.url, { method: 'GET', headers, signal })
       if (!response.ok && response.status !== 206) throw new Error('HTTP ' + response.status + ' ' + response.statusText)
       if (offset > 0 && response.status === 200) {
         resumed = false
         offset = 0
       }
-      await streamIntoFile(response, partPath, resumed)
+      await streamIntoFile(response, partPath, resumed, input.onProgress)
     }
     const size = fileSizeOrNull(partPath)
     if (size !== input.expectedBytes) throw new Error('字节数不对：下载后 ' + String(size) + '，期望 ' + String(input.expectedBytes) + '（.part 保留，可续传）')
@@ -1205,6 +1220,17 @@ export async function downloadOneWeight(input: {
   } catch (error) {
     return { filename, targetPath: input.targetPath, state: 'failed', bytesOnDisk: fileSizeOrNull(partPath) ?? 0, expectedBytes: input.expectedBytes, sha256Ok: null, partBytesAtStart, note: note(error instanceof Error ? error.message : String(error)) }
   }
+}
+
+/** Byte progress of one weight transfer, as the panel's drawer prints it. */
+export interface WeightProgressEvent {
+  readonly filename: string
+  readonly kind: 'unet' | 'clip' | 'vae'
+  /** Bytes on disk for this file so far (including a resumed prefix). */
+  readonly written: number
+  /** Expected total, from the download table. */
+  readonly total: number
+  readonly targetPath: string | null
 }
 
 /** One profile weight after the ensure pass. */
@@ -1241,6 +1267,10 @@ export async function ensureProfileWeights(input: {
   readonly deps?: EnvironmentDeps
   /** Test seam: swap the download table (the shipped one is the default). */
   readonly sources?: Readonly<Record<string, WeightSource>>
+  /** Per-file byte progress, forwarded to the panel's download drawer. */
+  readonly onProgress?: (progress: WeightProgressEvent) => void
+  /** Cancels the current transfer; what already landed stays as `.part`. */
+  readonly signal?: AbortSignal
 }): Promise<ProfileWeightsOutcome> {
   const profile = resolveProfile(input.profileId)
   const dryRun = input.dryRun === true
@@ -1275,7 +1305,27 @@ export async function ensureProfileWeights(input: {
     }
     let download: WeightDownloadOutcome | null = null
     if (!alreadyPresent) {
-      download = await downloadOneWeight({ url: source.url, targetPath: String(item.targetPath), expectedBytes: source.bytes, sha256: source.sha256, fetchImpl })
+      download = await downloadOneWeight({
+        url: source.url,
+        targetPath: String(item.targetPath),
+        expectedBytes: source.bytes,
+        sha256: source.sha256,
+        fetchImpl,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        ...(input.onProgress === undefined
+          ? {}
+          : {
+            onProgress: (written: number) => {
+              input.onProgress?.({
+                filename: item.filename,
+                kind: item.kind,
+                written,
+                total: source.bytes,
+                targetPath: item.targetPath,
+              })
+            },
+          }),
+      })
       if (download.state === 'failed') {
         reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: 'failed', objectInfo: null, note: download.note })
         sawFailure = true

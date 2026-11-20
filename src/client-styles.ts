@@ -359,6 +359,14 @@ export const WORKBENCH_CSS = `
 .dsh-forge-log-head{display:flex;gap:8px;align-items:center;padding:5px 8px;border-bottom:1px solid rgba(127,127,127,.18);font-size:11px;opacity:.85}
 .dsh-forge-log-head>span{flex:1 1 auto}
 .dsh-forge-log-body{margin:0;padding:8px 10px;max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 ui-monospace,Menlo,Consolas,monospace;tab-size:2}
+.dsh-forge-weights-drawer{border:1px solid rgba(127,127,127,.28);border-radius:8px;background:rgba(0,0,0,.04);margin:6px 0;overflow:hidden}
+.dsh-forge-weights-head{display:flex;gap:8px;align-items:center;padding:5px 8px;font-size:11px;opacity:.9;border-bottom:1px solid rgba(127,127,127,.18)}
+.dsh-forge-weights-head>span{flex:1 1 auto;overflow-wrap:anywhere}
+.dsh-forge-weights-body{padding:6px 10px;display:flex;flex-direction:column;gap:3px;font-size:11px}
+.dsh-forge-weights-note{opacity:.72;overflow-wrap:anywhere}
+.dsh-forge-weight-row{display:flex;gap:8px;justify-content:space-between;gap:10px}
+.dsh-forge-weight-name{font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;min-width:0}
+.dsh-forge-weight-state{opacity:.78;white-space:nowrap}
 .dsh-forge-workbench-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;min-width:0}
 .dsh-forge-workbench-card{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:9px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.03);min-width:0}
 .dsh-forge-workbench-card:hover{border-color:rgba(59,130,246,.45)}

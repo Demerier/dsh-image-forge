@@ -70,6 +70,7 @@ import {
   type StudioOptimizeTurn,
   type StudioProgressEvent,
   type StudioReferencePayload,
+  type StudioWeightsReport,
   firstLine,
   isStudioClientId,
   parseStudioThumbWidth,
@@ -107,13 +108,16 @@ import {
 } from './studio-service.ts'
 import {
   ensureEnvironment,
+  ensureProfileWeights,
   environmentOptionsOf,
   inspectEnvironment,
+  resolveModelsBase,
   stopEnvironment,
   type EnvironmentDeps,
   type EnvironmentOptions,
   type EnvironmentStatus,
   type EnvironmentStopResult,
+  type ProfileWeightsOutcome,
 } from './environment.ts'
 import { OptimizeUnavailableError, optimizeStudioPrompt } from './studio-prompt.ts'
 
@@ -282,7 +286,27 @@ export function registerStudioRoutes(
 
         if (action === 'status') {
           const status = await inspectEnvironment(options, machine)
-          const body: StudioEnvironmentResponse = { environment: environmentSnapshotOf(status) }
+          // `status` also carries the dry-run weight plan, which is what the
+          // panel needs to offer "下载缺失权重（约 N GB）" before anything runs.
+          let weights: StudioWeightsReport | undefined
+          try {
+            const endpoint = status.state === 'ready' ? status.endpoint ?? null : null
+            const base = await resolveModelsBase({ endpoint }, machine)
+            weights = weightsReportOf(await ensureProfileWeights({
+              profileId: deps.settings().comfyModel,
+              base: base.base,
+              endpoint,
+              dryRun: true,
+              deps: machine,
+            }))
+          } catch {
+            // A status read must not fail because the plan could not be built.
+            weights = undefined
+          }
+          const body: StudioEnvironmentResponse = {
+            environment: environmentSnapshotOf(status),
+            ...(weights === undefined ? {} : { weights }),
+          }
           return json(res, 200, body)
         }
 
@@ -290,10 +314,59 @@ export function registerStudioRoutes(
           return json(res, 409, {
             error: environmentActionInFlight === 'start'
               ? '正在启动 ComfyUI（一次只拉起一个），请等这次请求返回。'
-              : '正在停止 ComfyUI，请等这次请求返回。',
+              : environmentActionInFlight === 'download'
+                ? '正在下载权重（一次只下一组），请等这次请求返回。'
+                : '正在停止 ComfyUI，请等这次请求返回。',
           } satisfies StudioEnvironmentResponse)
         }
         environmentActionInFlight = action
+
+        // ---- weight download: a long job that streams its own progress -----
+        //
+        // A weight is gigabytes, so the answer is NDJSON rather than one JSON
+        // body: the panel gets a line per byte-chunk and a final line carrying
+        // the report. The heartbeat stays because a slow mirror can easily
+        // spend more than a proxy's read timeout between two chunks.
+        if (action === 'download') {
+          res.writeHead(200, {
+            'content-type': 'application/x-ndjson; charset=utf-8',
+            'cache-control': 'no-store',
+            'x-accel-buffering': 'no',
+          })
+          const writeLine = (value: unknown): void => {
+            if (res.destroyed || res.writableEnded) return
+            try {
+              res.write(JSON.stringify(value) + '\n')
+            } catch {
+              // The reader went away; the close handler is what cleans up.
+            }
+          }
+          const heartbeat = setInterval(() => {
+            if (!res.destroyed && !res.writableEnded) res.write('\n')
+          }, HEARTBEAT_MS)
+          try {
+            const status = await inspectEnvironment(options, machine)
+            const endpoint = status.state === 'ready' ? status.endpoint ?? null : null
+            const base = await resolveModelsBase({ endpoint }, machine)
+            const dryRun = request.confirm !== true
+            const outcome = await ensureProfileWeights({
+              profileId: deps.settings().comfyModel,
+              base: base.base,
+              endpoint,
+              dryRun,
+              deps: machine,
+              onProgress: (progress) => { writeLine({ weightProgress: progress }) },
+            })
+            writeLine({ environment: environmentSnapshotOf(status), weights: weightsReportOf(outcome) })
+          } catch (error) {
+            writeLine({ error: firstLine(error) })
+          } finally {
+            clearInterval(heartbeat)
+            environmentActionInFlight = null
+            if (!res.destroyed && !res.writableEnded) res.end()
+          }
+          return
+        }
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store',
@@ -1198,7 +1271,33 @@ export function parseEnvironmentAction(value: unknown): StudioEnvironmentRequest
   if (typeof action !== 'string' || !(STUDIO_ENVIRONMENT_ACTIONS as readonly string[]).includes(action)) {
     throw new Error(`未知的环境操作：${String(action)}`)
   }
-  return { action: action as StudioEnvironmentAction }
+  const confirm = body.confirm === true
+  return { action: action as StudioEnvironmentAction, ...(confirm ? { confirm } : {}) }
+}
+
+/**
+ * The weight pass, narrowed to the fields the panel renders.
+ *
+ * Kept separate from `ProfileWeightsOutcome` for the same reason the environment
+ * snapshot is separate from `EnvironmentStatus`: the wire copy carries only
+ * printable fields, so the drawer can render it without knowing the layer below.
+ */
+export function weightsReportOf(outcome: ProfileWeightsOutcome): StudioWeightsReport {
+  return {
+    profile: outcome.profile,
+    base: outcome.base,
+    dryRun: outcome.dryRun,
+    state: outcome.state,
+    note: outcome.note,
+    weights: outcome.weights.map((weight) => ({
+      kind: weight.kind,
+      filename: weight.filename,
+      bytes: weight.bytes,
+      targetPath: weight.targetPath,
+      state: weight.state,
+      note: weight.note,
+    })),
+  }
 }
 
 /** The environment report, narrowed to the fields the panel renders. */

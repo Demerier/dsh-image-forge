@@ -87,7 +87,7 @@ export const STUDIO_ENVIRONMENT_ROUTE = '/plugins/dsh-image-forge/studio/environ
 export const STUDIO_LOG_ROUTE = '/plugins/dsh-image-forge/studio/log'
 
 /** Actions {@link STUDIO_ENVIRONMENT_ROUTE} accepts. */
-export const STUDIO_ENVIRONMENT_ACTIONS = ['status', 'start', 'stop'] as const
+export const STUDIO_ENVIRONMENT_ACTIONS = ['status', 'start', 'stop', 'download'] as const
 /** One environment action. */
 export type StudioEnvironmentAction = (typeof STUDIO_ENVIRONMENT_ACTIONS)[number]
 
@@ -356,13 +356,45 @@ export interface StudioEnvironmentStop {
  */
 export interface StudioEnvironmentRequest {
   action?: StudioEnvironmentAction
+  /**
+   * `download` only: run the pass for real. Absent/false is a dry run, which is
+   * the default on purpose — these files are gigabytes, and the plan (names,
+   * sizes, destination) is worth reading before any byte is written.
+   */
+  confirm?: boolean
 }
 
 /** Answer of {@link STUDIO_ENVIRONMENT_ROUTE}. */
+/** One weight of the current profile, as the panel prints it. */
+export interface StudioWeightReport {
+  kind: 'unet' | 'clip' | 'vae'
+  filename: string
+  bytes: number | null
+  /** Where it is (or would be) written; null when no models root resolved. */
+  targetPath: string | null
+  /** `present`/`installed` are done; `would-download`/`dry-run` are the plan. */
+  state: string
+  note: string
+}
+
+/** The whole weight pass of one profile, as the panel prints it. */
+export interface StudioWeightsReport {
+  profile: string
+  /** Resolved models root; null when none could be determined. */
+  base: string | null
+  dryRun: boolean
+  /** `ready` | `downloaded` | `partial` | `blocked` | `unverified` */
+  state: string
+  weights: StudioWeightReport[]
+  note: string
+}
+
 export interface StudioEnvironmentResponse {
   environment?: StudioEnvironmentSnapshot
   /** Present only for `stop`. */
   stop?: StudioEnvironmentStop
+  /** Present for `download` (and for `status`, which also reports the weights). */
+  weights?: StudioWeightsReport
   /** Present when the action was refused (busy / bad body). */
   error?: string
 }
@@ -913,7 +945,7 @@ export function stepperStepsOf(input: StepperInput): StepperStep[] {
     detail: modelsReady
       ? [input.models?.unet, input.models?.clip, input.models?.vae].filter((value) => typeof value === 'string').join(' · ')
       : input.ready
-        ? '已连上 ComfyUI 但三权重不齐：qwen_image_setup action=download'
+        ? '已连上 ComfyUI 但三权重不齐：用下方的「下载缺失权重」，或让 agent 调 qwen_image_setup action=download'
         : '等 ComfyUI 就绪后自动检查权重',
   })
   const phase = input.livePhase ?? 'idle'

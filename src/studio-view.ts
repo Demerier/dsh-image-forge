@@ -205,6 +205,7 @@ import {
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
   firstLine,
+  formatBytes,
   stepperStepsOf,
   studioFileUrl,
   type BoardDetail,
@@ -213,6 +214,7 @@ import {
   type BoardTaskParams,
   type BoardSummary,
   type StudioAsset,
+  type StudioWeightsReport,
   type StudioAssetsResponse,
   type StudioConfigResponse,
   type StudioEnvironmentResponse,
@@ -825,8 +827,17 @@ async function postBoard(body: Record<string, unknown>): Promise<string | undefi
  * the fresh snapshot describes what is left, while the stop note describes what
  * just happened.
  */
-async function postEnvironment(action: 'status' | 'start' | 'stop'): Promise<{
+async function postEnvironment(
+  action: 'status' | 'start' | 'stop',
+  options: {
+    /** `download` only: run for real instead of the dry-run plan. */
+    readonly confirm?: boolean
+    /** `download` only: byte progress, one call per received chunk. */
+    readonly onProgress?: (progress: WeightProgressLike) => void
+  } = {},
+): Promise<{
   environment?: StudioEnvironmentSnapshot
+  weights?: StudioWeightsReport
   stopNote?: string
   error?: string
 }> {
@@ -835,20 +846,106 @@ async function postEnvironment(action: 'status' | 'start' | 'stop'): Promise<{
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ ...(options.confirm === true ? { confirm: true } : {}), action }),
     })
-    const payload = (await readJson(response)) as StudioEnvironmentResponse | undefined
-    if (!response.ok || payload === undefined) {
-      return { error: typeof payload?.error === 'string' ? payload.error : `环境操作失败（HTTP ${String(response.status)}）` }
+    if (!response.ok) {
+      const failed = (await readJson(response)) as StudioEnvironmentResponse | undefined
+      return { error: typeof failed?.error === 'string' ? failed.error : `环境操作失败（HTTP ${String(response.status)}）` }
     }
-    if (typeof payload.error === 'string' && payload.error.length > 0) return { error: payload.error }
+    // `download` answers NDJSON: progress lines, then one final line. A JSON
+    // action answers one object, which the same reader handles as a single line.
+    const lines = await readNdjson(response, options.onProgress)
+    const last = lines.length === 0 ? undefined : (lines[lines.length - 1] as StudioEnvironmentResponse)
+    if (last === undefined) return { error: '环境操作没有返回内容。' }
+    if (typeof last.error === 'string' && last.error.length > 0) return { error: last.error }
     return {
-      ...(payload.environment === undefined ? {} : { environment: payload.environment }),
-      ...(typeof payload.stop?.note === 'string' ? { stopNote: payload.stop.note } : {}),
+      ...(last.environment === undefined ? {} : { environment: last.environment }),
+      ...(last.weights === undefined ? {} : { weights: last.weights }),
+      ...(typeof last.stop?.note === 'string' ? { stopNote: last.stop.note } : {}),
     }
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : String(cause) }
   }
+}
+
+/** One progress line of a `download`, as the drawer renders it. */
+export interface WeightProgressLike {
+  readonly filename: string
+  readonly written: number
+  readonly total: number
+}
+
+/**
+ * Read a response line by line.
+ *
+ * `download` streams NDJSON so a multi-gigabyte pass can report while it runs;
+ * a plain JSON action produces exactly one line, so one reader serves both.
+ * Blank lines are the route's heartbeat, not data.
+ */
+async function readNdjson(
+  response: Response,
+  onProgress?: (progress: WeightProgressLike) => void,
+): Promise<Record<string, any>[]> {
+  const rows: Record<string, any>[] = []
+  const body = response.body as any
+  if (body === undefined || body === null || typeof body.getReader !== 'function') {
+    // No readable stream (a very small JSON answer): the whole body is the single
+    // line this reader was going to reassemble anyway. A body-less double (the
+    // panel's test harness) only offers `json()`, so that path is honoured too.
+    if (typeof (response as any).text !== 'function') {
+      const value = typeof (response as any).json === 'function' ? await (response as any).json() : undefined
+      if (value !== undefined && value !== null) rows.push(value as Record<string, any>)
+      return rows
+    }
+    const text = await response.text()
+    for (const line of text.split('\n')) {
+      if (line.trim().length === 0) continue
+      let parsed: Record<string, any>
+      try {
+        parsed = JSON.parse(line) as Record<string, any>
+      } catch {
+        continue
+      }
+      const progress = parsed['weightProgress']
+      if (progress !== undefined && onProgress !== undefined) {
+        onProgress(progress as WeightProgressLike)
+        continue
+      }
+      rows.push(parsed)
+    }
+    return rows
+  }
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const take = (line: string): void => {
+    if (line.trim().length === 0) return
+    let parsed: Record<string, any>
+    try {
+      parsed = JSON.parse(line) as Record<string, any>
+    } catch {
+      return
+    }
+    const progress = parsed['weightProgress']
+    if (progress !== undefined && onProgress !== undefined) {
+      onProgress(progress as WeightProgressLike)
+      return
+    }
+    rows.push(parsed)
+  }
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done === true) break
+    buffer += decoder.decode(chunk.value, { stream: true })
+    let next = buffer.indexOf('\n')
+    while (next >= 0) {
+      take(buffer.slice(0, next))
+      buffer = buffer.slice(next + 1)
+      next = buffer.indexOf('\n')
+    }
+  }
+  take(buffer)
+  return rows
 }
 
 /**
@@ -1397,6 +1494,14 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const [logOpen, setLogOpen] = useState(false)
   const [logText, setLogText] = useState<string>('')
   const [logBusy, setLogBusy] = useState(false)
+  // Weights: the dry-run plan from `status`, the per-file byte progress while a
+  // download runs, and the report it ended with.
+  const [weights, setWeights] = useState<StudioWeightsReport | undefined>(undefined)
+  const [weightProgress, setWeightProgress] = useState<Record<string, { written: number; total: number }>>({})
+  const [weightBusy, setWeightBusy] = useState(false)
+  const [weightsOpen, setWeightsOpen] = useState(false)
+  /** True while the running pass is the real download (not the dry-run plan). */
+  const [weightsGoal, setWeightsGoal] = useState(false)
   const [prompt, setPrompt] = useState('')
   const [ratio, setRatio] = useState<string>('1:1')
   const [steps, setSteps] = useState<string>('')
@@ -1667,6 +1772,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     if (result.error !== undefined || result.environment === undefined) return
     setEnvironment(result.environment)
     setEnvironmentError(undefined)
+    // The status read carries the weight plan; keeping it is what lets the
+    // stepper name the missing files and their total size before a download.
+    if (result.weights !== undefined) setWeights(result.weights)
   }, [])
 
   /** Load (or reload) the capability snapshot, and the board library with it. */
@@ -1751,20 +1859,66 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   }, [loadConfig])
 
   /**
+   * Run the weight pass from the panel.
+   *
+   * Two steps, in this order: a dry run that only fills the drawer with the
+   * plan, then — from the drawer's own button — the real download. Doing the
+   * plan first is not ceremony: the pass writes up to ~16 GiB into the ComfyUI
+   * models tree, and the panel must say which files and where before that.
+   */
+  const runWeightDownload = useCallback(async (confirm: boolean) => {
+    setWeightBusy(true)
+    setWeightsOpen(true)
+    setWeightsGoal(confirm)
+    setEnvironmentError(undefined)
+    if (confirm) setWeightProgress({})
+    try {
+      const result = await postEnvironment('download', {
+        confirm,
+        onProgress: (progress) => {
+          setWeightProgress((current) => ({
+            ...current,
+            [progress.filename]: { written: progress.written, total: progress.total },
+          }))
+        },
+      })
+      if (result.weights !== undefined) setWeights(result.weights)
+      if (result.error !== undefined) setEnvironmentError(result.error)
+    } finally {
+      setWeightBusy(false)
+      setWeightsGoal(false)
+      // After a real pass the environment may have become ready (or stayed so).
+      void loadConfig()
+    }
+  }, [loadConfig])
+
+  /**
    * Open/refresh the inline log drawer. Fetches the tail through the same-origin
    * route; no external terminal is ever spawned. A failed read shows the error
    * inside the drawer rather than as a global banner.
    */
-  const refreshLog = useCallback(async (path: string) => {
-    setLogBusy(true)
+  const refreshLog = useCallback(async (path: string, silent = false) => {
+    if (!silent) setLogBusy(true)
     try {
       setLogText(await fetchLaunchLog(path))
     } catch (cause) {
       setLogText(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setLogBusy(false)
+      if (!silent) setLogBusy(false)
     }
   }, [])
+
+  // Live tail: while the drawer is open the log is re-read every two seconds,
+  // which is what makes it a log view rather than a one-shot snapshot. A silent
+  // refresh keeps the button label usable while the text updates underneath.
+  useEffect(() => {
+    if (!logOpen) return undefined
+    const path = environment?.logPath
+    if (path === undefined) return undefined
+    void refreshLog(path)
+    const timer = setInterval(() => { void refreshLog(path, true) }, 2000)
+    return () => { clearInterval(timer) }
+  }, [environment?.logPath, logOpen, refreshLog])
 
   // Subscribe to the live progress stream. This is an enhancement, never a
   // dependency: a host that cannot serve the stream, or a browser without
@@ -4843,6 +4997,40 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const ready = config?.ready === true
   const canGenerate = ready && !busy && prompt.trim().length > 0
 
+  // ---- weight view model ---------------------------------------------------
+  //
+  // `status` hands the panel a dry-run plan, so the drawer can say which files
+  // are missing and how large they are *before* anything is written. A file is
+  // "missing" unless the plan or the last real pass marked it present/installed.
+  const weightRows = (weights?.weights ?? []).map((weight) => {
+    const progress = weightProgress[weight.filename]
+    const done = weight.state === 'present' || weight.state === 'installed'
+    const bytes = weight.bytes === null ? '?' : formatBytes(weight.bytes)
+    let label: string = weight.state
+    if (progress !== undefined && weightBusy) {
+      const percent = progress.total > 0 ? Math.min(100, Math.round((progress.written / progress.total) * 100)) : 0
+      label = `下载中 ${String(percent)}% · ${formatBytes(progress.written)} / ${formatBytes(progress.total)}`
+    } else if (done) {
+      label = `已就绪 · ${bytes}`
+    } else if (weight.state === 'would-download' || weight.state === 'dry-run') {
+      label = `待下载 · ${bytes}`
+    } else if (weight.state === 'failed') {
+      label = '失败 · 见说明'
+    } else if (weight.state === 'no-source') {
+      label = '下载表无来源 · 需手工放置'
+    } else if (weight.state === 'no-base') {
+      label = '未解析出模型根'
+    }
+    return { filename: weight.filename, state: weight.state, label, done, bytes: weight.bytes }
+  })
+  const weightsMissing = weights === undefined ? undefined : weightRows.filter((row) => !row.done)
+  const weightSizeText = formatBytes(weightsMissing === undefined ? 0 : weightsMissing.reduce((sum, row) => sum + (row.bytes ?? 0), 0))
+  const weightHeadline = weights === undefined
+    ? '权重：尚未读到计划'
+    : weightsMissing === undefined || weightsMissing.length === 0
+      ? `权重就绪（${weights.profile}）`
+      : `缺 ${String(weightsMissing.length)} 个权重（${weights.profile}，共约 ${weightSizeText}）`
+
   // ---- P2: the environment line's own state machine ----------------------
   //
   // Four cases, exactly one action each: not running → 启动; running and ours →
@@ -5095,7 +5283,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               type: 'button',
               className: 'dsh-forge-btn is-ghost dsh-forge-env-log-btn',
               'data-env-action': 'log',
-              title: '在工作台内查看 ComfyUI 启动日志（不弹外部窗口）',
+              title: '在工作台内查看 ComfyUI 实时日志（每 2 秒刷新，不弹任何窗口）',
               onClick: () => {
                 const path = environment.logPath as string
                 setLogOpen((open) => !open)
@@ -5126,6 +5314,67 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       ? null
       : createElement('div', { className: 'dsh-forge-studio-hint dsh-forge-env-note' }, environmentNote),
 
+    // ---- weight download drawer -------------------------------------------
+    //
+    // The panel can run the download itself (no agent round trip, no external
+    // window). It opens on the plan first: file names, sizes, destination. Only
+    // the drawer's own 「下载」 button writes bytes.
+    weightsMissing !== undefined && (weightsMissing.length > 0 || weightsOpen)
+      ? createElement(
+        'div',
+        { className: 'dsh-forge-weights-drawer', 'data-weights-state': weights?.state ?? 'unknown' },
+        createElement(
+          'div',
+          { className: 'dsh-forge-weights-head' },
+          createElement('span', {}, weightHeadline),
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-forge-btn is-ghost',
+              disabled: weightBusy,
+              onClick: () => { if (!weightsOpen) void runWeightDownload(false); else setWeightsOpen(false) },
+            },
+            weightsOpen ? '收起' : '查看计划',
+          ),
+          weightsMissing.length === 0
+            ? null
+            : createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-forge-btn is-primary',
+                'data-env-action': 'download',
+                disabled: weightBusy || ready === false,
+                title: ready === false
+                  ? '先让它跑起来（权重落盘后要由 /object_info 校验）'
+                  : `下载缺失的 ${String(weightsMissing.length)} 个权重（约 ${weightSizeText}）`,
+                onClick: () => { void runWeightDownload(true) },
+              },
+              weightBusy && weightsGoal
+                ? '下载中…'
+                : `下载缺失权重（约 ${weightSizeText}）`,
+            ),
+        ),
+        weightsOpen
+          ? createElement(
+            'div',
+            { className: 'dsh-forge-weights-body' },
+            weights?.note === undefined ? null : createElement('div', { className: 'dsh-forge-weights-note' }, weights.note),
+            weights?.base === undefined || weights.base === null
+              ? null
+              : createElement('div', { className: 'dsh-forge-weights-note' }, `目标目录：${weights.base}`),
+            ...weightRows.map((row) => createElement(
+              'div',
+              { key: row.filename, className: 'dsh-forge-weight-row', 'data-weight-state': row.state },
+              createElement('span', { className: 'dsh-forge-weight-name' }, row.filename),
+              createElement('span', { className: 'dsh-forge-weight-state' }, row.label),
+            )),
+          )
+          : null,
+      )
+      : null,
+
     // Inline log drawer — the log is read through STUDIO_LOG_ROUTE and shown
     // here; no external terminal window is ever opened.
     logOpen
@@ -5135,7 +5384,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         createElement(
           'div',
           { className: 'dsh-forge-log-head' },
-          createElement('span', {}, 'ComfyUI 启动日志（尾部 200 行）'),
+          createElement('span', {}, 'ComfyUI 实时日志（每 2 秒刷新 · 尾部 200 行）'),
           createElement(
             'button',
             {
@@ -5190,7 +5439,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         {
           type: 'button',
           className: 'dsh-forge-btn is-ghost dsh-forge-step-retry',
-          title: '重新探测 ComfyUI 与权重（环境安装/下载由 qwen_image_setup 负责）',
+          title: '重新探测 ComfyUI 与权重',
           onClick: () => { void loadConfig() },
         },
         '重新检测',

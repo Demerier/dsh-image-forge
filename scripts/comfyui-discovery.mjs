@@ -454,58 +454,6 @@ export async function systemStats(endpoint, { timeoutMs = 2500, fetchImpl = fetc
 /** Default sleep used by {@link waitForComfyStats}; injected by tests. */
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-/**
- * Open a **separate, disposable** terminal window that tails a launch log.
- *
- * The ComfyUI child itself is always started detached and hidden — its window
- * would be an empty console that a user can close by accident, taking the GPU
- * process with it. This helper opens a second process that only *reads* the log,
- * so closing it is harmless: ComfyUI keeps running. On Windows PowerShell's
- * `Get-Content -Wait` is a live tail; on POSIX we try a few common terminals
- * and report which one we found. The returned child is unref'd, so the plugin
- * can exit without holding it.
- *
- * @returns {object} { opened, command } — `opened` is false when no terminal
- *   could be found; `command` is what was tried (for the report).
- */
-export function openLogTerminal(logPath, { platform = osPlatform(), spawn: spawnImpl = spawn } = {}) {
-  let command
-  if (platform === 'win32') {
-    // `cmd /c start` creates a brand-new console window whose stdout IS that
-    // window. A bare spawn(powershell, { stdio: 'ignore' }) throws the tail
-    // output away to NUL, which is exactly the empty-window symptom.
-    // The quoted first argument is the window title; Node quotes it for us.
-    // ComfyUI writes UTF-8 (the launch env sets PYTHONUTF8=1). Windows PowerShell
-    // decodes with the system ANSI code page by default, so CJK turns to mojibake
-    // in the window. Force UTF-8 both on the console output and on the reader.
-    const tail = `[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null; Get-Content -LiteralPath '${String(logPath).replace(/'/g, "''")}' -Encoding UTF8 -Wait -Tail 80`
-    command = {
-      bin: 'cmd.exe',
-      args: ['/d', '/c', 'start', 'ComfyUI 实时日志', 'powershell.exe', '-NoProfile', '-Command', tail],
-      // Kept for the report and tests: the process that actually tails.
-      tailBin: 'powershell.exe',
-      tailArgs: [tail],
-    }
-  } else if (platform === 'darwin') {
-    command = { bin: 'open', args: ['-a', 'Terminal', logPath] }
-  } else {
-    command = { bin: 'x-terminal-emulator', args: ['-e', 'tail', '-f', logPath] }
-  }
-  try {
-    const child = spawnImpl(command.bin, command.args, {
-      detached: true,
-      windowsHide: false,
-      // The launcher's own output is irrelevant: `start` opens a separate
-      // console and hands the tail process that console as its stdout.
-      stdio: 'ignore',
-      shell: false,
-    })
-    child.unref()
-    return { opened: true, command: command.bin }
-  } catch {
-    return { opened: false, command: command.bin }
-  }
-}
 
 /**
  * Start a planned install **detached**, with its output in a log file and the pid
