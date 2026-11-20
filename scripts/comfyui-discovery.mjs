@@ -471,10 +471,17 @@ const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms))
 export function openLogTerminal(logPath, { platform = osPlatform(), spawn: spawnImpl = spawn } = {}) {
   let command
   if (platform === 'win32') {
-    // -NoProfile keeps it fast; -Wait tails; -Tail caps the initial backscroll.
+    // `cmd /c start` creates a brand-new console window whose stdout IS that
+    // window. A bare spawn(powershell, { stdio: 'ignore' }) throws the tail
+    // output away to NUL, which is exactly the empty-window symptom.
+    // The quoted first argument is the window title; Node quotes it for us.
+    const tail = `Get-Content -LiteralPath '${String(logPath).replace(/'/g, "''")}' -Wait -Tail 80`
     command = {
-      bin: 'powershell.exe',
-      args: ['-NoProfile', '-Command', `Get-Content -LiteralPath '${logPath}' -Wait -Tail 80`],
+      bin: 'cmd.exe',
+      args: ['/d', '/c', 'start', 'ComfyUI 实时日志', 'powershell.exe', '-NoProfile', '-Command', tail],
+      // Kept for the report and tests: the process that actually tails.
+      tailBin: 'powershell.exe',
+      tailArgs: [tail],
     }
   } else if (platform === 'darwin') {
     command = { bin: 'open', args: ['-a', 'Terminal', logPath] }
@@ -485,6 +492,8 @@ export function openLogTerminal(logPath, { platform = osPlatform(), spawn: spawn
     const child = spawnImpl(command.bin, command.args, {
       detached: true,
       windowsHide: false,
+      // The launcher's own output is irrelevant: `start` opens a separate
+      // console and hands the tail process that console as its stdout.
       stdio: 'ignore',
       shell: false,
     })

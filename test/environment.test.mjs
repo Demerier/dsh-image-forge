@@ -1014,9 +1014,14 @@ test('showLog opens a separate live-log viewer without unhiding the renderer', a
     const [viewerBin, viewerArgv, viewerOpts] = spawnCalls[1]
     assert.equal(rendererBin, machine.winPython)
     assert.equal(rendererOpts.windowsHide, true, 'the renderer stays hidden')
-    assert.match(String(viewerBin), /powershell/i)
+    // Windows opens the tail in its own console via cmd /c start; the shell's
+    // own output is ignored on purpose so the child's console owns the stream.
+    assert.match(String(viewerBin), /cmd/i)
+    assert.ok(viewerArgv.some((a) => String(a).includes('start')), 'a new console window is started')
     assert.ok(viewerArgv.some((a) => String(a).includes('Get-Content')), 'viewer tails the log')
+    assert.ok(viewerArgv.some((a) => String(a).includes('powershell')), 'the tail runs in PowerShell')
     assert.equal(viewerOpts.windowsHide, false, 'the viewer is a visible window')
+    assert.equal(viewerOpts.stdio, 'ignore', 'the launcher output is discarded; the child console owns the stream')
     assert.match(String(status.note), /查看器|关掉/)
   } finally {
     await fake.close()
