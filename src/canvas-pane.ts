@@ -55,6 +55,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent as ReactChangeEvent,
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -257,6 +258,8 @@ export interface FlowCanvasProps {
   readonly onOpen?: (nodeId: string) => void
   /** Compile a layout node's draft and generate from it (§8.1). */
   readonly onGenerateLayout?: (nodeId: string) => void
+  /** The node's inline summary.caption field (the one input 生成 cannot do without). */
+  readonly onLayoutCaption?: (nodeId: string, caption: string) => void
   /** Ids that may not be dragged yet (a task in flight stays put). */
   readonly locked?: ReadonlySet<string>
   /**
@@ -623,6 +626,7 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     onRemove: (nodeId) => { latest.current.onRemove?.(nodeId) },
     onOpen: (nodeId) => { latest.current.onOpen?.(nodeId) },
     onGenerateLayout: (nodeId) => { latest.current.onGenerateLayout?.(nodeId) },
+    onLayoutCaption: (nodeId, caption) => { latest.current.onLayoutCaption?.(nodeId, caption) },
     onOpenDetail: (nodeId) => { latest.current.onOpenDetail?.(nodeId) },
   }), [])
 
@@ -1191,6 +1195,8 @@ interface FlowNodeActions {
   readonly onRemove?: (nodeId: string) => void
   readonly onOpen?: (nodeId: string) => void
   readonly onGenerateLayout?: (nodeId: string) => void
+  /** The node's inline `summary.caption` field: it writes the whole-image sentence. */
+  readonly onLayoutCaption?: (nodeId: string, caption: string) => void
   /** U06: the locked thumbnail's "在详情页编辑" — activate that node's tab. */
   readonly onOpenDetail?: (nodeId: string) => void
 }
@@ -1432,9 +1438,6 @@ function LayoutEditorSlot(props: {
           appliedRef.current = draft
           latestRef.current.onDraft?.(latestRef.current.nodeId, draft)
         },
-        // The node is the draft plus chrome, so the editor only draws the canvas.
-        // Its toolbar/caption/export fields live in the node's detail tab (§8.4).
-        compact: true,
       })
       editorRef.current = editor
       setMountError(undefined)
@@ -1558,6 +1561,24 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
         },
         '生成',
       ),
+    ),
+    // The whole-image sentence is the *one field* a layout cannot generate
+    // without (T21 takes it as the prompt), so it belongs on the node itself and
+    // not only in the detail tab: without it the 生成 button above can only fail.
+    createElement(
+      'div',
+      { className: 'dsh-forge-flow-layout-caption' },
+      createElement('input', {
+        type: 'text',
+        className: 'dsh-forge-flow-layout-caption-input nodrag nopan',
+        placeholder: 'summary.caption：整图描述（生成必需）',
+        value: typeof data['caption'] === 'string' ? data['caption'] : '',
+        'aria-label': '布局整图描述',
+        onPointerDown: (event: ReactPointerEvent<HTMLInputElement>) => { event.stopPropagation() },
+        onChange: (event: ReactChangeEvent<HTMLInputElement>) => {
+          actions.onLayoutCaption?.(nodeId, event.target.value)
+        },
+      }),
     ),
     createElement(
       'div',

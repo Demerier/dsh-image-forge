@@ -373,6 +373,7 @@ function dataOf(node: FlowSourceNode): FlowNodeData {
       kind: 'layout',
       nodeId: node.id,
       draft: node.draft,
+      caption: typeof node.draft.summary?.caption === 'string' ? node.draft.summary.caption : '',
       boxes: node.draft.items.length,
       width: node.draft.width,
       height: node.draft.height,

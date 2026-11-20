@@ -3758,13 +3758,12 @@ test('U04 S4: a layout node saves its draft, and its box is the box its editor i
   assert.ok(CLIENT_SOURCE.includes('onDraft: updateLayoutDraft'), 'the embedded editor reports into it')
   // The node is the draft plus chrome: a 480×420 box leaves 320 px for a 1536×1024
   // draft, while the standalone editor needs ~690 px for its toolbar, caption rows,
-  // hint and export box. Measured in the panel, everything below the canvas landed
-  // outside the node, so the node mounts the editor canvas-only and the fields live
-  // in its detail tab (§8.4).
-  assert.ok(CLIENT_SOURCE.includes('compact: true'), 'the canvas node mounts the editor canvas-only')
-  // The bundle is minified with double quotes, so match on the id, not on the
-  // source's quote style.
-  assert.ok(CLIENT_SOURCE.includes("'open-detail'") || CLIENT_SOURCE.includes('"open-detail"'), 'and the detail tab is how the fields are reached')
+  // hint and export box. So the node's host **scrolls** (nothing is clipped away)
+  // and the one field a generation cannot do without — `summary.caption`, which T21
+  // takes as the prompt — is a real input on the node itself.
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-flow-layout-caption-input'), 'the caption is an input on the node')
+  assert.ok(CLIENT_SOURCE.includes('onLayoutCaption'), 'and it writes through the draft path')
+  assert.ok(/dsh-forge-flow-layout-host.{0,80}overflow:auto/.test(CLIENT_SOURCE) || CLIENT_SOURCE.includes('dsh-forge-flow-layout-host{position:absolute;inset:0;overflow:auto'), 'the node host scrolls instead of clipping the editor fields')
 
   // 尺寸与 zoom 来源: the editor measures its own box with `getBoundingClientRect`
   // *inside* the zoomed viewport, so the zoom is already in that measurement and

@@ -467,8 +467,11 @@ export const CANVAS_FLOW_CSS = `
 .dsh-forge-flow-node.is-layout{background:rgba(127,127,127,.06)}
 .dsh-forge-flow-layout-head{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 8px;border-bottom:1px solid rgba(127,127,127,.2);cursor:grab}
 .dsh-forge-flow-layout-title{font-size:11px;font-weight:600;opacity:.8}
+.dsh-forge-flow-layout-caption{padding:3px 6px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto;display:flex}
+.dsh-forge-flow-layout-caption-input{width:100%;box-sizing:border-box;padding:2px 6px;border-radius:5px;border:1px solid rgba(127,127,127,.4);background:rgba(127,127,127,.07);color:inherit;font:11px/1.4 system-ui,sans-serif;cursor:text}
+.dsh-forge-flow-layout-caption-input:focus{outline:none;border-color:#3b82f6}
 .dsh-forge-flow-layout-body{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
-.dsh-forge-flow-layout-host{position:absolute;inset:0}
+.dsh-forge-flow-layout-host{position:absolute;inset:0;overflow:auto;scrollbar-width:thin}
 .dsh-forge-flow-layout-foot{display:flex;justify-content:space-between;gap:6px;padding:3px 8px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;border-top:1px solid rgba(127,127,127,.2)}
 .dsh-forge-flow-layout-error{padding:8px;font-size:10.5px;line-height:1.5;color:#dc2626}
 .dsh-forge-flow-node.is-draft{gap:6px;padding:10px;border-style:dashed;border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.05)}

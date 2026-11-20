@@ -4070,6 +4070,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * board action that does not exist yet (C13 report); this updates the canvas
    * state only, and a reload does not rebuild it.
    */
+
   const updateLayoutDraft = useCallback((id: string, draft: BoardLayoutDraft) => {
     const current = nodesRef.current
     const node = current.find((entry) => entry.id === id)
@@ -4093,6 +4094,22 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // C14: the draft is what a later generation compiles — persist it (§8.1).
     scheduleLayoutPersist(id)
   }, [pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes])
+
+  /**
+   * The node's own `summary.caption` field.
+   *
+   * Only the sentence changes, so this reuses the draft write path (one undo step,
+   * the same 700 ms persist) by building the next draft around it. Without this
+   * field a fresh node could never be generated: T21 takes the caption as the
+   * prompt and refuses an empty one. Declared after `updateLayoutDraft` because
+   * `const` bindings are not hoisted — calling it earlier threw TDZ at mount.
+   */
+  const updateLayoutCaption = useCallback((id: string, caption: string) => {
+    const node = nodesRef.current.find((entry) => entry.id === id)
+    if (node === undefined || !isLayoutNode(node)) return
+    const draft: BoardLayoutDraft = { ...node.draft, summary: { ...node.draft.summary, caption } }
+    updateLayoutDraft(id, draft)
+  }, [updateLayoutDraft])
 
   /** Create a layout node with the default 1536×1024 draft (C13 step 5). */
   const addLayoutNode = useCallback((options: {
@@ -6055,6 +6072,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 onRemove: removeNode,
                 onOpen: openLightbox,
                 onGenerateLayout: generateLayoutNode,
+                onLayoutCaption: updateLayoutCaption,
                 // Step 2: the gestures the DOM canvas had. Each one lands on the
                 // same studio callback the fallback path uses, so the undo stack,
                 // the 700 ms save debounce and the menus cannot diverge.
