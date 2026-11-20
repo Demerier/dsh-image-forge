@@ -172,7 +172,9 @@ import {
   LAYOUT_EDITOR_CLASS,
   LAYOUT_NODE_DEFAULT_WIDTH,
   clampLayoutNodeWidth,
+  compileLayout,
   draftToEditorState,
+  exportDraft,
   layoutNodeHeight,
   mountLayoutEditor,
   stateToDraft,
@@ -4883,6 +4885,44 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       case 'layout-generate':
         if (target !== undefined) generateLayoutNode(target)
         break
+      case 'layout-send-form': {
+        // The draft's whole-image sentence is what a MOSS run is prompted with
+        // (C14/T21), so "send to form" is literally that: the sentence lands in
+        // the prompt box and the user edits it there.
+        const node = nodesRef.current.find((entry) => entry.id === target)
+        if (node === undefined || !isLayoutNode(node)) break
+        const caption = node.draft.summary.caption.trim()
+        const plan = layoutGeneratePlan(node.draft)
+        setPrompt(caption)
+        if (plan.ok) setRatio(plan.params.ratio)
+        setNote(caption.length === 0
+          ? '这个布局还没有 summary.caption；正文已清空，先写整图描述。'
+          : '已把布局的整图描述送进提示词框；改完点「生成」即可。')
+        focusPrompt()
+        break
+      }
+      case 'layout-export-draft':
+      case 'layout-export-compiled': {
+        // The embedded editor's own 导出 buttons cannot be reached inside a
+        // canvas node (compact mode), so the menu is the export affordance.
+        const node = nodesRef.current.find((entry) => entry.id === target)
+        if (node === undefined || !isLayoutNode(node)) break
+        const draft = node.draft
+        try {
+          const text = id === 'layout-export-draft'
+            ? exportDraft(draftToEditorState(draft))
+            : compileLayout(draft as unknown as LayoutDraft)
+          const suffix = id === 'layout-export-draft' ? 'draft' : 'compiled'
+          downloadBlob(
+            new Blob([text], { type: id === 'layout-export-draft' ? 'application/json' : 'text/plain' }),
+            `layout-${node.id}-${suffix}.json`,
+          )
+          setNote(id === 'layout-export-draft' ? '已导出 draft JSON。' : '已导出 compiled：可直接贴进 prompt。')
+        } catch (error) {
+          setNote('导出失败：' + (error instanceof Error ? error.message : String(error)))
+        }
+        break
+      }
       case 'new-layout':
         addLayoutNode()
         break
@@ -4927,6 +4967,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     fitView,
     focusPrompt,
     generateLayoutNode,
+    setPrompt,
+    setRatio,
     menu?.target,
     menu?.x,
     menu?.y,

@@ -459,12 +459,12 @@ test('contextMenuItems: blank canvas offers every §6.4 action now that its owne
   assert.deepEqual(enabled, items.map((item) => item.id))
   for (const item of items) assert.ok(item.label.length > 0, `${item.id} needs a label`)
 
-  // §6.4's layout menu: generation is live (C14); the three conveniences say
-  // why they are not instead of naming a task that already shipped.
+  // §6.4's layout menu: every entry is live — generation (C14), the detail tab
+  // that owns the full editor (§8.4), send-to-form and both exports.
   const layout = contextMenuItems({ kind: 'node', nodeKind: 'layout' })
   assert.deepEqual(
     layout.map((item) => item.id),
-    ['layout-generate', 'layout-send-form', 'layout-export-draft', 'layout-export-compiled', 'remove'],
+    ['layout-generate', 'open-detail', 'layout-send-form', 'layout-export-draft', 'layout-export-compiled', 'remove'],
   )
   assert.equal(layout[0].disabled, undefined, 'layout generation is clickable')
   for (const item of layout.filter((entry) => entry.disabled === true)) {

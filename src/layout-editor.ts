@@ -1152,6 +1152,19 @@ export interface LayoutEditorOptions {
    * the canvas integration leaves it at the default.
    */
   pointerScale?: () => number
+  /**
+   * Draw only the canvas, in a container that owns the chrome.
+   *
+   * A canvas node is **the draft plus a title bar, a footnote and a resize grip**
+   * (a 480×420 node is 320 px of draft), so the standalone editor's toolbar,
+   * caption rows, hint paragraph and export box cannot fit: measured in the
+   * panel, a 137 px body host held 658 px of editor, and every field below the
+   * canvas landed outside the node. The node therefore mounts the editor
+   * **canvas-only** and puts the fields it needs in the panel's detail tab; the
+   * tab (§8.4/DD13) is where the full editor lives. Nothing is lost from the
+   * document: a box still draws, moves and resizes here.
+   */
+  compact?: boolean
 }
 
 /** The host-facing editor handle; the host owns the container and its removal. */
@@ -1301,6 +1314,23 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   output.placeholder = '导出结果（draft 可再导入，compiled 直接贴进 prompt）'
   output.setAttribute('style', 'width:100%;box-sizing:border-box;resize:vertical;font-family:ui-monospace,monospace;' + fieldStyle)
 
+  const compact = options.compact === true
+  if (compact) {
+    // Canvas-only: the host draws the chrome and the fields elsewhere. Its own
+    // height comes from the draft's aspect ratio (`layoutNodeHeight`), which is
+    // exactly the box this element is given.
+    toolbar.style.display = 'none'
+    itemRow.style.display = 'none'
+    summaryInput.style.display = 'none'
+    hint.style.display = 'none'
+    exportRow.style.display = 'none'
+    output.style.display = 'none'
+    wrapper.setAttribute('style', 'display:flex;flex-direction:column;gap:0;height:100%;font:12px/1.5 system-ui,sans-serif;color:inherit;')
+    canvas.setAttribute('style', 'position:relative;width:100%;height:100%;flex:1 1 auto;min-height:0;background:#12161c;overflow:hidden;touch-action:none;cursor:crosshair;box-sizing:border-box;border:1px solid #3a3a3a;')
+    // Visibility is not enough: a hidden child still contributes its box to
+    // `scrollHeight`, and the node's host must never scroll.
+    canvas.style.aspectRatio = ''
+  }
   wrapper.appendChild(toolbar)
   wrapper.appendChild(canvas)
   wrapper.appendChild(itemRow)

@@ -1432,6 +1432,9 @@ function LayoutEditorSlot(props: {
           appliedRef.current = draft
           latestRef.current.onDraft?.(latestRef.current.nodeId, draft)
         },
+        // The node is the draft plus chrome, so the editor only draws the canvas.
+        // Its toolbar/caption/export fields live in the node's detail tab (§8.4).
+        compact: true,
       })
       editorRef.current = editor
       setMountError(undefined)

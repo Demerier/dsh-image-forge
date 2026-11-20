@@ -3756,6 +3756,15 @@ test('U04 S4: a layout node saves its draft, and its box is the box its editor i
   assert.ok(draft.includes('layoutNodeHeight('), 'the node height follows the draft')
   assert.ok(draft.includes('clampLayoutNodeWidth('), 'and the width stays inside the band')
   assert.ok(CLIENT_SOURCE.includes('onDraft: updateLayoutDraft'), 'the embedded editor reports into it')
+  // The node is the draft plus chrome: a 480×420 box leaves 320 px for a 1536×1024
+  // draft, while the standalone editor needs ~690 px for its toolbar, caption rows,
+  // hint and export box. Measured in the panel, everything below the canvas landed
+  // outside the node, so the node mounts the editor canvas-only and the fields live
+  // in its detail tab (§8.4).
+  assert.ok(CLIENT_SOURCE.includes('compact: true'), 'the canvas node mounts the editor canvas-only')
+  // The bundle is minified with double quotes, so match on the id, not on the
+  // source's quote style.
+  assert.ok(CLIENT_SOURCE.includes("'open-detail'") || CLIENT_SOURCE.includes('"open-detail"'), 'and the detail tab is how the fields are reached')
 
   // 尺寸与 zoom 来源: the editor measures its own box with `getBoundingClientRect`
   // *inside* the zoomed viewport, so the zoom is already in that measurement and

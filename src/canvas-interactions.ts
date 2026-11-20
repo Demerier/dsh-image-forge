@@ -729,9 +729,13 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
       // conveniences without a wired handler, and the hint says so instead of
       // naming a task that has already shipped.
       { id: 'layout-generate', label: '生成', hint: 'compiled 作为 MOSS 正向编码文本（仅 moss-sft）' },
-      { id: 'layout-send-form', label: '发送到表单', disabled: true, hint: '尚未接线：标题栏「生成」已可直接出图' },
-      { id: 'layout-export-draft', label: '导出 draft', disabled: true, hint: '尚未接线：内嵌编辑器底部有导出按钮' },
-      { id: 'layout-export-compiled', label: '导出 compiled', disabled: true, hint: '尚未接线：内嵌编辑器底部有导出按钮' },
+      // §8.4: the node draws the canvas only, so the tab is where the caption
+      // rows, the hint and the export box live. Without this entry a layout node
+      // would have no way to reach the full editor.
+      { id: 'open-detail', label: '打开详情（完整编辑器）', hint: '在页签里编辑 summary.caption、查看画框列表' },
+      { id: 'layout-send-form', label: '发送到表单', hint: '把 draft 的 summary.caption 送进生成表单，改完再点生成' },
+      { id: 'layout-export-draft', label: '导出 draft', hint: '下载这份 draft 的 JSON（可再导入）' },
+      { id: 'layout-export-compiled', label: '导出 compiled', hint: '下载 compiled（直接贴进 prompt）' },
       { id: 'remove', label: '删除节点' },
     ]
   }
