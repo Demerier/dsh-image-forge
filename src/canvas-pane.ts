@@ -1537,6 +1537,7 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
   const boxes = typeof data['boxes'] === 'number' ? data['boxes'] : 0
   const width = typeof data['width'] === 'number' ? data['width'] : 0
   const height = typeof data['height'] === 'number' ? data['height'] : 0
+  const referenceCount = typeof data['referenceCount'] === 'number' ? data['referenceCount'] : 0
   const detailOpen = data['detailOpen'] === true
   return createElement(
     'div',
@@ -1596,7 +1597,8 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
     createElement(
       'div',
       { className: 'dsh-forge-flow-layout-foot' },
-      `${String(boxes)} 框 · ${String(width)}×${String(height)}`,
+      `${String(boxes)} 框 · ${String(width)}×${String(height)}`
+        + (referenceCount > 0 ? ` · ${String(referenceCount)} 参考（布局通路不支持参考图）` : ''),
     ),
     createElement(NodeHandles, { kind: 'layout' }),
   )

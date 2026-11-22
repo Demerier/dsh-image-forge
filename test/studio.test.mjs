@@ -4762,3 +4762,18 @@ test('the live-progress line is collapsed until a run reports something', async 
     network.restore()
   }
 })
+test('a layout node wired to a picture refuses the layout run by name', () => {
+  // The MOSS layout graph is text-to-image only: its positive conditioning is the
+  // compiled JSON, and it has no reference slots. Landing a wire on a layout is
+  // still meaningful (the node keeps the reference and shows it), but the run has
+  // to say why it will not silently ignore it.
+  const draft = {
+    width: 1024, height: 1024, bbox_coord_space: 'abs', bbox_format: 'xyxy',
+    summary: { caption: 'poster' },
+    items: [{ label: 'object', caption: 'cup', bbox: [0, 0, 400, 400] }],
+  }
+  assert.equal(layoutGeneratePlan(draft, 0).ok, true)
+  const refused = layoutGeneratePlan(draft, 2)
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /参考图/)
+})

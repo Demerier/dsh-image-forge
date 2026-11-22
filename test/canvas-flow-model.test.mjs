@@ -693,8 +693,8 @@ test('which nodes can start and accept a wire is one list, read by every layer',
   )
   assert.deepEqual(
     [imageNode('i'), taskNode('t'), layoutNode('l'), draftNode('d')].map((node) => canAcceptConnection(node.kind)),
-    [true, false, false, false],
-    'only a picture has a file a reference can point at',
+    [true, false, true, false],
+    'a picture and a layout have a file a reference can point at',
   )
 })
 
@@ -731,14 +731,14 @@ test('a wire lands on a picture and nowhere else', () => {
 
   assert.equal(judge('a', 'b'), 'ok', 'a picture may reference another picture')
   assert.equal(judge('a', 'a'), 'self', 'and never itself')
-  assert.equal(judge('a', 'l'), 'kind', 'a layout draft has no file to reference')
+  assert.equal(judge('a', 'l'), 'ok', 'a picture wired into a layout is a reference for it')
   assert.equal(judge('a', 't'), 'kind', 'a task in flight has no file either')
   assert.equal(judge('l', 'a'), 'ok', 'a layout draft may be the provenance of a picture')
   assert.equal(judge('t', 'a'), 'kind', 'a task cannot start a wire')
   assert.equal(judge('a', 'nobody'), 'missing', 'an id this board does not hold cannot be joined')
   // The boolean React Flow asks for is the same judgement.
   assert.equal(connectionIsValid({ sourceId: 'a', targetId: 'b', nodes }), true)
-  assert.equal(connectionIsValid({ sourceId: 'a', targetId: 'l', nodes }), false)
+  assert.equal(connectionIsValid({ sourceId: 'a', targetId: 'l', nodes }), true, 'the preview colours this wire valid')
 })
 
 test('lineage refuses to close a cycle', () => {
@@ -776,6 +776,7 @@ test('every way of putting the wire back builds nothing', () => {
     imageNode('a', { x: 0, y: 0 }),
     imageNode('b', { x: 600, y: 0, parents: ['a'] }),
     layoutNode('l', { x: 0, y: 600 }),
+    taskNode('t', { x: 600, y: 600 }),
   ])
   const drop = (sourceId, point, travelled = true) =>
     planConnectionDrop({ sourceId, point, travelled, nodes })
@@ -786,8 +787,12 @@ test('every way of putting the wire back builds nothing', () => {
   // Put back inside the node it came from — checked against the source's own
   // box, not as blank canvas, so no menu opens on top of it.
   assert.deepEqual(drop('a', { x: 100, y: 100 }), { kind: 'cancel', sourceId: 'a', reason: 'returned' })
-  // A node that cannot take a reference.
-  assert.deepEqual(drop('a', { x: 10, y: 620 }), { kind: 'cancel', sourceId: 'a', reason: 'kind' })
+  // A node that cannot take a reference: a layout now can, so this case aims at
+  // the task node instead (kind is still the rule for a task in flight).
+  assert.deepEqual(drop('a', { x: 610, y: 620 }), { kind: 'cancel', sourceId: 'a', reason: 'kind' })
+  // Dropping on the layout is now a legal edge, not a refusal: a layout takes a
+  // picture as an input reference.
+  assert.deepEqual(drop('a', { x: 10, y: 620 }), { kind: 'edge', sourceId: 'a', toId: 'l' })
   // A path that would close the loop: b already descends from a.
   assert.deepEqual(drop('b', { x: 20, y: 20 }), { kind: 'cancel', sourceId: 'b', reason: 'cycle' })
   // The source itself is gone (a stale gesture): nothing to join.
@@ -1054,5 +1059,7 @@ test('every lineage target kind renders an inbound handle, but only pictures acc
   assert.equal(canAcceptConnection('image'), true)
   assert.equal(canAcceptConnection('task'), false, 'a task still cannot be a manual drop target')
   assert.equal(canAcceptConnection('draft'), false)
-  assert.equal(canAcceptConnection('layout'), false)
+  // A layout takes a picture as input: it is the one draft kind that consumes
+  // references, so a wire may land on it (U05's "drag it onto the target").
+  assert.equal(canAcceptConnection('layout'), true)
 })

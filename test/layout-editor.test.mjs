@@ -79,6 +79,7 @@ import {
   selectMany,
   setBoxCaption,
   setBoxLabel,
+  setBoxName,
   setCanvasSize,
   setSelectedCaption,
   setSelectedLabel,
@@ -813,4 +814,19 @@ test('the editor opens a draft whose boxes have no caption yet', () => {
     () => draftToEditorState({ ...drafting, items: [{ label: 'text', caption: 'x', bbox: [0, 0, 100, 100] }] }),
     /text items require literal text/,
   )
+})
+test('a box can be named for the panel, and the name never reaches the prompt', () => {
+  // The official schema rejects unknown item fields, so a name is editor-only:
+  // it is how a human finds their own boxes, not something the model reads.
+  let state = createLayoutState({ width: 1024, height: 1024 })
+  state = addBox(state, { bbox: { x1: 0, y1: 0, x2: 200, y2: 200 }, caption: 'cup' })
+  const id = state.items[0].id
+  state = setBoxName(state, id, '  杯子  ')
+  assert.equal(state.items[0].name, '杯子', 'surrounding whitespace is trimmed')
+  const draft = stateToDraft(setSummary(state, { caption: 'x' }))
+  assert.equal('name' in draft.items[0], false, 'the draft carries no editor-only field')
+  const compiled = JSON.parse(compileLayout(draft))
+  assert.equal(compiled.items[0].name, undefined)
+  // An empty name clears it instead of storing an empty string.
+  assert.equal('name' in setBoxName(state, id, '   ').items[0], false)
 })

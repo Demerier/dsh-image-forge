@@ -84,6 +84,8 @@ export interface FlowTaskSource {
 /** A MOSS layout draft: the editor plus its display box (§8.1). */
 export interface FlowLayoutSource {
   readonly kind: 'layout'
+  /** Pictures wired into this draft (the node shows the count). */
+  readonly references?: readonly unknown[]
   readonly id: string
   readonly x: number
   readonly y: number
@@ -377,6 +379,7 @@ function dataOf(node: FlowSourceNode): FlowNodeData {
       boxes: node.draft.items.length,
       width: node.draft.width,
       height: node.draft.height,
+      referenceCount: node.references?.length ?? 0,
     }
   }
   return { kind: 'draft', nodeId: node.id }
@@ -1069,7 +1072,13 @@ export function canStartConnection(kind: FlowSourceNode['kind']): boolean {
 
 /** The kinds a wire may land on: a picture, and only a picture. */
 export function canAcceptConnection(kind: FlowSourceNode['kind']): boolean {
-  return kind === 'image'
+  // A layout accepts a wire too: it is the one draft kind that *uses* pictures as
+  // input, and U05 already gives picture nodes the same "drag it onto the target"
+  // gesture. The reference lands on the node as a held reference; whether the
+  // run combines it with the layout is a generation-time question (the MOSS
+  // layout graph has no reference slots yet), and the node says so instead of the
+  // wire silently doing nothing.
+  return kind === 'image' || kind === 'layout'
 }
 
 /**

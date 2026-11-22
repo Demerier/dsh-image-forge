@@ -279,6 +279,14 @@ export interface CompiledLayout {
 export interface LayoutEditorItem {
   /** Editor identity; never serialized (the contract forbids unknown fields). */
   id: string
+  /**
+   * Editor-only label a human gave the box ("标题", "人物 1").
+   *
+   * Never serialized: the official schema rejects unknown item fields outright
+   * ("Do not add children, parent, id, …"), so a name is a way to find your own
+   * boxes in the panel — not model input. What the model reads is `caption`.
+   */
+  name?: string
   label: LayoutItemLabel
   caption: string
   bbox: LayoutBox
@@ -1302,6 +1310,17 @@ export function adoptCanvasSize(state: LayoutEditorState, width: number, height:
   return { ...state, width, height, items }
 }
 
+/** Give the selected box a human name (editor-only; never compiled). */
+export function setBoxName(state: LayoutEditorState, id: string, name: string): LayoutEditorState {
+  const item = getLayoutItem(state, id)
+  if (item === undefined) return state
+  const trimmed = name.trim()
+  const next: LayoutEditorItem = { ...item }
+  if (trimmed.length === 0) delete next.name
+  else next.name = trimmed
+  return { ...state, items: state.items.map((entry) => (entry.id === id ? next : entry)) }
+}
+
 /** Apply one label to every selected box (batch edit, B-tier). */
 export function setSelectedLabel(state: LayoutEditorState, label: LayoutItemLabel): LayoutEditorState {
   assertLabel(label)
@@ -1562,6 +1581,11 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
 
   const itemRow = doc.createElement('div')
   itemRow.setAttribute('style', 'display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start;')
+  const nameInput = doc.createElement('input')
+  nameInput.type = 'text'
+  nameInput.placeholder = '框名（给自己看的，不入模型）'
+  nameInput.title = '只给面板看的标签；官方 schema 不接受这个字段，所以它不会被编译进 prompt'
+  nameInput.setAttribute('style', 'flex:1 1 140px;' + fieldStyle)
   const captionInput = doc.createElement('textarea')
   captionInput.rows = 2
   captionInput.placeholder = 'caption（必填；措辞会污染全图）'
@@ -1582,10 +1606,13 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   paletteInput.type = 'text'
   paletteInput.placeholder = 'palette（逗号分隔的颜色词，可选）'
   paletteInput.setAttribute('style', 'flex:1 1 180px;' + fieldStyle)
+  const itemTagsWrap = labeledField('项 tags', tagsInput)
+  const itemPaletteWrap = labeledField('项 palette', paletteInput)
+  itemRow.appendChild(nameInput)
   itemRow.appendChild(captionInput)
   itemRow.appendChild(textInput)
-  itemRow.appendChild(labeledField('项 tags', tagsInput))
-  itemRow.appendChild(labeledField('项 palette', paletteInput))
+  itemRow.appendChild(itemTagsWrap)
+  itemRow.appendChild(itemPaletteWrap)
 
   const summaryInput = doc.createElement('textarea')
   summaryInput.rows = 2
@@ -1620,9 +1647,12 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     option.textContent = value
     canvasSelect.appendChild(option)
   }
-  summaryRow.appendChild(labeledField('meta', metaInput))
-  summaryRow.appendChild(labeledField('palette', summaryPaletteInput))
-  summaryRow.appendChild(labeledField('canvas', canvasSelect))
+  const metaWrap = labeledField('meta', metaInput)
+  const summaryPaletteWrap = labeledField('palette', summaryPaletteInput)
+  const canvasWrap = labeledField('canvas', canvasSelect)
+  summaryRow.appendChild(metaWrap)
+  summaryRow.appendChild(summaryPaletteWrap)
+  summaryRow.appendChild(canvasWrap)
   wrapper.appendChild(summaryRow)
 
   const hint = doc.createElement('p')
@@ -1656,10 +1686,17 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     // height comes from the draft's aspect ratio (`layoutNodeHeight`), which is
     // exactly the box this element is given.
     toolbar.style.display = 'none'
-    itemRow.style.display = 'none'
+    // The item row **stays**. A box's caption is required by the model contract
+    // (an item is `label` + nonempty `caption` + `bbox`), and the node is where a
+    // box gets drawn — so hiding the field that writes its caption made every
+    // box on the canvas node un-compilable until the user opened the detail tab.
+    // Only the summary/meta/import/export chrome (which duplicates the node's own
+    // inline caption) is hidden here.
+    summaryRow.style.display = 'none'
     summaryInput.style.display = 'none'
     hint.style.display = 'none'
     exportRow.style.display = 'none'
+    importInput.style.display = 'none'
     output.style.display = 'none'
     wrapper.setAttribute('style', 'display:flex;flex-direction:column;gap:0;height:100%;font:12px/1.5 system-ui,sans-serif;color:inherit;')
     canvas.setAttribute('style', 'position:relative;width:100%;height:100%;flex:1 1 auto;min-height:0;background:#12161c;overflow:hidden;touch-action:none;cursor:crosshair;box-sizing:border-box;border:1px solid #3a3a3a;')
@@ -1667,9 +1704,17 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     // `scrollHeight`, and the node's host must never scroll.
     canvas.style.aspectRatio = ''
   }
-  wrapper.appendChild(toolbar)
-  wrapper.appendChild(canvas)
-  wrapper.appendChild(itemRow)
+  // Item row goes **above** the canvas in compact mode: a node is ~320 px of
+  // canvas, and a field below it would sit outside the node's own box.
+  if (compact) {
+    wrapper.appendChild(itemRow)
+    wrapper.appendChild(toolbar)
+    wrapper.appendChild(canvas)
+  } else {
+    wrapper.appendChild(toolbar)
+    wrapper.appendChild(canvas)
+    wrapper.appendChild(itemRow)
+  }
   wrapper.appendChild(summaryInput)
   wrapper.appendChild(hint)
   wrapper.appendChild(exportRow)
@@ -1734,7 +1779,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     )
     const chip = doc.createElement('span')
     chip.setAttribute('style', 'position:absolute;left:-1px;top:-17px;padding:0 4px;border-radius:3px;background:rgba(0,0,0,.72);color:#fff;font-size:11px;line-height:15px;white-space:nowrap;pointer-events:none;')
-    chip.textContent = item.label + ' ' + String(index + 1)
+    chip.textContent = (item.name === undefined || item.name.length === 0 ? '' : item.name + ' · ') + item.label + ' ' + String(index + 1)
     element.appendChild(chip)
     // Handles only on the primary box: eight grips × N selected boxes would hide
     // every neighbour box under its own grips.
@@ -1769,6 +1814,8 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
         ? (state.items.filter((item) => state.selectedIds.includes(item.id)).every((item, _, all) => item.caption === all[0].caption) ? state.items.find((item) => item.id === state.selectedIds[0])?.caption ?? '' : '')
         : (selected === undefined ? '' : selected.caption)
     }
+    nameInput.disabled = selected === undefined
+    if (doc.activeElement !== nameInput) nameInput.value = selected === undefined ? '' : (selected.name ?? '')
     const showText = selected !== undefined && selected.label === 'text'
     textInput.style.display = showText ? '' : 'none'
     textInput.disabled = !showText
@@ -1974,6 +2021,10 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     return parts.length === 0 ? undefined : parts
   }
 
+  nameInput.addEventListener('input', () => {
+    if (state.selectedId === null) return
+    commit(setBoxName(state, state.selectedId, nameInput.value))
+  })
   captionInput.addEventListener('input', () => {
     if (state.selectedIds.length > 1) {
       commit(setSelectedCaption(state, captionInput.value))

@@ -291,6 +291,17 @@ interface LayoutCanvasNode extends CanvasNodeBase {
   readonly w: number
   readonly h: number
   readonly draft: BoardLayoutDraft
+  /**
+   * Pictures wired into this draft.
+   *
+   * The canvas wire from a picture already lands on a *draft* node as held
+   * references; a layout is the other input-taking kind, so it keeps them the
+   * same way. What the run does with them is `layoutGeneratePlan`'s business —
+   * today the MOSS layout graph has no reference slots, so the node reports the
+   * count and the generation refuses the combination by name instead of
+   * pretending the wire did something.
+   */
+  readonly references?: readonly HeldReference[]
 }
 
 /** A generation in flight, or one that ended without a picture (§4.2, §4.5). */
@@ -2743,7 +2754,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const generateLayoutNode = useCallback((nodeId: string) => {
     const node = nodesRef.current.find((entry) => entry.id === nodeId)
     if (node === undefined || !isLayoutNode(node)) return
-    const plan = layoutGeneratePlan(node.draft)
+    const plan = layoutGeneratePlan(node.draft, node.references?.length ?? 0)
     if (!plan.ok) {
       setNote(plan.reason)
       return
@@ -3141,8 +3152,21 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       setNote('这两个节点已经连着了。')
       return
     }
+    // A wire from a picture is also a *reference* for the two kinds that take
+    // pictures as input: a draft (which the string menu has always pre-filled) and
+    // a layout (which had no way to receive one at all). Lineage and reference are
+    // the same gesture here — `parents` records where it came from, the held
+    // reference is the pixels it can send.
+    const held = isImageNode(source) ? referenceOf(source) : undefined
+    const withReference = held === undefined || isLayoutNode(target) === false
+      ? undefined
+      : [...(target.references ?? []).filter((entry) => entry.nodeId !== source.id), held]
     const before = nodesRef.current
-    const after = before.map((node) => (node.id === toId ? { ...node, parents } : node))
+    const after = before.map((node) => {
+      if (node.id !== toId) return node
+      if (withReference === undefined || !isLayoutNode(node)) return { ...node, parents }
+      return { ...node, parents, references: withReference }
+    })
     writeNodes(after)
     pushCommand(snapshotCommand('connect-edge', before, after, (list) => { writeNodes([...list]) }))
     // A picture's lineage is part of its board entry, so the same debounced
@@ -3151,7 +3175,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     scheduleLayout()
     // A layout node persists through its own writer, which already sends parents.
     if (isLayoutNode(target)) scheduleLayoutPersist(toId)
-    setNote('已连线：' + (isImageNode(source) ? '来源图' : '来源节点') + ' → 这个节点；不会触发生成。')
+    setNote(held !== undefined && isLayoutNode(target)
+      ? '已把这张图接进布局当参考；MOSS 布局通路暂时不叠加参考图，生成时会说明原因。'
+      : '已连线：' + (isImageNode(source) ? '来源图' : '来源节点') + ' → 这个节点；不会触发生成。')
   }, [markDirty, pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes])
 
   /** Release a wire on blank canvas: ask what to build there (G26). */
@@ -4930,6 +4956,26 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       case 'layout-generate':
         if (target !== undefined) generateLayoutNode(target)
         break
+      // §8.2's detail tab, from the canvas menu. The *drawer* arm of this same id
+      // lives in runInspectorAction; the menu is a second entry point, and it
+      // silently did nothing until it was wired here — the tab existed, the node
+      // said "打开详情（完整编辑器）", and clicking it was a no-op.
+      case 'open-detail': {
+        const node = nodesRef.current.find((entry) => entry.id === target)
+        const kind = node === undefined ? undefined : detailKindOfNodeKind(node.kind)
+        const open = openNodeRef.current
+        const owner = boardIdRef.current
+        if (kind === undefined) {
+          setNote('这个节点还没有详情视图（待生成节点要先生成一张图）。')
+          break
+        }
+        if (open === undefined || owner === undefined) {
+          setNote('外壳没有接上详情页签。')
+          break
+        }
+        open(owner, node!.id, kind)
+        break
+      }
       case 'layout-send-form': {
         // The draft's whole-image sentence is what a MOSS run is prompted with
         // (C14/T21), so "send to form" is literally that: the sentence lands in
@@ -4937,7 +4983,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         const node = nodesRef.current.find((entry) => entry.id === target)
         if (node === undefined || !isLayoutNode(node)) break
         const caption = node.draft.summary.caption.trim()
-        const plan = layoutGeneratePlan(node.draft)
+        const plan = layoutGeneratePlan(node.draft, node.references?.length ?? 0)
         setPrompt(caption)
         if (plan.ok) setRatio(plan.params.ratio)
         setNote(caption.length === 0

@@ -313,8 +313,15 @@ export type LayoutGeneratePlan =
   | { readonly ok: true; readonly params: BoardTaskParams }
   | { readonly ok: false; readonly reason: string }
 
-export function layoutGeneratePlan(draft: BoardLayoutDraft | undefined): LayoutGeneratePlan {
+export function layoutGeneratePlan(draft: BoardLayoutDraft | undefined, referenceCount = 0): LayoutGeneratePlan {
   if (draft === undefined) return { ok: false, reason: '草稿缺失：这个布局节点没有可生成的内容。' }
+  if (referenceCount > 0) {
+    return {
+      ok: false,
+      reason: '这个布局节点接着 ' + String(referenceCount) + ' 张参考图，但 MOSS 的布局通路（compiled JSON 当正向编码文本）' +
+        '没有参考图输入槽——布局 + 参考图改图的叠加行为官方未定义。请断开参考图，或复制一张图用「用作参考」单独改图。',
+    }
+  }
   if (!Array.isArray(draft.items) || draft.items.length === 0) {
     return { ok: false, reason: '布局至少需要一个画框：先在内嵌编辑器里拖出一个框，再生成。' }
   }
