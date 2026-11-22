@@ -283,6 +283,20 @@ function nowOf(deps: EnvironmentDeps): () => number {
  * Desktop registry (two small JSON files) is enough to find the launch record,
  * while scanning `D:\`, `E:\` and `C:\` on every panel refresh is not.
  */
+/**
+ * The log Comfy Desktop itself writes for a launch it did not start through us.
+ *
+ * Returns `null` when the install has no `logs/comfyui.log`, so a real absence
+ * stays a real absence (the panel hides the button instead of pointing at a
+ * file that does not exist).
+ */
+function desktopLogOf(deps: EnvironmentDeps): string | null {
+  const plan = discoverInstall(deps, { cheap: true })
+  if (!plan || typeof plan.logDir !== 'string') return null
+  const candidate = join(plan.logDir, 'comfyui.log')
+  return fileSizeOrNull(candidate) === null ? null : candidate
+}
+
 function discoverInstall(deps: EnvironmentDeps, options: { readonly cheap?: boolean } = {}): any {
   try {
     return discoverComfyPlan({
@@ -497,6 +511,12 @@ async function readyStatus(
 ): Promise<EnvironmentStatus> {
   const stats = await comfySystemStats(target.endpoint, 5000)
   const ownership = extras.ownership ?? ownershipOf(extras.deps)
+  // A ComfyUI the user started themselves has no launch record, but Comfy
+  // Desktop still writes `logs/comfyui.log`; that is the only live log the
+  // panel can tail for it, so fall back to it instead of reporting no log at
+  // all (which leaves 看日志 permanently hidden).
+  const fallbackLog = extras.logPath === null && !ownership.owned ? desktopLogOf(extras.deps) : null
+  const logPath = extras.logPath ?? fallbackLog
   const sourceLabel =
     source === 'configured'
       ? `配置的端点 ${target.endpoint}`
@@ -513,7 +533,7 @@ async function readyStatus(
     stats: statsOf(stats),
     note: `ComfyUI 在跑：${sourceLabel}。${ownership.owned ? `本次由插件拉起（pid ${String(ownership.pid)}）。` : ''}`,
     hint: null,
-    logPath: extras.logPath,
+    logPath,
     waitedMs: extras.waitedMs,
     pid: extras.launchedPid ?? ownership.pid,
     owned: ownership.owned,
@@ -538,12 +558,18 @@ export async function inspectEnvironment(
   const startedAt = nowOf(deps)()
   const probe = await probeRunning(options, deps)
   if (probe.ok && probe.target !== null) {
+    // A running instance this plugin started has a log file; handing it to the
+    // snapshot is what makes the panel's 看日志 button exist at all. Without it
+    // the drawer code was shipped but unreachable: every ready snapshot carried
+    // `logPath: null`, so the button never rendered.
+    const ownership = ownershipOf(deps)
     return readyStatus(probe.target, options.endpoint.length > 0 ? 'configured' : 'port-probe', {
       install: null,
-      logPath: null,
+      logPath: ownership.recordPath,
       waitedMs: null,
       startedAt,
       deps,
+      ownership,
     })
   }
 

@@ -1013,3 +1013,40 @@ test('start spawns only the hidden renderer — no external log window', async (
     await fake.close()
   }
 })
+
+test('a Windows launch prefers pythonw.exe so no console window can appear', () => {
+  // The black terminal the user saw was `python.exe`: windowsHide does not
+  // suppress a detached child's console on Windows, but pythonw is the same
+  // interpreter with no console at all — and it still writes to the inherited
+  // log fd, which is what keeps the launch log alive.
+  const machine = makeMachine(freshDir())
+  const winPython = machine.winPython
+  const winPythonw = join(dirname(winPython), 'pythonw.exe')
+  assert.equal(existsSync(winPython), true, 'the fixture ships python.exe')
+  assert.equal(discoverComfyPlan(depsOf(machine)).python, winPython, 'without pythonw the console build is used')
+  writeFileSync(winPythonw, '')
+  assert.equal(discoverComfyPlan(depsOf(machine)).python, winPythonw, 'pythonw wins when it exists')
+})
+test('a running ComfyUI the plugin did not start still gets a log to tail', async () => {
+  // The panel's 看日志 button only renders when the snapshot carries a logPath.
+  // A start this plugin did returns its launch log; an instance the user started
+  // has no record, so the snapshot used to say `logPath: null` and the button
+  // never appeared. Comfy Desktop's own logs/comfyui.log is that instance's live
+  // log and is what the fallback points at.
+  const fake = await startStatsServer()
+  try {
+    const machine = makeMachine(freshDir(), { port: fake.port })
+    const desktopLog = join(machine.installPath, 'logs', 'comfyui.log')
+    mkdirSync(dirname(desktopLog), { recursive: true })
+    writeFileSync(desktopLog, 'booting\n')
+    const status = await inspectEnvironment(
+      { ...environmentOptionsOf({ comfyEndpoint: `http://127.0.0.1:${String(fake.port)}`, comfyPorts: '', timeoutMs: 1000 }), installTimeoutMs: 5000, waitIntervalMs: 20 },
+      depsOf(machine, { fetchImpl: async () => new Response(JSON.stringify({ system: {}, devices: [] }), { status: 200, headers: { 'content-type': 'application/json' } }), portProbe: async () => false, kill: () => { throw new Error('dead') } }),
+    )
+    assert.equal(status.state, 'ready')
+    assert.equal(status.owned, false, 'no launch record: not ours')
+    assert.equal(status.logPath, desktopLog, 'the desktop log is the fallback, not null')
+  } finally {
+    await fake.close()
+  }
+})

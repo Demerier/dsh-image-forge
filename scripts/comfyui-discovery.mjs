@@ -112,7 +112,17 @@ export function findPython(installPath, mainPy, platform = osPlatform()) {
   )
   const existing = candidates.filter((p) => existsSync(p))
   const withTorch = existing.filter((p) => hasTorch(dirname(dirname(p))))
-  return withTorch[0] ?? existing[0] ?? null
+  const best = withTorch[0] ?? existing[0] ?? null
+  // On Windows prefer `pythonw.exe`: it is the same interpreter *without a
+  // console*, which is what keeps a detached launch from opening a black
+  // terminal window the user cannot close without taking ComfyUI down. It
+  // still writes to the inherited stdout/stderr handles, so the launch log
+  // keeps working (verified on this machine: pythonw printed into the fd).
+  if (best !== null && platform === 'win32') {
+    const windowless = join(dirname(best), 'pythonw.exe')
+    if (existsSync(windowless)) return windowless
+  }
+  return best
 }
 
 /** `<install>/ComfyUI/main.py` for the Desktop layout, `main.py` for a plain checkout. */

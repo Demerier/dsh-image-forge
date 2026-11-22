@@ -233,8 +233,12 @@ export function registerStudioRoutes(
         const requested = url.searchParams.get('path') ?? ''
         if (requested.length === 0) return jsonError(res, 400, '缺少 path 参数')
         if (!isAbsolute(requested)) return jsonError(res, 400, '必须是绝对路径')
+        // Two kinds are served: the log this plugin's own launch writes, and
+        // Comfy Desktop's `comfyui.log` for an instance the user started. Both
+        // are ComfyUI's stdout, which is why the tail is the same shape.
         const name = basename(requested)
-        if (!name.startsWith('dsh-image-forge-launch-') || !name.endsWith('.log')) {
+        const allowed = (name.startsWith('dsh-image-forge-launch-') || name === 'comfyui.log') && name.endsWith('.log')
+        if (!allowed) {
           return jsonError(res, 400, '只允许读取 ComfyUI 启动日志')
         }
         const target = resolvePath(requested)
