@@ -1846,13 +1846,18 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       // `loadConfig` fetches next describes what is left afterwards, and its
       // logPath may already be gone. A stop's note explains what it did; a
       // start's note is the snapshot's.
-      const note = result.stopNote ?? result.environment?.note
-      const logPath = result.environment?.logPath
-      setEnvironmentNote(
-        note === undefined
-          ? undefined
-          : (logPath !== undefined && !note.includes(logPath) ? `${note} 日志：${logPath}` : note),
-      )
+      // A *successful* start needs no banner: the status line already turns
+      // green with the endpoint and pid, and the one thing a start note adds is
+      // the log path — which now has its own 看日志 button. A start that did NOT
+      // end ready is the opposite case: its note is the whole answer (port taken,
+      // renderer exited, timed out) and it names the log to read.
+      const env = result.environment
+      const note = result.stopNote !== undefined
+        ? result.stopNote
+        : env !== undefined && env.state !== 'ready' && env.note !== undefined
+          ? (env.logPath !== undefined && !env.note.includes(env.logPath) ? `${env.note} 日志：${env.logPath}` : env.note)
+          : undefined
+      setEnvironmentNote(note)
       const controller = new AbortController()
       await loadConfig(controller.signal)
     } finally {
@@ -1968,6 +1973,29 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     ...(live.message === undefined ? {} : { liveMessage: live.message }),
   }), [boards, config, live])
   const stepperSteps = useMemo(() => stepperStepsOf(stepperInput), [stepperInput])
+  // Two visibility rules, one idea: a panel that is simply *working* should look
+  // like a canvas, not like a checklist.
+  //
+  // - The stepper is an explanation of "why can I not generate yet", so it is
+  //   only worth its height when a step is not done, or when the user has
+  //   actively opened a drawer under it (the weight plan / the log).
+  // - The progress line reports a run; idle, it was a permanently visible
+  //   "等待生成 · 实时进度已连接" under the canvas.
+  // `first-run: pending` is not a reason to show the ladder — it is the normal
+  // state of a ready canvas that has no pictures yet, and the prompt box below is
+  // what says so. Only an *unfinished prerequisite* (runtime/install/weights) or a
+  // failure is worth explaining.
+  const stepperVisible = stepperSteps.some((step) => step.id !== 'first-run' && step.state !== 'done')
+    || stepperSteps.some((step) => step.state === 'failed')
+    || weightsOpen
+    || logOpen
+  const progressBusy = live.phase === 'queued' || live.phase === 'running'
+  const progressVisible = progressBusy
+    || live.phase === 'error'
+    || live.phase === 'interrupted'
+    || live.phase === 'done'
+    || live.bridge === 'reconnecting'
+    || live.bridge === 'disconnected'
 
   const selectedBatch = useMemo(
     () => batches.find((batch) => batch.id === selectedId) ?? batches[0],
@@ -5473,12 +5501,13 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
 
     // ---- install → first picture stepper (T22) -----------------------------
     //
-    // Always visible: the four steps are the shortest honest answer to "why is
-    // this not generating yet". States come from the capability snapshot (which
-    // the host derives from its environment probe) and the live SSE phase; the
-    // own action here is re-checking, because install/download are the managed
-    // environment tool's job (qwen_image_setup).
-    createElement(
+    // Shown only while it has something to say: the four steps are the answer to
+    // "why is this not generating yet", and once everything is done that answer
+    // is already the status line above (ComfyUI running · three weights · the
+    // canvas full of pictures). A permanently-green checklist is 100 px of a
+    // workbench whose whole point is the canvas — the user's own note.
+    stepperVisible
+      ? createElement(
       'section',
       { className: 'dsh-forge-stepper', role: 'list', 'aria-label': '从安装到出图' },
       ...stepperSteps.map((step) => createElement(
@@ -5508,18 +5537,22 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         },
         '重新检测',
       ),
-    ),
+    )
+      : null,
 
     // ---- live progress ---------------------------------------------------
     //
-    // Always visible, so "waiting" and "ComfyUI is down" are distinguishable
-    // without clicking anything; `role=status` lets a screen reader announce
-    // step changes. The bar is styled inline because the client stylesheet is
-    // a different file from this one.
+    // The element is always rendered (its `role=status` is how a run's phases
+    // reach assistive tech) but it is **invisible and collapsed** until there is
+    // something to report: an idle panel used to print "等待生成 · 实时进度已连接"
+    // under the canvas, which is a status line for a thing nobody asked about.
     createElement(
       'div',
       {
+        // The class name stays exactly `dsh-forge-progress` (the test harness and
+        // the stylesheet both match it literally); what changes is the state.
         className: 'dsh-forge-progress',
+        'data-live': progressVisible ? 'yes' : 'no',
         'data-phase': live.phase,
         'data-bridge': live.bridge,
         role: 'status',

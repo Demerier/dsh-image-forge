@@ -1555,6 +1555,8 @@ function progressView(panel) {
   return {
     phase: element.props['data-phase'],
     bridge: element.props['data-bridge'],
+    /** `yes` once the line is on screen; `no` while the workbench is idle. */
+    live: element.props['data-live'],
     text: fakeText(element),
   }
 }
@@ -2415,14 +2417,16 @@ test('T22: the stepper maps snapshot + live phase onto four steps', () => {
 })
 
 test('T22: the panel renders the stepper, and 重新检测 re-reads the snapshot', async () => {
-  const { network, panel } = await mountWorkbench()
+  // The ladder is a *not-ready* explanation now, so this case mounts a workbench
+  // whose weights are missing: that is a step the user has to act on.
+  const { network, panel } = await mountWorkbench({ configOverrides: { models: undefined } })
   try {
     const steps = []
     fakeVisit(panel.tree, (entry) => {
       if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps.push(entry)
     })
     assert.deepEqual(steps.map((step) => step.props['data-step']), ['runtime', 'install', 'weights', 'first-run'])
-    assert.deepEqual(steps.map((step) => step.props['data-step-state']), ['done', 'done', 'done', 'pending'])
+    assert.deepEqual(steps.map((step) => step.props['data-step-state']), ['done', 'done', 'failed', 'pending'])
 
     const configCalls = () => network.calls.filter((call) => call.url.indexOf(STUDIO_CONFIG_ROUTE) === 0).length
     const before = configCalls()
@@ -4699,5 +4703,62 @@ test('P2b: a partial dry run still labels the on-disk row 已在盘 and the rest
     assert.ok(download !== undefined, 'the missing two offer the download')
   } finally {
     panel.unmount?.()
+  }
+})
+// ---------------------------------------------------------------------------
+// Redundancy: a working panel should look like a canvas, not a checklist.
+// ---------------------------------------------------------------------------
+
+test('T22: the stepper appears only while a step is not done', async () => {
+  // All-green is already the status line's story (running · weights · pictures),
+  // so the four-step checklist must not hold 100 px of canvas forever.
+  const done = await mountWorkbench()
+  try {
+    const steps = []
+    fakeVisit(done.panel.tree, (entry) => {
+      if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps.push(entry)
+    })
+    assert.equal(steps.length, 0, 'nothing to explain means nothing to render')
+  } finally {
+    done.network.restore()
+  }
+
+  // A not-ready snapshot flips it back on, with the reason on the failed step.
+  const broken = await mountWorkbench({
+    configOverrides: { ready: false, reason: 'ComfyUI 未连接', models: undefined },
+  })
+  try {
+    const steps = []
+    fakeVisit(broken.panel.tree, (entry) => {
+      if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps.push(entry)
+    })
+    assert.equal(steps.length, 4, 'a failure is exactly when the ladder is worth its height')
+    assert.equal(steps[0].props['data-step-state'], 'failed')
+  } finally {
+    broken.network.restore()
+  }
+})
+
+test('the live-progress line is collapsed until a run reports something', async () => {
+  // It stays in the DOM (role=status must exist before the first announcement),
+  // but an idle workbench used to print '等待生成 · 实时进度已连接' under the canvas.
+  const { network, panel } = await mountWorkbench()
+  try {
+    const source = network.open()
+    source.emit('message', { type: 'state', state: 'connected', endpoint: 'http://127.0.0.1:8188' })
+    await settle(panel)
+    const idle = progressView(panel)
+    assert.equal(idle.live, 'no', 'connected but idle is not news')
+    assert.ok(idle.text.includes('等待生成'), 'the text is still there for a screen reader')
+
+    source.emit('message', { type: 'start', promptId: 'p-collapse' })
+    await settle(panel)
+    assert.equal(progressView(panel).live, 'yes', 'a run makes the line visible')
+
+    source.emit('message', { type: 'done', promptId: 'p-collapse' })
+    await settle(panel)
+    assert.equal(progressView(panel).live, 'yes', 'a finished run still reports its verdict')
+  } finally {
+    network.restore()
   }
 })

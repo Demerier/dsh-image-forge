@@ -279,6 +279,10 @@ export const STUDIO_CSS = `
 .dsh-forge-step-detail{font-size:10.5px;line-height:1.45;opacity:.62;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
 .dsh-forge-step.is-failed .dsh-forge-step-detail{color:#dc2626;opacity:.95}
 .dsh-forge-step-retry{align-self:flex-end;margin-top:4px}
+/* An idle progress line is out of the way but stays in the DOM: the role=status
+   node must already exist when a run starts, or the first announcement is lost. */
+.dsh-forge-progress[data-live="no"]{display:none}
+.dsh-forge-progress[data-live="yes"]{display:flex;flex-direction:column;gap:4px}
 /* U05: the node property drawer.
    The canvas tab is one column now (the is-canvas modifier), and inside it the canvas and the
    drawer are a flex row: two siblings, so the drawer shrinks the canvas instead of
