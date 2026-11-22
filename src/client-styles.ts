@@ -50,7 +50,11 @@ function screenPx(amount: number): string {
  * row's seven buttons.
  */
 export const STUDIO_CSS = `
-.dsh-image-forge-studio{display:flex;flex-direction:column;gap:14px;min-width:0}
+.dsh-image-forge-studio{display:flex;flex-direction:column;gap:14px;min-width:0;min-height:0}
+/* On the canvas tab the studio is a full-height column: head, drawers, then the
+   body that absorbs whatever is left. min-height:0 on the way down is what lets
+   a flex child actually shrink instead of overflowing. */
+.dsh-forge-studio-body{min-height:0}
 .dsh-forge-studio-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .dsh-forge-studio-title{margin:0;font-size:15px;font-weight:600;letter-spacing:.01em}
 .dsh-forge-studio-status{display:flex;align-items:center;gap:8px;font-size:12px;opacity:.75;flex-wrap:wrap}
@@ -292,7 +296,17 @@ export const STUDIO_CSS = `
 .dsh-forge-studio-body.is-canvas{grid-template-columns:minmax(0,1fr)}
 .dsh-forge-canvas-status{display:flex;flex-direction:column;gap:6px;min-width:0}
 .dsh-forge-canvas-shell{display:flex;gap:10px;align-items:stretch;min-width:0;position:relative}
-.dsh-forge-canvas-shell>.dsh-forge-canvas{flex:1 1 auto;min-width:0}
+.dsh-forge-canvas-shell>.dsh-forge-canvas{flex:1 1 auto;min-width:0;height:auto;min-height:0}
+/* The canvas tab fills the tab: the body takes the leftover height, the shell
+   takes the body, the canvas takes the shell. The clamp stays as a floor, so a
+   short window still gets a usable canvas. */
+.dsh-forge-studio-body.is-canvas{flex:1 1 auto;min-height:0;align-items:stretch;display:flex;flex-direction:column}
+/* The body's only child on the canvas tab is the results column; it has to grow,
+   or the canvas shells stop at their min and the body is taller than they are
+   (which was the blank strip under the canvas). */
+.dsh-forge-studio-body.is-canvas>.dsh-forge-studio-results{flex:1 1 auto;min-height:0}
+.dsh-forge-canvas-shell{flex:1 1 auto;min-height:240px}
+.dsh-forge-canvas-side>.dsh-forge-inspector{height:100%;min-height:0}
 .dsh-forge-canvas-side{--dsh-forge-inspector-width:320px;flex:0 0 var(--dsh-forge-inspector-width);min-width:0;display:flex;flex-direction:column}
 .dsh-forge-inspector{display:flex;flex-direction:column;gap:8px;min-width:0;height:clamp(300px,50vh,540px);box-sizing:border-box;padding:10px 11px;border:1px solid rgba(127,127,127,.26);border-radius:10px;background:rgba(127,127,127,.035);overflow:auto;scrollbar-width:thin}
 .dsh-forge-inspector.is-empty{align-items:center;justify-content:center;text-align:center;font-size:11.5px;line-height:1.6;opacity:.55;border-style:dashed}
@@ -332,6 +346,10 @@ export const STUDIO_CSS = `
  */
 export const WORKBENCH_CSS = `
 .dsh-forge-workbench{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0;height:100%}
+/* The panel holds exactly one child (the studio). On the canvas tab the studio is
+   meant to *fill* it: without this chain the canvas kept its fixed
+   clamp(300px,50vh,540px) and the rest of the tab stayed blank. */
+.dsh-forge-workbench-panel>.dsh-image-forge-studio{height:100%;min-height:0}
 .dsh-forge-workbench-strip{display:flex;align-items:flex-end;gap:3px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:0 2px;border-bottom:1px solid rgba(127,127,127,.26);scrollbar-width:thin}
 .dsh-forge-workbench-tab{appearance:none;display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;background:transparent;color:inherit;font:inherit;font-size:12.5px;line-height:1.5;cursor:pointer;white-space:nowrap;max-width:26ch;opacity:.72;user-select:none}
 .dsh-forge-workbench-tab:hover{opacity:1;background:color-mix(in srgb,currentColor 5%,transparent)}
