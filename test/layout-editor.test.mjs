@@ -33,6 +33,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 import {
   CAPTION_HINT,
@@ -42,10 +43,13 @@ import {
   LAYOUT_COMPILED_BBOX_FORMAT,
   LAYOUT_DRAFT_BBOX_COORD_SPACE,
   LAYOUT_DRAFT_BBOX_FORMAT,
+  LAYOUT_CANVAS_MULTIPLE,
+  LAYOUT_CANVAS_PRESETS,
   LAYOUT_NODE_CHROME,
   LAYOUT_NODE_DEFAULT_WIDTH,
   LAYOUT_NODE_MAX_WIDTH,
   LAYOUT_NODE_MIN_WIDTH,
+  LAYOUT_TEMPLATES,
   LayoutEditorError,
   addBox,
   boxFromDrag,
@@ -72,9 +76,14 @@ import {
   roundBox,
   screenDeltaToDraft,
   selectBox,
+  selectMany,
   setBoxCaption,
   setBoxLabel,
+  setCanvasSize,
+  setSelectedCaption,
+  setSelectedLabel,
   setSummary,
+  toggleSelection,
   stateToDraft,
   toCompiledBox,
   updateBox,
@@ -662,4 +671,146 @@ test('C13: the node height follows the draft proportion and resizing leaves the 
   assert.equal(clampLayoutNodeWidth(100), LAYOUT_NODE_MIN_WIDTH)
   assert.equal(clampLayoutNodeWidth(10000), LAYOUT_NODE_MAX_WIDTH)
   assert.equal(clampLayoutNodeWidth(Number.NaN), LAYOUT_NODE_DEFAULT_WIDTH)
+})
+
+/* -------------------------------------------------------------------------- */
+/* B-tier: canvas size, optional schema fields, multi-select, import, undo      */
+/* -------------------------------------------------------------------------- */
+
+test('the canvas size is a draft field, and resizing it re-maps every box', () => {
+  // The official rule: width/height must be multiples of 16 and are dropped from
+  // the compiled prompt, so a draft is authored at the size it is generated at.
+  let state = createLayoutState({ width: 1536, height: 1024 })
+  state = addBox(state, { bbox: { x1: 0, y1: 0, x2: 768, y2: 512 }, label: 'object', caption: 'a' })
+  const resized = setCanvasSize(state, 1024, 1024)
+  assert.equal(resized.width, 1024)
+  assert.equal(resized.height, 1024)
+  // Half the canvas stays half the canvas: proportional, not clamped in place.
+  assert.deepEqual(resized.items[0].bbox, { x1: 0, y1: 0, x2: 512, y2: 512 })
+  // A size that is not a multiple of 16 is refused, not silently rounded.
+  assert.throws(() => setCanvasSize(state, 1000, 1024), /multiple of 16/
+  )
+  // The presets are all valid canvases, so a picker can never offer a broken one.
+  for (const preset of LAYOUT_CANVAS_PRESETS) {
+    assert.equal(preset.width % LAYOUT_CANVAS_MULTIPLE, 0)
+    assert.equal(preset.height % LAYOUT_CANVAS_MULTIPLE, 0)
+  }
+})
+
+test('templates are geometry only: every box still needs a caption', () => {
+  let state = createLayoutState({ width: 1536, height: 1024 })
+  const template = LAYOUT_TEMPLATES.find((entry) => entry.id === 'poster-title-body')
+  for (const box of template.boxes) {
+    state = addBox(state, {
+      label: box.label,
+      bbox: {
+        x1: box.x1 * state.width, y1: box.y1 * state.height,
+        x2: box.x2 * state.width, y2: box.y2 * state.height,
+      },
+    })
+  }
+  assert.equal(state.items.length, template.boxes.length)
+  assert.ok(state.items.every((item) => item.caption === ''), 'a template must not ship filler copy')
+  // Which is exactly why it cannot compile yet — the official rules demand it.
+  assert.throws(() => compileLayout(stateToDraft(setSummary(state, { caption: 'x' }))), /caption/)
+})
+
+test('multi-select edits every selected box, and keeps the first as primary', () => {
+  let state = createLayoutState()
+  state = addBox(state, { bbox: { x1: 0, y1: 0, x2: 100, y2: 100 }, caption: 'a' })
+  state = addBox(state, { bbox: { x1: 200, y1: 0, x2: 300, y2: 100 }, caption: 'b' })
+  const [first, second] = state.items.map((item) => item.id)
+  state = selectMany(state, [first, second])
+  assert.deepEqual(state.selectedIds, [first, second])
+  assert.equal(state.selectedId, first, 'the first id owns the caption field')
+  state = setSelectedCaption(state, 'both')
+  assert.deepEqual(state.items.map((item) => item.caption), ['both', 'both'])
+  state = setSelectedLabel(state, 'text')
+  assert.ok(state.items.every((item) => item.label === 'text'))
+  // A stale id is dropped, not thrown: a marquee can outlive a deletion.
+  assert.deepEqual(selectMany(state, [first, 'gone']).selectedIds, [first])
+  // Shift-click toggles, chained: both are selected after the batch edit above,
+  // so removing each in turn empties the selection (and with it the primary).
+  const one = toggleSelection(state, second)
+  assert.equal(one.selectedIds.length, 1)
+  const none = toggleSelection(one, first)
+  assert.equal(none.selectedIds.length, 0)
+  assert.equal(none.selectedId, null, 'no selection means no primary')
+  // Toggling an unselected box adds it, and it becomes the primary.
+  const again = toggleSelection(none, first)
+  assert.deepEqual(again.selectedIds, [first])
+  assert.equal(again.selectedId, first)
+  assert.equal(selectBox(state, null).selectedId, null)
+})
+
+test('optional schema fields survive a roundtrip and compile verbatim', () => {
+  // summary.meta / summary.canvas / summary.palette and item tags / palette are
+  // official optional fields; they must reach the compiled prompt unchanged.
+  let state = createLayoutState({
+    width: 1024,
+    height: 1024,
+    summary: { caption: 'a poster', meta: ['product campaign', 'studio photography'], canvas: 'single', palette: ['ivory', 'dark green'] },
+  })
+  state = addBox(state, { bbox: { x1: 0, y1: 0, x2: 400, y2: 400 }, label: 'object', caption: 'cup', tags: ['ceramic'], palette: ['ivory'] })
+  const compiled = JSON.parse(compileLayout(stateToDraft(state)))
+  assert.deepEqual(compiled.summary.meta, ['product campaign', 'studio photography'])
+  assert.equal(compiled.summary.canvas, 'single')
+  assert.deepEqual(compiled.summary.palette, ['ivory', 'dark green'])
+  assert.deepEqual(compiled.items[0].tags, ['ceramic'])
+  assert.deepEqual(compiled.items[0].palette, ['ivory'])
+  // Clearing one of them removes the key instead of sending an empty array.
+  const cleared = stateToDraft(setSummary(state, { meta: undefined }))
+  assert.equal('meta' in cleared.summary, false)
+})
+
+test('a text item keeps literal line breaks through compile and import', () => {
+  // The reference doc: "literal intended line breaks represented as JSON \\n".
+  // A flattened poster title is a wrong image, so the break has to survive.
+  const draft = {
+    width: 1024, height: 1024, bbox_coord_space: 'abs', bbox_format: 'xyxy',
+    summary: { caption: 'poster' },
+    items: [{ label: 'text', caption: 'title', text: '一杯温暖\n一刻从容', bbox: [0, 0, 400, 200] }],
+  }
+  const state = draftToEditorState(draft)
+  assert.equal(state.items[0].text, '一杯温暖\n一刻从容')
+  const compiled = JSON.parse(compileLayout(stateToDraft(state)))
+  assert.equal(compiled.items[0].text, '一杯温暖\n一刻从容')
+})
+
+test('an official compiled prompt imports back into an editable draft', () => {
+  const compiled = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
+  const draft = decompileLayout(compiled, DEFAULT_LAYOUT_WIDTH, DEFAULT_LAYOUT_HEIGHT)
+  const state = draftToEditorState(draft)
+  assert.equal(state.items.length, draft.items.length)
+  assert.equal(state.width, DEFAULT_LAYOUT_WIDTH)
+  // Re-compiling the imported state reproduces the same boxes, box for box.
+  const recompiled = JSON.parse(compileLayout(stateToDraft(state)))
+  assert.deepEqual(
+    recompiled.items.map((item) => item.bbox),
+    JSON.parse(compiled).items.map((item) => item.bbox),
+  )
+})
+test('the editor opens a draft whose boxes have no caption yet', () => {
+  // A box drawn a second ago has no caption, and a template ships geometry only.
+  // Mounting used to fail the whole draft ("items[0].caption must be nonempty"),
+  // which blanked the editor over work the user had already drawn. Compiling is
+  // still refused — that is where the requirement belongs.
+  const drafting = {
+    width: 1024, height: 1024, bbox_coord_space: 'abs', bbox_format: 'xyxy',
+    summary: { caption: '' },
+    items: [
+      { label: 'object', caption: '', bbox: [0, 0, 200, 200] },
+      { label: 'text', caption: '', text: 'title', bbox: [0, 300, 200, 400] },
+    ],
+  }
+  const state = draftToEditorState(drafting)
+  assert.equal(state.items.length, 2)
+  assert.ok(state.items.every((item) => item.caption === ''))
+  // Compiling is where an unwritten caption is refused.
+  assert.throws(() => compileLayout(stateToDraft(drafting)), /caption must be nonempty/)
+  // And a malformed item (missing text on a text item) still refuses to mount.
+  assert.throws(
+    () => draftToEditorState({ ...drafting, items: [{ label: 'text', caption: 'x', bbox: [0, 0, 100, 100] }] }),
+    /text items require literal text/,
+  )
 })

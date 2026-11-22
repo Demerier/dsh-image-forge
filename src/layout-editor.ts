@@ -62,6 +62,85 @@ export const LAYOUT_ITEM_LABELS = ['object', 'character', 'text'] as const
 /** summary.canvas values the contract accepts. */
 export const LAYOUT_CANVAS_VALUES = ['single', 'multi_panel', 'collage'] as const
 
+/** The official seven aspect tiers, at the ~1.5 MP budget (both sides 16-aligned). */
+export const LAYOUT_CANVAS_PRESETS = [
+  { label: '1:1 · 1024×1024', width: 1024, height: 1024 },
+  { label: '4:3 · 1280×960', width: 1280, height: 960 },
+  { label: '3:4 · 960×1280', width: 960, height: 1280 },
+  { label: '3:2 · 1536×1024', width: 1536, height: 1024 },
+  { label: '2:3 · 1024×1536', width: 1024, height: 1536 },
+  { label: '16:9 · 1536×864', width: 1536, height: 864 },
+  { label: '9:16 · 864×1536', width: 864, height: 1536 },
+] as const
+
+/**
+ * A starting arrangement of boxes, in canvas-relative units (0..1).
+ *
+ * Templates are **geometry only**: every box starts with an empty caption, which
+ * the compiler rejects until it is written. That is deliberate — the official
+ * skill is explicit that a box is a placement annotation, not content, and a
+ * template that shipped filler captions would produce exactly the "headline
+ * here" images its rules forbid.
+ */
+export interface LayoutTemplate {
+  readonly id: string
+  readonly label: string
+  readonly boxes: readonly {
+    readonly label: LayoutItemLabel
+    readonly x1: number
+    readonly y1: number
+    readonly x2: number
+    readonly y2: number
+  }[]
+}
+
+export const LAYOUT_TEMPLATES: readonly LayoutTemplate[] = [
+  {
+    id: 'poster-title-body',
+    label: '海报 · 主视觉+标题+正文',
+    boxes: [
+      { label: 'object', x1: 0.06, y1: 0.06, x2: 0.94, y2: 0.52 },
+      { label: 'text', x1: 0.06, y1: 0.60, x2: 0.62, y2: 0.74 },
+      { label: 'text', x1: 0.06, y1: 0.78, x2: 0.52, y2: 0.92 },
+    ],
+  },
+  {
+    id: 'single-subject',
+    label: '单主体居中',
+    boxes: [{ label: 'object', x1: 0.18, y1: 0.14, x2: 0.82, y2: 0.86 }],
+  },
+  {
+    id: 'duo',
+    label: '双人并置',
+    boxes: [
+      { label: 'character', x1: 0.04, y1: 0.10, x2: 0.48, y2: 0.90 },
+      { label: 'character', x1: 0.52, y1: 0.10, x2: 0.96, y2: 0.90 },
+    ],
+  },
+  {
+    id: 'comic-4',
+    label: '四格漫画',
+    boxes: [
+      { label: 'object', x1: 0.03, y1: 0.03, x2: 0.48, y2: 0.48 },
+      { label: 'object', x1: 0.52, y1: 0.03, x2: 0.97, y2: 0.48 },
+      { label: 'object', x1: 0.03, y1: 0.52, x2: 0.48, y2: 0.97 },
+      { label: 'object', x1: 0.52, y1: 0.52, x2: 0.97, y2: 0.97 },
+    ],
+  },
+  {
+    id: 'panel-2x3',
+    label: '分镜 · 2×3 六格',
+    boxes: [
+      { label: 'object', x1: 0.02, y1: 0.02, x2: 0.49, y2: 0.34 },
+      { label: 'object', x1: 0.51, y1: 0.02, x2: 0.98, y2: 0.34 },
+      { label: 'object', x1: 0.02, y1: 0.35, x2: 0.49, y2: 0.66 },
+      { label: 'object', x1: 0.51, y1: 0.35, x2: 0.98, y2: 0.66 },
+      { label: 'object', x1: 0.02, y1: 0.67, x2: 0.49, y2: 0.98 },
+      { label: 'object', x1: 0.51, y1: 0.67, x2: 0.98, y2: 0.98 },
+    ],
+  },
+]
+
 /** Default draft canvas used when the caller does not supply generation size. */
 export const DEFAULT_LAYOUT_WIDTH = 1536
 export const DEFAULT_LAYOUT_HEIGHT = 1024
@@ -214,7 +293,23 @@ export interface LayoutEditorState {
   height: number
   summary: LayoutSummary
   items: LayoutEditorItem[]
+  /**
+   * The **primary** selection: the item the caption/label/text fields edit.
+   *
+   * Kept beside `selectedIds` rather than derived from it because order matters
+   * here (`[primary, ...rest]`) and because every existing caller — the node's
+   * compact canvas, the detail tab, the tests — reads this field.
+   */
   selectedId: string | null
+  /**
+   * Every selected item, `selectedId` first.
+   *
+   * Multi-select exists so a poster's title/body/credits can be re-labelled and
+   * re-captioned in one edit (B-tier ask). A single click produces a one-element
+   * list, so the single-select behaviour is the degenerate case, not a second
+   * code path.
+   */
+  selectedIds: readonly string[]
   seq: number
 }
 
@@ -913,6 +1008,7 @@ export function createLayoutState(options: CreateLayoutStateOptions = {}): Layou
     summary: summaryWithDefaults(options.summary),
     items: [],
     selectedId: null,
+    selectedIds: [],
     seq: 1,
   }
 }
@@ -955,9 +1051,24 @@ const EDITOR_TOLERANT_ISSUES = new Set([
   'summary.caption must be nonempty text',
 ])
 
+/**
+ * Whether a draft issue is allowed **while editing** for this item index.
+ *
+ * An item caption is required at compile time, but a box drawn a second ago — or
+ * dropped by a template — has none yet. Treating that as an un-mountable draft is
+ * how the editor used to refuse to open its own in-progress work; the panel then
+ * showed "布局编辑器加载失败：items[0].caption must be nonempty text" instead of
+ * the boxes the user already drew. The requirement is still enforced by
+ * `compileLayout`, which is the only place it can actually matter.
+ */
+function isTolerableDraftIssue(issue: string): boolean {
+  if (EDITOR_TOLERANT_ISSUES.has(issue)) return true
+  return /^items\[\d+\]\.caption must be nonempty text$/.test(issue)
+}
+
 function draftToEditorStateWith(draft: unknown, tolerateDrafting: boolean): LayoutEditorState {
   const issues = tolerateDrafting
-    ? validateLayoutDraft(draft).filter((issue) => !EDITOR_TOLERANT_ISSUES.has(issue))
+    ? validateLayoutDraft(draft).filter((issue) => !isTolerableDraftIssue(issue))
     : validateLayoutDraft(draft)
   if (issues.length > 0) throw new LayoutEditorError(issues)
   const source = draft as LayoutDraft
@@ -979,6 +1090,7 @@ function draftToEditorStateWith(draft: unknown, tolerateDrafting: boolean): Layo
     summary: cloneSummary(source.summary),
     items,
     selectedId: null,
+    selectedIds: [],
     seq: items.length + 1,
   }
 }
@@ -1045,7 +1157,7 @@ export function addBox(state: LayoutEditorState, seed: LayoutBoxSeed): LayoutEdi
   if (seed.text !== undefined) item.text = seed.text
   if (seed.tags !== undefined) item.tags = [...seed.tags]
   if (seed.palette !== undefined) item.palette = [...seed.palette]
-  return { ...state, items: [...state.items, item], selectedId: item.id, seq: state.seq + 1 }
+  return { ...state, items: [...state.items, item], selectedId: item.id, selectedIds: [item.id], seq: state.seq + 1 }
 }
 
 /** Apply a partial update to one box. Unknown ids are a no-op. */
@@ -1107,21 +1219,122 @@ export function deleteBox(state: LayoutEditorState, id: string): LayoutEditorSta
     ...state,
     items: state.items.filter((item) => item.id !== id),
     selectedId: state.selectedId === id ? null : state.selectedId,
+    selectedIds: state.selectedIds.filter((entry) => entry !== id),
   }
 }
 
 /** Select a box by id; an unknown id clears the selection. */
 export function selectBox(state: LayoutEditorState, id: string | null): LayoutEditorState {
   if (id !== null && !state.items.some((item) => item.id === id)) {
-    return state.selectedId === null ? state : { ...state, selectedId: null }
+    id = null
   }
-  if (state.selectedId === id) return state
-  return { ...state, selectedId: id }
+  if (id === null) return selectMany(state, [])
+  return selectMany(state, [id])
 }
 
-/** Patch the shared summary; caption is the only required field. */
+/**
+ * Select a set of boxes; the first id becomes the primary one.
+ *
+ * Unknown ids are dropped rather than throwing: a multi-select arrives from a
+ * pointer gesture (marquee, shift-click) and a stale id there is a race, not a
+ * caller bug. The order is preserved, so the *first* selected box is the one the
+ * caption field edits — which is what makes "shift-click a second box" keep the
+ * field on the first one instead of hopping.
+ */
+export function selectMany(state: LayoutEditorState, ids: readonly string[]): LayoutEditorState {
+  const known: string[] = []
+  for (const id of ids) {
+    if (!state.items.some((item) => item.id === id)) continue
+    if (known.includes(id)) continue
+    known.push(id)
+  }
+  const primary = known.length === 0 ? null : known[0]
+  if (state.selectedId === primary && state.selectedIds.length === known.length
+    && state.selectedIds.every((id, index) => id === known[index])) return state
+  return { ...state, selectedId: primary, selectedIds: known }
+}
+
+/** Toggle one id in the selection (shift-click semantics). */
+export function toggleSelection(state: LayoutEditorState, id: string): LayoutEditorState {
+  if (!state.items.some((item) => item.id === id)) return state
+  const next = state.selectedIds.includes(id)
+    ? state.selectedIds.filter((entry) => entry !== id)
+    : [...state.selectedIds, id]
+  return selectMany(state, next)
+}
+
+/**
+ * Resize the draft canvas, keeping every box's proportion.
+ *
+ * The official rule is that a draft is authored at the size it will be generated
+ * at (the compiler drops width/height from the prompt, so a draft authored for a
+ * different canvas drifts globally). Changing the canvas therefore **re-maps the
+ * boxes** instead of leaving them at pixel coordinates that no longer mean the
+ * same place; the caller gets one undoable edit either way.
+ */
+export function setCanvasSize(state: LayoutEditorState, width: number, height: number): LayoutEditorState {
+  assertCanvas(width, height)
+  if (width === state.width && height === state.height) return state
+  const ratioX = width / state.width
+  const ratioY = height / state.height
+  const items = state.items.map((item) => ({
+    ...item,
+    bbox: clampBox({
+      x1: Math.round(item.bbox.x1 * ratioX),
+      y1: Math.round(item.bbox.y1 * ratioY),
+      x2: Math.round(item.bbox.x2 * ratioX),
+      y2: Math.round(item.bbox.y2 * ratioY),
+    }, width, height),
+  }))
+  return { ...state, width, height, items }
+}
+
+/**
+ * Re-map every box from the current canvas to a new one **without** rescaling.
+ *
+ * Used when the caller wants the pixels to keep their meaning (an imported draft
+ * authored at another size): boxes are clamped into the new canvas, not stretched.
+ */
+export function adoptCanvasSize(state: LayoutEditorState, width: number, height: number): LayoutEditorState {
+  assertCanvas(width, height)
+  if (width === state.width && height === state.height) return state
+  const items = state.items.map((item) => ({ ...item, bbox: clampBox(item.bbox, width, height) }))
+  return { ...state, width, height, items }
+}
+
+/** Apply one label to every selected box (batch edit, B-tier). */
+export function setSelectedLabel(state: LayoutEditorState, label: LayoutItemLabel): LayoutEditorState {
+  assertLabel(label)
+  if (state.selectedIds.length === 0) return state
+  const items = state.items.map((item) => (state.selectedIds.includes(item.id) ? { ...item, label } : item))
+  return { ...state, items }
+}
+
+/** Apply one caption to every selected box, leaving the others alone. */
+export function setSelectedCaption(state: LayoutEditorState, caption: string): LayoutEditorState {
+  if (state.selectedIds.length === 0) return state
+  const items = state.items.map((item) => (state.selectedIds.includes(item.id) ? { ...item, caption } : item))
+  return { ...state, items }
+}
+
+/**
+ * Patch the shared summary; caption is the only required field.
+ *
+ * An explicit `undefined` **removes** an optional key instead of leaving it as
+ * `undefined`: the compiler rejects unrecognized fields, and a key that is present
+ * with no value is exactly the "empty array / empty string" the schema forbids.
+ * That is what makes the UI's "clear this field" work.
+ */
 export function setSummary(state: LayoutEditorState, patch: Partial<LayoutSummary>): LayoutEditorState {
-  return { ...state, summary: cloneSummary({ ...state.summary, ...patch }) }
+  const next = cloneSummary(state.summary) as unknown as Record<string, unknown>
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete next[key]
+      continue
+    }
+    next[key] = Array.isArray(value) ? [...value] : value
+  }
+  return { ...state, summary: next as unknown as LayoutSummary }
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +1390,12 @@ export interface LayoutEditorHandle {
   getCompiled(): string
   addBox(box: LayoutBox): void
   deleteSelected(): void
+  /** One editor-local undo step; false when there is nothing to undo. */
+  undo(): boolean
+  /** Resize the draft canvas, re-mapping every box proportionally. */
+  setCanvasSize(width: number, height: number): void
+  /** Replace the draft from text: a draft JSON or an official compiled prompt. */
+  importDraft(text: string): void
   destroy(): void
 }
 
@@ -1254,10 +1473,22 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     return element
   }
 
+  /** One labelled control: a small caption in front of a field. */
+  function labeledField(text: string, field: HTMLElement, extra?: string): HTMLElement {
+    const wrap = doc.createElement('label')
+    wrap.setAttribute('style', 'display:inline-flex;align-items:center;gap:3px;font-size:11px;opacity:.85;' + (extra ?? ''))
+    const cap = doc.createElement('span')
+    cap.textContent = text
+    wrap.appendChild(cap)
+    wrap.appendChild(field)
+    return wrap
+  }
+
   const toolbar = doc.createElement('div')
   toolbar.setAttribute('style', 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;')
   const addButton = makeButton('+ 框')
   const deleteButton = makeButton('删除')
+  const undoButton = makeButton('撤销')
   const labelSelect = doc.createElement('select')
   labelSelect.setAttribute('style', fieldStyle)
   for (const label of LAYOUT_ITEM_LABELS) {
@@ -1268,7 +1499,57 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   }
   toolbar.appendChild(addButton)
   toolbar.appendChild(deleteButton)
+  toolbar.appendChild(undoButton)
   toolbar.appendChild(labelSelect)
+
+  // ---- canvas size (a draft is authored at the size it is generated at) ----
+  // The official rule: width/height must be positive multiples of 16 and are
+  // dropped from the compiled prompt, so a draft authored for another size
+  // drifts globally. Changing the size here re-maps the boxes instead of
+  // silently keeping pixel coordinates that no longer mean the same place.
+  const widthInput = doc.createElement('input')
+  widthInput.type = 'number'
+  widthInput.min = String(LAYOUT_CANVAS_MULTIPLE)
+  widthInput.step = String(LAYOUT_CANVAS_MULTIPLE)
+  widthInput.title = '画布宽（16 的倍数；生成时用同一尺寸）'
+  widthInput.setAttribute('style', 'width:5.5em;' + fieldStyle)
+  const heightInput = doc.createElement('input')
+  heightInput.type = 'number'
+  heightInput.min = String(LAYOUT_CANVAS_MULTIPLE)
+  heightInput.step = String(LAYOUT_CANVAS_MULTIPLE)
+  heightInput.title = '画布高（16 的倍数；生成时用同一尺寸）'
+  heightInput.setAttribute('style', 'width:5.5em;' + fieldStyle)
+  const sizeSelect = doc.createElement('select')
+  sizeSelect.setAttribute('style', fieldStyle)
+  sizeSelect.title = '官方七档画幅：选一个就同时改宽高'
+  for (const preset of LAYOUT_CANVAS_PRESETS) {
+    const option = doc.createElement('option')
+    option.value = preset.width + 'x' + preset.height
+    option.textContent = preset.label
+    sizeSelect.appendChild(option)
+  }
+  const sizeWrap = doc.createElement('span')
+  sizeWrap.setAttribute('style', 'display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;')
+  sizeWrap.appendChild(labeledField('画布', widthInput))
+  sizeWrap.appendChild(labeledField('×', heightInput))
+  sizeWrap.appendChild(sizeSelect)
+  toolbar.appendChild(sizeWrap)
+
+  // ---- templates (a layout is usually a *kind*, not a blank page) ----------
+  const templateSelect = doc.createElement('select')
+  templateSelect.setAttribute('style', fieldStyle)
+  templateSelect.title = '版式模板：落一组预置画框（可再拖改）'
+  const templateBlank = doc.createElement('option')
+  templateBlank.value = ''
+  templateBlank.textContent = '版式模板…'
+  templateSelect.appendChild(templateBlank)
+  for (const template of LAYOUT_TEMPLATES) {
+    const option = doc.createElement('option')
+    option.value = template.id
+    option.textContent = template.label
+    templateSelect.appendChild(option)
+  }
+  toolbar.appendChild(templateSelect)
 
   const canvas = doc.createElement('div')
   canvas.setAttribute('style', 'position:relative;width:100%;background:#12161c;overflow:hidden;touch-action:none;cursor:crosshair;box-sizing:border-box;border:1px solid #3a3a3a;')
@@ -1280,33 +1561,88 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   canvas.appendChild(preview)
 
   const itemRow = doc.createElement('div')
-  itemRow.setAttribute('style', 'display:flex;gap:6px;flex-wrap:wrap;')
-  const captionInput = doc.createElement('input')
-  captionInput.type = 'text'
+  itemRow.setAttribute('style', 'display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start;')
+  const captionInput = doc.createElement('textarea')
+  captionInput.rows = 2
   captionInput.placeholder = 'caption（必填；措辞会污染全图）'
-  captionInput.setAttribute('style', 'flex:1 1 220px;' + fieldStyle)
-  const textInput = doc.createElement('input')
-  textInput.type = 'text'
-  textInput.placeholder = 'text（label=text 时必填）'
-  textInput.setAttribute('style', 'flex:1 1 160px;' + fieldStyle)
+  captionInput.setAttribute('style', 'flex:1 1 240px;resize:vertical;box-sizing:border-box;' + fieldStyle)
+  // A `text` item carries the *literal* characters the image must render. The
+  // official reference says intended line breaks are `\n` inside the string, so
+  // this is a textarea and the value is stored as typed — a poster's two-line
+  // title must not be flattened into one line.
+  const textInput = doc.createElement('textarea')
+  textInput.rows = 2
+  textInput.placeholder = 'text（label=text 时必填；换行会作为 \\n 编译）'
+  textInput.setAttribute('style', 'flex:1 1 200px;resize:vertical;box-sizing:border-box;' + fieldStyle)
+  const tagsInput = doc.createElement('input')
+  tagsInput.type = 'text'
+  tagsInput.placeholder = 'tags（逗号分隔，可选）'
+  tagsInput.setAttribute('style', 'flex:1 1 180px;' + fieldStyle)
+  const paletteInput = doc.createElement('input')
+  paletteInput.type = 'text'
+  paletteInput.placeholder = 'palette（逗号分隔的颜色词，可选）'
+  paletteInput.setAttribute('style', 'flex:1 1 180px;' + fieldStyle)
   itemRow.appendChild(captionInput)
   itemRow.appendChild(textInput)
+  itemRow.appendChild(labeledField('项 tags', tagsInput))
+  itemRow.appendChild(labeledField('项 palette', paletteInput))
 
   const summaryInput = doc.createElement('textarea')
   summaryInput.rows = 2
   summaryInput.placeholder = 'summary.caption（全局描述，必填）'
   summaryInput.setAttribute('style', 'width:100%;box-sizing:border-box;resize:vertical;' + fieldStyle)
 
+  // ---- summary optional fields (official: meta / canvas / palette) ----------
+  // The reference file lists these as optional parts of `summary`; they are
+  // compiled verbatim, so a poster can declare its medium and its canvas kind
+  // without the model having to infer them from the caption.
+  const summaryRow = doc.createElement('div')
+  summaryRow.setAttribute('style', 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;')
+  const metaInput = doc.createElement('input')
+  metaInput.type = 'text'
+  metaInput.placeholder = 'meta（题材标签，逗号分隔）'
+  metaInput.title = 'summary.meta：如 product campaign, studio photography'
+  metaInput.setAttribute('style', 'flex:1 1 200px;' + fieldStyle)
+  const summaryPaletteInput = doc.createElement('input')
+  summaryPaletteInput.type = 'text'
+  summaryPaletteInput.placeholder = 'palette（整图配色词）'
+  summaryPaletteInput.setAttribute('style', 'flex:1 1 160px;' + fieldStyle)
+  const canvasSelect = doc.createElement('select')
+  canvasSelect.setAttribute('style', fieldStyle)
+  canvasSelect.title = 'summary.canvas：单幅 / 多格 / 拼贴'
+  const canvasBlank = doc.createElement('option')
+  canvasBlank.value = ''
+  canvasBlank.textContent = 'canvas（未指定）'
+  canvasSelect.appendChild(canvasBlank)
+  for (const value of LAYOUT_CANVAS_VALUES) {
+    const option = doc.createElement('option')
+    option.value = value
+    option.textContent = value
+    canvasSelect.appendChild(option)
+  }
+  summaryRow.appendChild(labeledField('meta', metaInput))
+  summaryRow.appendChild(labeledField('palette', summaryPaletteInput))
+  summaryRow.appendChild(labeledField('canvas', canvasSelect))
+  wrapper.appendChild(summaryRow)
+
   const hint = doc.createElement('p')
   hint.textContent = CAPTION_HINT
   hint.setAttribute('style', 'margin:0;opacity:.75;font-size:11px;')
 
   const exportRow = doc.createElement('div')
-  exportRow.setAttribute('style', 'display:flex;gap:6px;flex-wrap:wrap;')
+  exportRow.setAttribute('style', 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;')
   const draftButton = makeButton('导出 draft')
   const compiledButton = makeButton('导出 compiled')
+  const importButton = makeButton('导入')
+  importButton.title = '粘贴 draft（abs/xyxy）或官方 compiled（abs_centralized/yxyx，需先填宽高）'
   exportRow.appendChild(draftButton)
   exportRow.appendChild(compiledButton)
+  exportRow.appendChild(importButton)
+
+  const importInput = doc.createElement('textarea')
+  importInput.rows = 3
+  importInput.placeholder = '把 draft JSON 或官方 compiled JSON 粘到这里，再点「导入」'
+  importInput.setAttribute('style', 'display:none;width:100%;box-sizing:border-box;resize:vertical;font-family:ui-monospace,monospace;' + fieldStyle)
 
   const output = doc.createElement('textarea')
   output.readOnly = true
@@ -1337,6 +1673,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   wrapper.appendChild(summaryInput)
   wrapper.appendChild(hint)
   wrapper.appendChild(exportRow)
+  wrapper.appendChild(importInput)
   wrapper.appendChild(output)
 
   function percentOf(value: number, total: number): string {
@@ -1382,7 +1719,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     preview.style.height = percentOf(box.y2 - box.y1, state.height)
   }
 
-  function renderBox(item: LayoutEditorItem, index: number, selected: boolean): HTMLElement {
+  function renderBox(item: LayoutEditorItem, index: number, selected: boolean, primary: boolean): HTMLElement {
     const element = doc.createElement('div')
     element.setAttribute('data-box-id', item.id)
     element.setAttribute(
@@ -1392,14 +1729,16 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
         'top:' + percentOf(item.bbox.y1, state.height) + ';' +
         'width:' + percentOf(item.bbox.x2 - item.bbox.x1, state.width) + ';' +
         'height:' + percentOf(item.bbox.y2 - item.bbox.y1, state.height) + ';' +
-        'border:1px solid ' + (selected ? '#4da3ff' : 'rgba(255,255,255,.55)') + ';' +
-        'background:rgba(77,163,255,' + (selected ? '.22' : '.12') + ');',
+        'border:1px solid ' + (primary ? '#4da3ff' : selected ? 'rgba(77,163,255,.75)' : 'rgba(255,255,255,.55)') + ';' +
+        'background:rgba(77,163,255,' + (primary ? '.22' : selected ? '.16' : '.12') + ');',
     )
     const chip = doc.createElement('span')
     chip.setAttribute('style', 'position:absolute;left:-1px;top:-17px;padding:0 4px;border-radius:3px;background:rgba(0,0,0,.72);color:#fff;font-size:11px;line-height:15px;white-space:nowrap;pointer-events:none;')
     chip.textContent = item.label + ' ' + String(index + 1)
     element.appendChild(chip)
-    if (selected) {
+    // Handles only on the primary box: eight grips × N selected boxes would hide
+    // every neighbour box under its own grips.
+    if (primary) {
       for (const handle of LAYOUT_RESIZE_HANDLES) {
         const grip = doc.createElement('div')
         grip.setAttribute('data-handle', handle)
@@ -1418,12 +1757,17 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   function render(): void {
     canvas.style.aspectRatio = String(state.width) + ' / ' + String(state.height)
     const selected = selectedLayoutItem(state)
+    const multi = state.selectedIds.length
     deleteButton.disabled = state.selectedId === null
+    undoButton.disabled = history.length === 0
     labelSelect.value = selected === undefined ? 'object' : selected.label
     labelSelect.disabled = selected === undefined
     captionInput.disabled = selected === undefined
     if (doc.activeElement !== captionInput) {
-      captionInput.value = selected === undefined ? '' : selected.caption
+      captionInput.value = multi > 1
+        // Several boxes rarely share a caption; show one only when they do.
+        ? (state.items.filter((item) => state.selectedIds.includes(item.id)).every((item, _, all) => item.caption === all[0].caption) ? state.items.find((item) => item.id === state.selectedIds[0])?.caption ?? '' : '')
+        : (selected === undefined ? '' : selected.caption)
     }
     const showText = selected !== undefined && selected.label === 'text'
     textInput.style.display = showText ? '' : 'none'
@@ -1431,17 +1775,65 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     if (doc.activeElement !== textInput) {
       textInput.value = selected === undefined || selected.text === undefined ? '' : selected.text
     }
+    for (const [field, key] of [[tagsInput, 'tags'], [paletteInput, 'palette']] as const) {
+      const value = selected === undefined ? undefined : selected[key]
+      field.disabled = selected === undefined
+      if (doc.activeElement !== field) field.value = value === undefined ? '' : value.join(', ')
+    }
     if (doc.activeElement !== summaryInput) summaryInput.value = state.summary.caption
+    for (const [field, key] of [[metaInput, 'meta'], [summaryPaletteInput, 'palette']] as const) {
+      const value = state.summary[key]
+      if (doc.activeElement !== field) field.value = value === undefined ? '' : value.join(', ')
+    }
+    if (doc.activeElement !== canvasSelect) canvasSelect.value = state.summary.canvas ?? ''
+    for (const [field, value] of [[widthInput, state.width], [heightInput, state.height]] as const) {
+      if (doc.activeElement !== field) field.value = String(value)
+    }
+    sizeSelect.value = String(state.width) + 'x' + String(state.height)
+    if (!sizeSelect.value) sizeSelect.value = ''
     boxLayer.replaceChildren()
     state.items.forEach((item, index) => {
-      boxLayer.appendChild(renderBox(item, index, item.id === state.selectedId))
+      boxLayer.appendChild(renderBox(item, index, state.selectedIds.includes(item.id), item.id === state.selectedId))
     })
   }
 
+  /**
+   * Editor-local undo, bounded at 50 states.
+   *
+   * The canvas has its own command stack, but a *draft* edit at this layer (a new
+   * box, a caption, a canvas resize) used to be one-way: the canvas stack is keyed
+   * by node id and cannot see inside the draft. Keeping a small stack here makes
+   * Ctrl/⌘+Z work while the editor has focus, which is what the box toolbar's
+   * undo button needs.
+   */
+  const history: LayoutEditorState[] = []
+  function remember(before: LayoutEditorState): void {
+    history.push(before)
+    if (history.length > 50) history.shift()
+  }
+
   function commit(next: LayoutEditorState): void {
+    if (next === state) {
+      render()
+      return
+    }
+    remember(state)
     state = next
     render()
     if (options.onChange !== undefined) options.onChange(state)
+  }
+
+  /** Undo one edit; returns false when there is nothing to undo. */
+  function undo(): boolean {
+    const before = history.pop()
+    if (before === undefined) {
+      render()
+      return false
+    }
+    state = before
+    render()
+    if (options.onChange !== undefined) options.onChange(state)
+    return true
   }
 
   function onPointerDown(event: PointerEvent): void {
@@ -1468,11 +1860,17 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
         }
       }
     } else if (boxElement !== null) {
+      // `data-handle` elements also carry `data-box-id`, so a grip press reaches
+      // the resize branch above; this branch is a body press.
       const id = boxElement.getAttribute('data-box-id')
-      if (id !== null) {
+      if (id !== null && !boxElement.hasAttribute('data-handle')) {
         const item = getLayoutItem(state, id)
         if (item !== undefined) {
-          commit(selectBox(state, id))
+          // Shift (or Ctrl/⌘) adds to the selection instead of replacing it — the
+          // same gesture a file manager uses, and what makes "re-label these three
+          // boxes at once" possible without a marquee.
+          const additive = event.shiftKey || event.ctrlKey || event.metaKey
+          commit(additive ? toggleSelection(state, id) : selectBox(state, id))
           drag = {
             mode: 'move',
             id,
@@ -1563,24 +1961,138 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     if (state.selectedId !== null) commit(deleteBox(state, state.selectedId))
   })
   labelSelect.addEventListener('change', () => {
-    if (state.selectedId !== null) commit(setBoxLabel(state, state.selectedId, labelSelect.value as LayoutItemLabel))
+    const label = labelSelect.value as LayoutItemLabel
+    if (state.selectedIds.length > 1) {
+      commit(setSelectedLabel(state, label))
+      return
+    }
+    if (state.selectedId !== null) commit(setBoxLabel(state, state.selectedId, label))
   })
+  /** Split a comma-separated field into the string[] the schema wants. */
+  function listOf(value: string): string[] | undefined {
+    const parts = value.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0)
+    return parts.length === 0 ? undefined : parts
+  }
+
   captionInput.addEventListener('input', () => {
+    if (state.selectedIds.length > 1) {
+      commit(setSelectedCaption(state, captionInput.value))
+      return
+    }
     if (state.selectedId !== null) commit(setBoxCaption(state, state.selectedId, captionInput.value))
   })
   textInput.addEventListener('input', () => {
     if (state.selectedId !== null) commit(updateBox(state, state.selectedId, { text: textInput.value }))
   })
+  tagsInput.addEventListener('input', () => {
+    if (state.selectedId === null) return
+    commit(updateBox(state, state.selectedId, { tags: listOf(tagsInput.value) }))
+  })
+  paletteInput.addEventListener('input', () => {
+    if (state.selectedId === null) return
+    commit(updateBox(state, state.selectedId, { palette: listOf(paletteInput.value) }))
+  })
   summaryInput.addEventListener('input', () => {
     commit(setSummary(state, { caption: summaryInput.value }))
   })
+  metaInput.addEventListener('input', () => {
+    commit(setSummary(state, { meta: listOf(metaInput.value) }))
+  })
+  summaryPaletteInput.addEventListener('input', () => {
+    commit(setSummary(state, { palette: listOf(summaryPaletteInput.value) }))
+  })
+  canvasSelect.addEventListener('change', () => {
+    commit(setSummary(state, { canvas: canvasSelect.value === '' ? undefined : canvasSelect.value as LayoutCanvasValue }))
+  })
+  undoButton.addEventListener('click', () => { undo() })
   draftButton.addEventListener('click', () => doExport('draft'))
   compiledButton.addEventListener('click', () => doExport('compiled'))
+
+  // ---- canvas size, presets and templates ----------------------------------
+  function applyCanvasSize(width: number, height: number): void {
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return
+    try {
+      commit(setCanvasSize(state, Math.round(width), Math.round(height)))
+      output.placeholder = '画布已改为 ' + String(state.width) + '×' + String(state.height) + '（画框按比例重映射）；生成时请用同一尺寸。'
+    } catch (error) {
+      output.value = error instanceof Error ? error.message : String(error)
+    }
+  }
+  widthInput.addEventListener('change', () => { applyCanvasSize(Number(widthInput.value), state.height) })
+  heightInput.addEventListener('change', () => { applyCanvasSize(state.width, Number(heightInput.value)) })
+  sizeSelect.addEventListener('change', () => {
+    const [w, h] = sizeSelect.value.split('x').map(Number)
+    applyCanvasSize(w, h)
+  })
+  templateSelect.addEventListener('change', () => {
+    const template = LAYOUT_TEMPLATES.find((entry) => entry.id === templateSelect.value)
+    templateSelect.value = ''
+    if (template === undefined) return
+    // Boxes are expressed in 0..1 of the canvas, so one template works at any
+    // size; captions stay empty because the compiler refuses a caption-less box.
+    let next = state
+    for (const box of template.boxes) {
+      next = addBox(next, {
+        label: box.label,
+        bbox: {
+          x1: Math.round(box.x1 * state.width),
+          y1: Math.round(box.y1 * state.height),
+          x2: Math.round(box.x2 * state.width),
+          y2: Math.round(box.y2 * state.height),
+        },
+      })
+    }
+    commit(next)
+    output.placeholder = '模板「' + template.label + '」落 ' + String(template.boxes.length) + ' 个框：每个都要写 caption 才能编译。'
+  })
+
+  // ---- import: a draft (abs/xyxy) or an official compiled prompt ------------
+  function doImport(): void {
+    const text = importInput.value.trim()
+    if (text.length === 0) {
+      output.value = '把 draft 或 compiled JSON 粘到下面的输入框再点「导入」。'
+      return
+    }
+    try {
+      const parsed: unknown = JSON.parse(text)
+      const looksCompiled = typeof parsed === 'object' && parsed !== null && 'bbox_coord_space' in parsed
+        && (parsed as Record<string, unknown>)['bbox_coord_space'] === LAYOUT_COMPILED_BBOX_COORD_SPACE
+      // A compiled prompt carries no canvas size (the model gets it out of band),
+      // so it is re-read at the size the editor is currently on.
+      const draft = looksCompiled
+        ? decompileLayout(parsed, state.width, state.height)
+        : parseDraft(text)
+      commit(draftToEditorState(draft))
+      output.value = (looksCompiled ? '已导入 compiled' : '已导入 draft')
+        + '：' + String(state.items.length) + ' 个框，画布 ' + String(state.width) + '×' + String(state.height) + '。'
+    } catch (error) {
+      output.value = '导入失败：' + (error instanceof Error ? error.message : String(error))
+    }
+  }
+  importButton.addEventListener('click', () => {
+    importInput.style.display = importInput.style.display === 'none' ? '' : 'none'
+    if (importInput.style.display !== 'none') importInput.focus()
+  })
+  // Ctrl/⌘+Enter commits the paste: it is the one gesture people try on a textarea.
+  importInput.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault()
+      doImport()
+    }
+  })
+
   canvas.addEventListener('pointerdown', onPointerDown)
   canvas.addEventListener('pointermove', onPointerMove)
   canvas.addEventListener('pointerup', onPointerUp)
   canvas.addEventListener('pointercancel', onPointerUp)
   wrapper.addEventListener('keydown', (event) => {
+    // Ctrl/⌘+Z is handled even inside a field: a caption edit is exactly the kind
+    // of edit people expect to undo. Delete/Backspace still yields to the fields.
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault()
+      undo()
+      return
+    }
     const target = event.target as HTMLElement | null
     if (target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) return
     if ((event.key === 'Delete' || event.key === 'Backspace') && state.selectedId !== null) {
@@ -1602,7 +2114,20 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
       commit(addBox(state, { bbox: box, label: labelSelect.value as LayoutItemLabel }))
     },
     deleteSelected: () => {
+      // Deleting a multi-selection removes all of it in one undoable step.
+      if (state.selectedIds.length > 1) {
+        let next = state
+        for (const id of state.selectedIds) next = deleteBox(next, id)
+        commit(next)
+        return
+      }
       if (state.selectedId !== null) commit(deleteBox(state, state.selectedId))
+    },
+    undo: () => undo(),
+    setCanvasSize: (width: number, height: number) => { applyCanvasSize(width, height) },
+    importDraft: (text: string) => {
+      importInput.value = text
+      doImport()
     },
     destroy: () => {
       wrapper.remove()
