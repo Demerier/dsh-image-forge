@@ -372,7 +372,11 @@ export interface StudioWeightReport {
   bytes: number | null
   /** Where it is (or would be) written; null when no models root resolved. */
   targetPath: string | null
-  /** `present`/`installed` are done; `would-download`/`dry-run` are the plan. */
+  /**
+   * `present`/`installed`/`already-present` are done (`already-present` is the dry
+   * run's version: the disk has the file at the expected size). `would-download`
+   * is the only "still to fetch" value.
+   */
   state: string
   note: string
 }

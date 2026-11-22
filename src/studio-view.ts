@@ -5063,15 +5063,20 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // "missing" unless the plan or the last real pass marked it present/installed.
   const weightRows = (weights?.weights ?? []).map((weight) => {
     const progress = weightProgress[weight.filename]
-    const done = weight.state === 'present' || weight.state === 'installed'
+    // `already-present` is the dry run's "the disk has it" — the same fact as
+    // present/installed, just learned without writing. Leaving it out made the
+    // drawer offer 下载缺失权重 for files that were already there.
+    const done = weight.state === 'present' || weight.state === 'installed' || weight.state === 'already-present'
     const bytes = weight.bytes === null ? '?' : formatBytes(weight.bytes)
     let label: string = weight.state
     if (progress !== undefined && weightBusy) {
       const percent = progress.total > 0 ? Math.min(100, Math.round((progress.written / progress.total) * 100)) : 0
       label = `下载中 ${String(percent)}% · ${formatBytes(progress.written)} / ${formatBytes(progress.total)}`
     } else if (done) {
-      label = `已就绪 · ${bytes}`
-    } else if (weight.state === 'would-download' || weight.state === 'dry-run') {
+      // `already-present` means "the dry run found it on disk", which is not the
+      // same claim as "/object_info listed it" — say which one this is.
+      label = weight.state === 'already-present' ? `已在盘 · ${bytes}` : `已就绪 · ${bytes}`
+    } else if (weight.state === 'would-download') {
       label = `待下载 · ${bytes}`
     } else if (weight.state === 'failed') {
       label = '失败 · 见说明'

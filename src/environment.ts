@@ -1239,7 +1239,14 @@ export interface ProfileWeightReport {
   readonly filename: string
   readonly targetPath: string | null
   readonly bytes: number | null
-  readonly state: 'present' | 'installed' | 'would-download' | 'no-source' | 'no-base' | 'dry-run' | 'failed' | 'unverified'
+  /**
+   * `already-present` is the **dry run's** answer for a file the disk already has
+   * at the exact expected size. It is deliberately not `dry-run`: that one means
+   * "planned, not written" — the two were once the same value, so a panel could
+   * not tell "done" from "still to fetch" and offered the download button for
+   * files that were already there.
+   */
+  readonly state: 'present' | 'installed' | 'already-present' | 'would-download' | 'no-source' | 'no-base' | 'failed' | 'unverified'
   readonly objectInfo: ObjectInfoCheck | null
   readonly note: string
 }
@@ -1300,7 +1307,20 @@ export async function ensureProfileWeights(input: {
     const currentSize = item.targetPath ? fileSizeOrNull(item.targetPath) : null
     const alreadyPresent = currentSize === source.bytes
     if (dryRun) {
-      reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: alreadyPresent ? 'dry-run' : 'would-download', objectInfo: null, note: alreadyPresent ? '已在位（大小匹配）。' : '将下载 ' + source.url + '（' + String(source.bytes) + ' 字节' + (source.urlVerified ? '' : '；URL 未实测') + '）。' })
+      reports.push({
+        kind: item.kind,
+        filename: item.filename,
+        targetPath: item.targetPath,
+        bytes: source.bytes,
+        // Two different answers: a file the disk already has is *done*, one the
+        // pass would fetch is *planned*. Sharing `dry-run` made the panel offer
+        // a download for files that were already there.
+        state: alreadyPresent ? 'already-present' : 'would-download',
+        objectInfo: null,
+        note: alreadyPresent
+          ? '已在位（大小匹配）。'
+          : '将下载 ' + source.url + '（' + String(source.bytes) + ' 字节' + (source.urlVerified ? '' : '；URL 未实测') + '）。',
+      })
       continue
     }
     let download: WeightDownloadOutcome | null = null
@@ -1346,7 +1366,9 @@ export async function ensureProfileWeights(input: {
       reports.push({ kind: item.kind, filename: item.filename, targetPath: item.targetPath, bytes: source.bytes, state: 'failed', objectInfo: check, note: '下载/落盘后 /object_info 仍没列出：' + check.note + '（目标 ' + String(item.targetPath) + '；可见列表：' + check.options.join(', ') + '）。按部署文档排障顺序查：目录 -> 文件名 -> 扫描缓存。' })
     }
   }
-  const ok = reports.filter((report) => report.state === 'present' || report.state === 'installed').length
+  // A dry run counts what is already on disk as settled, so "0/3" no longer
+  // appears next to three files the panel is about to call ready.
+  const ok = reports.filter((report) => report.state === 'present' || report.state === 'installed' || report.state === 'already-present').length
   const state = sawFailure ? 'partial' : sawUnverified ? 'unverified' : changed ? 'downloaded' : 'ready'
   return {
     profile: profile.id,
@@ -1354,7 +1376,12 @@ export async function ensureProfileWeights(input: {
     dryRun,
     state,
     weights: reports,
-    note: ok + '/' + String(reports.length) + ' 个权重被 /object_info 列出；' + (sawFailure ? '有失败项，见 weights。' : sawUnverified ? '有文件已落盘但当前没有运行中的 ComfyUI 可验证。' : '全部就绪。'),
+    note: dryRun
+      // A dry run never asks /object_info (it writes nothing), so "0/3 被列出"
+      // was a false alarm: the count is about the plan, not about the server.
+      ? `${String(reports.filter((report) => report.state === 'already-present').length)}/${String(reports.length)} 个权重已在盘；` +
+        (sawFailure ? '有项无法计划，见 weights。' : reports.some((report) => report.state === 'would-download') ? '其余待下载。' : '无需下载。')
+      : ok + '/' + String(reports.length) + ' 个权重被 /object_info 列出；' + (sawFailure ? '有失败项，见 weights。' : sawUnverified ? '有文件已落盘但当前没有运行中的 ComfyUI 可验证。' : '全部就绪。'),
   }
 }
 

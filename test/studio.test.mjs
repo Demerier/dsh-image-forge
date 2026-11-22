@@ -1874,6 +1874,21 @@ function buttonWithText(panel, text) {
 }
 
 /** Find a button whose label *starts with* `prefix` (labels that carry a size). */
+/** The state label of every weight row in the drawer, in render order. */
+function weightRowLabels(panel) {
+  const labels = []
+  const drawer = fakeElementWithClass(panel.tree, 'dsh-forge-weights-drawer')
+  if (drawer === undefined) return labels
+  fakeVisit(drawer, (entry) => {
+    if (typeof entry.props.className !== 'string') return
+    if (!entry.props.className.includes('dsh-forge-weight-state')) return
+    const text = fakeText(entry)
+    if (typeof text === 'string') labels.push(text)
+  })
+  return labels
+}
+
+/** Find a button whose label *starts with* `prefix` (labels that carry a size). */
 function buttonStartingWith(panel, prefix) {
   let found
   fakeVisit(panel.tree, (entry) => {
@@ -4612,5 +4627,77 @@ test('P2b: the panel offers the download button, renders the plan, and posts con
     assert.ok(posts.some((call) => String(call.body).includes('confirm')), 'the button downloads for real, not the plan again')
   } finally {
     network.restore()
+  }
+})
+test('P2b: when the weights are already on disk, the drawer says so and offers no download', async () => {
+  // The bug this pins: the dry run reported an on-disk file as `dry-run` (the
+  // same value it used for "planned"), so the panel counted it as missing and
+  // offered 下载缺失权重 for files that were already there. `already-present` is
+  // the dry run's "done", and nothing is offered when every row is done.
+  const { network, panel } = await mountWorkbench({
+    environment: () => ({
+      environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188' },
+      weights: {
+        profile: 'moss-sft',
+        base: 'D:/Comfy-Desktop/ComfyUI-Shared/models',
+        dryRun: true,
+        state: 'ready',
+        note: '3/3 个权重已在盘；无需下载。',
+        weights: [
+          { kind: 'unet', filename: 'moss_image_sft_int8_convrot.safetensors', bytes: 5413698958, targetPath: 'D:/models/diffusion_models/a.safetensors', state: 'already-present', note: '已在位（大小匹配）。' },
+          { kind: 'clip', filename: 'qwen3.5_9b_w4a8_gptq.safetensors', bytes: 7343591088, targetPath: 'D:/models/text_encoders/b.safetensors', state: 'already-present', note: '已在位（大小匹配）。' },
+          { kind: 'vae', filename: 'flux2-vae_small.safetensors', bytes: 249521340, targetPath: 'D:/models/vae/c.safetensors', state: 'already-present', note: '已在位（大小匹配）。' },
+        ],
+      },
+    }),
+  })
+  try {
+    // Nothing is missing, so the drawer is not drawn at all: there is no plan to
+    // read, no size to warn about, and above all no 下载缺失权重 button to press.
+    assert.equal(byClassNow(panel, 'dsh-forge-weights-drawer'), undefined, 'a full disk needs no weight drawer')
+    assert.equal(buttonStartingWith(panel, '下载缺失权重'), undefined, 'and no download button')
+    assert.equal(buttonWithText(panel, '查看计划'), undefined, 'nor an empty plan viewer')
+    const posts = network.calls.filter((call) => call.url.indexOf(STUDIO_ENVIRONMENT_ROUTE) === 0 && call.method === 'POST')
+    assert.equal(posts.some((call) => String(call.body).includes('download')), false, 'no download is requested')
+  } finally {
+    network.restore()
+  }
+})
+
+test('P2b: a partial dry run still labels the on-disk row 已在盘 and the rest 待下载', async () => {
+  // The mixed case is what the drawer is for, and the labels have to distinguish
+  // "the disk has it" from "we would fetch it".
+  const { panel } = await mountWorkbench({
+    environment: () => ({
+      environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188' },
+      weights: {
+        profile: 'moss-sft',
+        base: 'D:/Comfy-Desktop/ComfyUI-Shared/models',
+        dryRun: true,
+        state: 'ready',
+        note: '1/3 个权重已在盘；其余待下载。',
+        weights: [
+          { kind: 'unet', filename: 'moss_image_sft_int8_convrot.safetensors', bytes: 5413698958, targetPath: 'D:/models/a.safetensors', state: 'already-present', note: '已在位（大小匹配）。' },
+          { kind: 'clip', filename: 'qwen3.5_9b_w4a8_gptq.safetensors', bytes: 7343591088, targetPath: 'D:/models/b.safetensors', state: 'would-download', note: '待下载' },
+          { kind: 'vae', filename: 'flux2-vae_small.safetensors', bytes: 249521340, targetPath: 'D:/models/c.safetensors', state: 'would-download', note: '待下载' },
+        ],
+      },
+    }),
+  })
+  try {
+    assert.ok(byClassNow(panel, 'dsh-forge-weights-drawer') !== undefined, 'two missing files keep the drawer')
+    const plan = buttonWithText(panel, '查看计划')
+    assert.ok(plan !== undefined)
+    plan.props.onClick()
+    await settle(panel)
+    const labels = weightRowLabels(panel)
+    assert.equal(labels.length, 3)
+    assert.ok(labels[0].indexOf('已在盘') >= 0, 'the on-disk row is done, got ' + labels[0])
+    assert.ok(labels[1].indexOf('待下载') >= 0, 'a planned row says so, got ' + labels[1])
+    // The button counts only what is actually missing.
+    const download = buttonStartingWith(panel, '下载缺失权重')
+    assert.ok(download !== undefined, 'the missing two offer the download')
+  } finally {
+    panel.unmount?.()
   }
 })

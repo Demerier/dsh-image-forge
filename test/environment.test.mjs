@@ -857,8 +857,11 @@ test('dry-run never writes: existing files are reported, missing ones are planne
   mkdirSync(dirname(plan[0].targetPath), { recursive: true })
   writeFileSync(plan[0].targetPath, tiny)
   const outcome = await ensureProfileWeights({ profileId: 'qwen21-base', base, endpoint: null, dryRun: true, sources })
-  assert.equal(outcome.weights[0].state, 'dry-run')
+  // A file already on disk at the expected size is *done*, not "planned": the
+  // two used to share `dry-run`, which made the panel offer a download for it.
+  assert.equal(outcome.weights[0].state, 'already-present')
   assert.equal(outcome.weights[1].state, 'would-download')
+  assert.equal(outcome.state, 'ready', 'nothing to fetch is not a failure')
   assert.equal(existsSync(plan[1].targetPath), false)
 })
 
