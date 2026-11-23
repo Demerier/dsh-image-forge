@@ -3,7 +3,7 @@
  *
  * The host-supplied `@modelcontextprotocol/client` cannot be imported by plain
  * `node` (it is a peer dependency resolved by the DSH profile runtime, see
- * docs/mcp-backend.md), so the fake here sits at the stdio connection seam
+ * ../docs/usage-reference.md), so the fake here sits at the stdio connection seam
  * (`McpConnectionLike`): the same `listTools`/`callTool`/close surface the SDK
  * client exposes. That keeps every branch of the production code under test —
  * tool filtering, submit, poll, fetch, first-load `timed_out`, timeout and
@@ -156,7 +156,7 @@ test('MCP client: submit -> poll (timed_out is not failure) -> fetch writes the 
       job: () => {
         polls += 1
         // First poll mirrors MCP's default 110 s wait returning timed_out:true;
-        // that is explicitly NOT a failure (docs/DIRECTION-ALIGNMENT.md §4.2).
+        // that is explicitly NOT a failure (docs/usage-reference.md §4.2).
         if (polls === 1) return { timed_out: true, prompt_id: 'p-1' }
         return { completed: true, prompt_id: 'p-1', status: { status_str: 'success' } }
       },

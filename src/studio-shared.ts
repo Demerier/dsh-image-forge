@@ -47,7 +47,7 @@ export const STUDIO_FILE_ROUTE = '/plugins/dsh-image-forge/studio/file'
  *
  * The page never opens ComfyUI's own WebSocket: this plugin subscribes to
  * `/ws` in Node and re-publishes normalized events here (decision 4 in
- * `docs/DIRECTION-ALIGNMENT.md`). Each SSE message is one
+ * `docs/usage-reference.md`). Each SSE message is one
  * {@link StudioProgressEvent} as JSON in its `data:` field. `state` events say
  * whether the bridge is connected, so a stopped ComfyUI is visible instead of
  * leaving a stale step counter on screen.
@@ -639,7 +639,7 @@ export interface BoardSummary {
   /**
    * Sum of this board's item `bytes` — how much the project's pictures weigh
    * (U07). Deliberately **not** the board JSON's own size (the design note in
-   * `docs/WORKBENCH-SHELL.md` §5.5 suggested `stat` on the board file): the
+   * `../docs/usage-reference.md` §5.5 suggested `stat` on the board file): the
    * question the card and the delete confirmation ask is "how much disk do this
    * project's files take", and the metadata is a few KB. Summing stored `bytes`
    * costs nothing per request; `stat`-ing every picture would.

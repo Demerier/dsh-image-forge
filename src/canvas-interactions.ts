@@ -1,7 +1,7 @@
 /**
  * Canvas interaction logic, kept out of the React component.
  *
- * Pointer gestures cannot be automated in this project (`docs/CANVAS-DESIGN.md`
+ * Pointer gestures cannot be automated in this project (`../docs/usage-reference.md`
  * §14.5: no Playwright-class dependency), so everything a gesture *decides* is
  * extracted here as a pure function and asserted directly: which nodes a marquee
  * catches, what a multi-node drag does to coordinates, where an alignment puts
@@ -36,7 +36,7 @@ export { rectsIntersect }
 /**
  * Hard ceiling on the undo stack, in commands.
  *
- * DD9 (`docs/CANVAS-DESIGN.md` §6.5): an in-memory, session-scoped stack. The
+ * DD9 (`docs/usage-reference.md` §6.5): an in-memory, session-scoped stack. The
  * cap keeps a long drag session from hoarding snapshots; the oldest command is
  * dropped, never the newest — losing "the last 100 things" is what a user can
  * still fix by hand.
@@ -135,7 +135,7 @@ export function selectionBounds(rects: readonly Rect[]): Rect | undefined {
  *   clicked, which is the pre-multi-select behaviour and still the common case.
  * - `additive === true` — toggle: a member leaves the set, a non-member joins
  *   it. §6.1 spells this as Ctrl/Cmd+click; the marquee gesture spells the same
- *   flag as Shift (`docs/CANVAS-DESIGN.md` §6.1 gesture union). The modifier
+ *   flag as Shift (`docs/usage-reference.md` §6.1 gesture union). The modifier
  *   difference is the caller's to map — this function only takes the boolean.
  *
  * The argument set is never mutated: `studio-view.ts` keeps selection in React
@@ -813,4 +813,3 @@ export function hasReference(references: readonly ReferenceLike[], key: Referenc
     return false
   })
 }
-

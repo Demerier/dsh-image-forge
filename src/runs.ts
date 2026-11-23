@@ -9,7 +9,7 @@
  * naming the canvas task is a browser-generated `clientId` that only the
  * submitting request knows. So the host keeps this map from `prompt_id` to
  * `{ clientId, boardId }` for the lifetime of one run, and the progress bridge
- * looks every event up against it (DD7, `docs/CANVAS-DESIGN.md` §4.3).
+ * looks every event up against it (DD7, `../docs/usage-reference.md` §4.3).
  *
  * ## Why it is memory only
  *

@@ -12,7 +12,7 @@
  * `CreateBoundingBoxes.editor_state` is a required widget with no producer) — hence
  * local compilation rather than a node chain.
  *
- * Format authority: `verify/layout_prompt.json`.
+ * Format authority: `test/fixtures/layout/layout_prompt.json`.
  */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -29,7 +29,7 @@ import {
 } from '../src/model-profiles.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SAMPLE = readFileSync(join(HERE, '..', 'verify', 'layout_prompt.json'), 'utf8')
+const SAMPLE = readFileSync(join(HERE, 'fixtures', 'layout', 'layout_prompt.json'), 'utf8')
 
 const MOSS_MODELS = {
   unet: 'moss_image_sft_int8_convrot.safetensors',

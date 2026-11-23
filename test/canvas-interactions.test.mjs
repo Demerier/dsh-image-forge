@@ -1,7 +1,7 @@
 /**
  * Interaction pure-function tests (C08).
  *
- * Pointer gestures have no DOM automation in this project (`docs/CANVAS-DESIGN.md`
+ * Pointer gestures have no DOM automation in this project (`../docs/usage-reference.md`
  * §14.5), so this file is where a marquee's hit rule, a batch drag's division by
  * zoom, an alignment's bounding-box reference, the undo depth and the key table
  * are pinned down. The module under test is imported straight from `src/` — the
@@ -516,4 +516,3 @@ test('hasReference is empty-safe and never matches across channels', () => {
   // A key with neither channel matches nothing.
   assert.equal(hasReference([assetRef('/a.png')], {}), false)
 })
-

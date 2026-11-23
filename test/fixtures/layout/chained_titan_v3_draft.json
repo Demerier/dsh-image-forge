@@ -1,0 +1,59 @@
+{
+  "width": 1536,
+  "height": 1024,
+  "bbox_coord_space": "abs",
+  "bbox_format": "xyxy",
+  "summary": {
+    "meta": ["gritty dark fantasy", "handheld cinematic key frame", "asymmetrical improvised binding"],
+    "canvas": "single",
+    "palette": ["crushed blue-black", "rusted iron brown", "cold off-white raking light"],
+    "caption": "A gritty, asymmetrical dark-fantasy cinematic key frame, handheld 35mm feel, slightly low three-quarter angle. ONE humanoid monster is trapped in the middle of a vast lightless stone void, but it is NOT posed symmetrically: torso twisted by conflicting pulls, one arm wrenched high and back, the other dragged low and sideways, shoulders at different heights, spine arched, hips rotated, one leg kicked behind, head tilted. Dozens of iron chains restrain it. EACH individual chain is pulled dead straight and taut under tension, but their directions, lengths, gauges, ages, depths and anchor points are completely irregular and improvised, as if hostile hands bolted them on one by one over centuries: chains arrive from all kinds of awkward off-axis angles, a few enormous near-camera links slice across the frame in the foreground, mid-distance chains cross over one another, distant chains fade into haze; some are heavy and corroded, some thin and bright with recent wear; some vanish into darkness, some end in rough iron rings or broken hooks bolted at random heights. Uneven spacing, clashing angles, crossings, overlaps and wide empty gaps everywhere. Dust and smoke drift through the air, a few snapped links and grit lie on the unseen floor. One hard raking light from the upper left behind the figure, deep crushed blacks, patchy rust-red reflections, uneven pools of light, heavy atmospheric haze, film grain. The surrounding space stays empty and enormous, but the network of chains is messy, organic and oppressive, with the weight of accumulated history. STRUCTURE RULE: exactly ONE creature; the only repeated element is straight taut chains of visibly different weights; absolutely NO symmetry, NO evenly spaced radial spokes, NO wheel pattern, NO neat fan, NO geometric grid, NO technical diagram, NO crucifix pose, NO architecture, NO pillars, NO extra figures. No text, no watermark, no logos."
+  },
+  "items": [
+    {
+      "label": "character",
+      "caption": "ONE humanoid monster caught mid-struggle in the center of the void, three-quarter view from slightly below, body twisted off-axis: left arm wrenched up and back above the shoulder, right arm dragged down and out to the side, shoulders at different heights, spine arched, hips rotated, one knee bent with the leg pulled backward, head tilted, one narrow glowing vertical fissure instead of a face and two uneven broken horns. Rough dark stone-like hide, a heavy bone plate on one shoulder only, old scars and rust stains, massive mismatched iron shackles on wrists and ankles. NOT a symmetrical T-pose, NOT front-facing, NOT a crucifixion silhouette. Hard raking backlight from the upper left, most of the body in deep shadow.",
+      "bbox": [580, 190, 950, 870]
+    },
+    {
+      "label": "object",
+      "caption": "Foreground, very close to camera: two or three enormous rusted iron chains with big clearly readable links, slicing diagonally from the lower-left frame edge across the picture toward the right. They pass IN FRONT of the prisoner, partly cropped by the frame, much thicker and darker than every other chain, slightly soft at the very edge. Dead straight and taut, but at an awkward off-axis angle that breaks any radial pattern. No symmetry, no neat spacing.",
+      "bbox": [0, 540, 700, 1024]
+    },
+    {
+      "label": "object",
+      "caption": "Upper left, far away in the haze: nine to twelve thin chains descending at slightly different clashing angles from unseen anchor points, fading into blue-grey fog before they reach the figure. Unevenly spaced, some crossing, a few much fainter than the rest, older and thinner than the near chains. Straight and taut, never drooping, but visibly improvised rather than measured out. No radial fan, no even gaps.",
+      "bbox": [0, 0, 520, 420]
+    },
+    {
+      "label": "object",
+      "caption": "Three heavy chains of mismatched gauge dropping steeply from the top edge slightly left of center at three different angles, all pulled rigidly straight and locking onto the raised left wrist and shoulder. One is bright worn steel, two are dark and corroded. They do NOT form a neat parallel bundle; gaps between them are uneven.",
+      "bbox": [500, 0, 760, 280]
+    },
+    {
+      "label": "object",
+      "caption": "Upper right: a dense unruly cluster of about a dozen chains of mixed weights and eras bursting in from the right edge at many different steep and shallow angles, crossing over each other, some bundled tight then separating, a couple ending in heavy hooks or rough bolted iron rings lost in the dark. Each one rigidly taut; the GROUP is deliberately chaotic and lopsided, not a tidy fan and not evenly spaced.",
+      "bbox": [940, 0, 1536, 500]
+    },
+    {
+      "label": "object",
+      "caption": "One single very heavy chain, thicker than all the others, running almost horizontally across the right half at chest height, pulled absolutely rigid, slightly off level. It crosses in front of several other chains and disappears off frame, with a worn bright edge catching the light. A lone dominant off-axis line.",
+      "bbox": [1000, 400, 1536, 590]
+    },
+    {
+      "label": "object",
+      "caption": "Lower right: five or six chains of different gauges dragging the right wrist, ribs and ankle down toward the lower-right dark, each at a distinct angle, wide uneven gaps, two of them crossing, one much shorter and ending at a rough iron ring set into nothingness. Straight and strained, no sag, deliberately unbalanced.",
+      "bbox": [980, 590, 1536, 1024]
+    },
+    {
+      "label": "object",
+      "caption": "Bottom center-left: seven or eight chains of mixed thickness pulling the bent leg and hips downward and away at scattered angles, some vanishing into haze, some cropped by the bottom edge, unevenly spaced, one noticeably newer and brighter. All rigidly straight, none curving or hanging, no regular pattern.",
+      "bbox": [380, 760, 900, 1024]
+    },
+    {
+      "label": "object",
+      "caption": "Middle left: a loose uneven handful of four or five chains coming in almost level but each a few degrees off, crossing two of the chains from above, with wide irregular gaps between them, different link sizes and different amounts of rust. Straight, tense, clearly added by hand at different times rather than laid out with a ruler.",
+      "bbox": [0, 300, 500, 620]
+    }
+  ]
+}

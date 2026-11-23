@@ -1,5 +1,5 @@
 /**
- * Workbench tab state machine tests (U01, `docs/WORKBENCH-SHELL.md` §3, §15.1).
+ * Workbench tab state machine tests (U01, `../docs/usage-reference.md` §3, §15.1).
  *
  * There is no DOM to drive here and no panel to render: the tab rules *are*
  * decidable, so they are decided here. The module is imported straight from

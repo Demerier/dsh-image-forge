@@ -3,7 +3,7 @@
  *
  * The authority is not this file: it is the reference compiler shipped with the
  * model (refs/MOSS-Image/skills/moss-image-prompt-enhancer/scripts/compile_prompt.py)
- * and the draft/compiled pairs kept under verify/. Two of those pairs (fantasy
+ * and the draft/compiled pairs kept under test/fixtures/layout/. Two of those pairs (fantasy
  * dawn wide + symmetry) came from real 2048x864 / 1792x1024 generations, and the
  * chained titan series carries a repeated caption sentence that must survive
  * editing item by item. So every assertion here regresses the module against the
@@ -105,7 +105,7 @@ const PAIRS = [
 ]
 
 function verifyUrl(name) {
-  return new URL('../verify/' + name + '.json', import.meta.url)
+  return new URL('./fixtures/layout/' + name + '.json', import.meta.url)
 }
 
 function readSampleText(name) {
@@ -779,7 +779,7 @@ test('a text item keeps literal line breaks through compile and import', () => {
 })
 
 test('an official compiled prompt imports back into an editable draft', () => {
-  const compiled = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
+  const compiled = readFileSync(fileURLToPath(new URL('./fixtures/layout/layout_prompt.json', import.meta.url)), 'utf8')
   const draft = decompileLayout(compiled, DEFAULT_LAYOUT_WIDTH, DEFAULT_LAYOUT_HEIGHT)
   const state = draftToEditorState(draft)
   assert.equal(state.items.length, draft.items.length)

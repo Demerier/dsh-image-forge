@@ -3,12 +3,12 @@
  * Host-supplied `@modelcontextprotocol/client`.
  *
  * Tool surface is filtered on the client side: comfy-mcp 0.10.0 publishes 39
- * tools and has no allowlist variable of its own (docs/EXECUTION-PLAN.md §8-1),
+ * tools and has no allowlist variable of its own (docs/usage-reference.md §8-1),
  * so this module keeps only the five it needs and refuses to call anything else.
- * The 0.10.0 tool list is recorded in [mcp-tools.md](../docs/mcp-tools.md).
+ * The 0.10.0 tool list is recorded in [mcp-tools.md](../docs/usage-reference.md).
  *
- * Only five operations are used (docs/mcp-tools.md and
- * [mcp-backend.md](../docs/mcp-backend.md) carry the exact call sequence):
+ * Only five operations are used (docs/usage-reference.md and
+ * [mcp-backend.md](../docs/usage-reference.md) carry the exact call sequence):
  *
  * ```text
  * run_workflow(workflow_path, wait=false) -> { prompt_id }
@@ -176,7 +176,7 @@ async function loadHostSdk(): Promise<{
 /**
  * Default connection: load the Host SDK, spawn `comfy-mcp` over stdio, and
  * point it at the resolved ComfyUI endpoint with `COMFY_LOCAL_URL` (never
- * `COMFYUI_URL` — that has remote semantics, docs/mcp-backend.md §env).
+ * `COMFYUI_URL` — that has remote semantics, docs/usage-reference.md §env).
  */
 async function connectHost(options: {
   command: string

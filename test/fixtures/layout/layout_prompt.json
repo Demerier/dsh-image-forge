@@ -1,0 +1,28 @@
+{
+  "summary": {
+    "meta": ["poster"],
+    "canvas": "single",
+    "caption": "A minimalist travel poster on a warm cream background, with a flat dark-blue mountain illustration, a large uppercase headline at the top and a short Chinese caption at the bottom. Clean editorial design, generous negative space, crisp typography."
+  },
+  "items": [
+    {
+      "label": "text",
+      "caption": "Large dark-blue uppercase headline centered across the top.",
+      "text": "EXPLORE",
+      "bbox": [-340, -560, -230, 560]
+    },
+    {
+      "label": "object",
+      "caption": "A flat dark-blue mountain range illustration with a pale sun, lower half of the poster.",
+      "bbox": [-180, -430, 260, 430]
+    },
+    {
+      "label": "text",
+      "caption": "Small centered Chinese caption along the bottom edge.",
+      "text": "山海之间",
+      "bbox": [300, -260, 370, 260]
+    }
+  ],
+  "bbox_coord_space": "abs_centralized",
+  "bbox_format": "yxyx"
+}

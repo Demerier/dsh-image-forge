@@ -8,7 +8,7 @@
  * shape `test/comfyui-e2e.test.mjs` uses, so those assertions are about requests
  * and graphs, not about a helper's return value.
  *
- * The task book (docs/EXECUTION-PLAN.md §4 T01) asks for six things; every test
+ * The task book (docs/usage-reference.md §4 T01) asks for six things; every test
  * below names the step it pins.
  */
 import test from 'node:test'

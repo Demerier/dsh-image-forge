@@ -882,7 +882,7 @@ export async function stopEnvironment(deps: EnvironmentDeps = {}): Promise<Envir
 
 // ---------------------------------------------------------------------------
 // P1b (T14): install guidance, model-root resolution and on-demand downloads.
-// Rules are T04's (docs/desktop-model-dir.md): resolve the models root (running
+// Rules are T04's (../docs/comfyui-deployment.md): resolve the models root (running
 // instance argv -> Desktop instance-model-paths yaml -> Desktop settings.json ->
 // install tree); download to '<name>.part', verify bytes/sha256, rename atomically;
 // and count ONLY 'GET /object_info/<Loader> lists the exact file name' as success.

@@ -1,5 +1,5 @@
 /**
- * Workbench tab state machine (U01, `docs/WORKBENCH-SHELL.md` §3).
+ * Workbench tab state machine (U01, `../docs/usage-reference.md` §3).
  *
  * The tabbed shell decides a handful of things without any DOM: which key a tab
  * has, where a newly opened tab lands, which tab takes over when one closes, and

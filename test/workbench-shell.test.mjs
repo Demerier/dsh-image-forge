@@ -1,6 +1,6 @@
 /**
  * U03 — the tabbed shell and the projects tab (§3, §5, §11, §12 of
- * `docs/WORKBENCH-SHELL.md`).
+ * `../docs/usage-reference.md`).
  *
  * Same approach as `test/studio.test.mjs`, one level further: `lib/client.js` is
  * evaluated the way the web loader does it, the factory is handed a React facade

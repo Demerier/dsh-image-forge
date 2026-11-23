@@ -7,11 +7,11 @@
  * abs/xyxy canvas pixels is compiled into a compact abs_centralized/yxyx JSON
  * string, and that string is the text condition. The format is not ours; it is
  * the public contract shipped with the model, and the authority is the reference
- * compiler plus the pairs kept under verify/:
+ * compiler plus the public fixtures kept under `test/fixtures/layout/`:
  *
- * - verify/fantasy_dawn_layout_*_draft.json   ->  verify/fantasy_dawn_layout_*.json
- * - verify/chained_titan*_draft.json          ->  verify/chained_titan*_layout.json
- * - verify/layout_prompt.json (compiled-only, with literal-text items)
+ * - test/fixtures/layout/fantasy_dawn_layout_*_draft.json   ->  test/fixtures/layout/fantasy_dawn_layout_*.json
+ * - test/fixtures/layout/chained_titan*_draft.json          ->  test/fixtures/layout/chained_titan*_layout.json
+ * - test/fixtures/layout/layout_prompt.json (compiled-only, with literal-text items)
  *
  * The conversion rules below are a direct port of the reference compiler
  * (refs/MOSS-Image/skills/moss-image-prompt-enhancer/scripts/compile_prompt.py,
@@ -739,7 +739,7 @@ export function decompileLayout(value: unknown, width: number, height: number): 
 /**
  * Format a draft as 2-space JSON plus a trailing newline.
  *
- * The verify samples inline their short arrays, which is cosmetic: only the
+ * The fixture samples inline their short arrays, which is cosmetic: only the
  * fields and values are the contract. The compiled prompt is the one that must
  * be byte-identical, because it is the text the model actually reads.
  */

@@ -425,8 +425,8 @@ export const MOSS_IMAGE_WORKFLOW: ApiGraph = {
 /**
  * One item of a compiled MOSS layout prompt.
  *
- * `verify/layout_prompt.json` and the `*_draft.json` ⇄ compiled pairs under
- * `verify/` are the format authority. `bbox` is `[y1, x1, y2, x2]` in the
+ * `test/fixtures/layout/layout_prompt.json` and the `*_draft.json` ⇄ compiled
+ * pairs under `test/fixtures/layout/` are the format authority. `bbox` is `[y1, x1, y2, x2]` in the
  * centred coordinate space the official compiler emits (`abs_centralized`),
  * which is why the compiled document carries that tag and the order.
  */
@@ -1030,7 +1030,7 @@ export const MODEL_PROFILES: Readonly<Record<ComfyModelId, ModelProfile>> = {
     clipType: { prefer: ['qwen_image'], fallback: /qwen/i },
     latent: { classType: 'EmptyLatentImage', multiple: 32 },
     sampler: { node: 'KSampler', name: 'euler', scheduler: 'simple', cfg: 1 },
-    // The official GitHub card recommends 40 (docs/qwen21-optimization.md §四-2);
+    // The official GitHub card recommends 40 (../docs/configuration.md §四-2);
     // the ComfyUI template's 25 is a starting point, not the target.
     steps: { default: 40 },
     negativePrompt: '',

@@ -1,5 +1,5 @@
 /**
- * The node detail tab (U06, `docs/WORKBENCH-SHELL.md` §8).
+ * The node detail tab (U06, `../docs/usage-reference.md` §8).
  *
  * ## Why a tab, and not a bigger node
  *

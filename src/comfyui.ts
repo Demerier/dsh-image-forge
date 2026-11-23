@@ -162,7 +162,7 @@ export interface ComfyOptions {
    * Called once with the prompt id `/prompt` accepted, before any polling.
    *
    * The Studio uses it to map the ComfyUI run back to the canvas task that asked
-   * for it (DD7, `docs/CANVAS-DESIGN.md` §4.3). Optional by design: when it is
+   * for it (DD7, `../docs/usage-reference.md` §4.3). Optional by design: when it is
    * absent the submission body and the request sequence are byte-identical to
    * before, which is what keeps the conversation-tool path untouched.
    */

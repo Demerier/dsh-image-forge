@@ -3,7 +3,7 @@
  *
  * ## Why it is a sub-view and not a tab
  *
- * `docs/WORKBENCH-SHELL.md` §9.2 (Q7) decides this: the library is "the console
+ * `../docs/usage-reference.md` §9.2 (Q7) decides this: the library is "the console
  * beside the projects", so it lives *inside* the `projects` tab as a second
  * view. A tab of its own would put a second non-project entry on the strip and
  * make "which tab am I in" read worse than "which view".

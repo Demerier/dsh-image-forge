@@ -23,7 +23,7 @@
  * comparison grid. The canvas is not a wall of finished pictures any more: it is
  * where the work happens, with images, generation tasks and layout drafts as
  * first-class nodes and persisted lineage edges between them (the direction
- * change is written down as D6 in `docs/CANVAS-DESIGN.md`; the earlier note here
+ * change is written down as D6 in `../docs/usage-reference.md`; the earlier note here
  * said a node was only ever a result, and that is no longer the contract).
  *
  * What is still not ported: tldraw itself. It is a ~1 MB client dependency, and
@@ -397,7 +397,7 @@ function describeAsset(asset: StudioAsset): string {
 /**
  * A pointer gesture in progress; `undefined` when idle.
  *
- * Three kinds now, not two (`docs/CANVAS-DESIGN.md` §6.6). Panning keeps the
+ * Three kinds now, not two (`docs/usage-reference.md` §6.6). Panning keeps the
  * camera it started from; a node drag keeps the *whole* selection's origins so a
  * multi-node move is one delta applied to a batch, never an accumulation; a
  * marquee keeps the pointer origin in viewport space plus the selection it must
@@ -1546,7 +1546,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const [optimizeNote, setOptimizeNote] = useState<string | undefined>(undefined)
   // Live progress from the plugin's same-origin SSE stream. The panel never
   // opens ComfyUI's own socket: Node subscribes to `/ws` and re-publishes
-  // normalized events here (decision 4 in `docs/DIRECTION-ALIGNMENT.md`).
+  // normalized events here (decision 4 in `docs/usage-reference.md`).
   const [live, setLive] = useState<LiveProgress>(INITIAL_LIVE_PROGRESS)
   // Rewriting convention: house prose (default) or the keyword formula. Kept
   // across optimise clicks, because trying both on the same idea is the point.

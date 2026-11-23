@@ -8,11 +8,11 @@
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
 
-在 DeepSeek Harness 里生图、改图：底模是本机的 **Qwen-Image 2.1** 或 **MOSS-Image**，由设置页的 `comfyModel` 选。
+在 DeepSeek Harness 里生图、改图：底模是本机的 **Qwen-Image 2.1** 或 **MOSS-Image**，由设置页的 `comfyModel` 选。当前发布版本：`0.3.0`（[发布说明](docs/release-notes-0.3.0.md)）。
 
 说「画一张 16:9 的夏日饮料海报」，出图；丢一张客厅照片说「改成晚上的」，改图。比例、像素由插件换算，不用你查表；成果按**画板**归档，工作台里能看、能摆、能接着改。
 
-![图像工作台：左边写提示词、选画幅，右边画布上落着刚生成的图](docs/images/studio-workbench.png)
+![图像工作台：项目、画布、节点详情和 ComfyUI 日志在同一级页签中，画布支持拖拽、连线和属性检查](docs/images/studio-workbench.png)
 
 **两个入口，一套后端**：对话里说一句话，模型按 Qwen 契约改写后调用工具；或者在左侧边栏点「图像工作台」进全局面板点按钮。两边共用同一份配置、同一个输出目录、同一批画板。
 
@@ -69,7 +69,7 @@ node scripts/start-comfyui.mjs --doctor  # 只看缺什么：安装、torch、�
 起好之后**什么都不用填**：插件自动探测 8000 / 8188 / … 端口（非回环地址会被拒绝）。缺 Qwen-Image 权重时，
 `--doctor` 会点名缺哪个，照 [ComfyUI 部署指引](docs/comfyui-deployment.md) 把文件放进对应目录。
 
-10 个配置字段，除两个可选的步数覆盖项外都有默认值，日常一个都不用碰；全部字段见 [docs/configuration.md](docs/configuration.md)。
+16 个配置字段，大多数都有默认值；日常只需要关注底模、ComfyUI 地址和出图目录。全部字段见 [docs/configuration.md](docs/configuration.md)。
 
 ### 3. 出第一张图
 
@@ -143,17 +143,24 @@ qwen_image_edit(prompt = <改图指令>, images = ["D:\\pictures\\room.png"], ra
 
 ## 工作台
 
-左侧边栏的「图像工作台」全局面板（侧边栏列表里的一行，主列整个让给它）。不想每次在对话里贴参数，就在这里点。
+左侧边栏的「图像工作台」是一个整页工作区，不再把设置页挤在侧栏里。页签栏把项目管理、画板、节点详情和 ComfyUI 日志放在同一级：
 
-- **画幅只有七档**，标的像素就是实际送进 ComfyUI 的像素。
-- **传了参考图就是改图**（最多 10 张），留空就是文生图。
-- **提示词优化**用当前会话的模型改写，结果写回输入框，你改完再生成。
-- **结果是一块画布**：拖空白处平移、滚轮缩放。选中一张点「用作参考」，下一轮就变成改图，新图会从原图拉一条虚线过来，改了哪几轮一眼看清。
-- **按画板归档**：顶部切换 / 新建 / 重命名，画布位置自动保存，重开页面回到上次的画板。「素材」页可以跨画板搜索，把图用作参考、定位回画布、或删掉。
+- **项目管理**：新建、复制、重命名、删除项目，查看项目大小与最近修改时间。
+- **画板**：React Flow 无限画布，管理图片、任务和布局节点；画布位置会保存，重开回到上次视图。
+- **节点详情**：选中节点后可打开完整编辑器，不在画布上挤一张长表单。
+- **ComfyUI 日志**：独立页签，按行号、时间戳和级别查看日志，支持加载更早、刷新最新、暂停和复制。
+
+画布交互：
+
+- 空白处拖动或用滚轮平移；Ctrl/Meta+滚轮、双指捏合缩放。
+- Shift+拖动框选多个节点；从节点连接点拖线可创建下一张任务或布局节点。
+- 选中节点后右侧属性抽屉可编辑；双击或点「打开详情」进入完整页签。
+- 「素材」是所有项目共享的视图，可跨画板搜索，把图用作参考、定位回画布或移除。
+- 画幅仍是七档，传参考图就是改图（最多 10 张）；提示词优化仍使用当前会话模型。
 
 ![工作台的「素材」页：画板栏 + 跨画板素材检索，每张图可「用作参考」「定位」或移除](docs/images/studio-assets.png)
 
-ComfyUI 没起来时面板照样打开，顶部会写清查了哪些端口、为什么失败。
+ComfyUI 没起来时工作台照样打开，状态行会写清连接失败的原因；日志页始终可打开，没有日志时会说明原因。
 
 > 「优化提示词」需要宿主装了 `@deepseek-ai/dsh-llm`。没有的话只有这个按钮不可用，出图不受影响。
 
@@ -234,10 +241,11 @@ ComfyUI 后端与工作流占位符协议（`{{prompt}}` / `{{seed}}` / `{{image
 | 文档 | 内容 |
 |---|---|
 | [docs/comfyui-deployment.md](docs/comfyui-deployment.md) | 本机部署：下载、建实例、放权重、校验、排障 |
-| [docs/configuration.md](docs/configuration.md) | 10 个配置字段的默认值和边界 |
-| [docs/usage-reference.md](docs/usage-reference.md) | 像素怎么算、表外比例、`board` 用法、`status` 各字段 |
+| [docs/configuration.md](docs/configuration.md) | 16 个配置字段、设置页和执行后端的默认值与边界 |
+| [docs/usage-reference.md](docs/usage-reference.md) | 工作台页签、画布、日志、像素算法、`board` 与 `status` 细节 |
 | [docs/license-and-limits.md](docs/license-and-limits.md) | 分发和商用前的注意事项 |
 | [docs/local-install.md](docs/local-install.md) | 开发：本机构建、打包、tarball 安装 |
 | [docs/testing.md](docs/testing.md) | 开发：怎么跑测试 |
 | [docs/client-bundle.md](docs/client-bundle.md) | 开发：改客户端和设置页 UI |
-| [docs/release-notes-0.2.0.md](docs/release-notes-0.2.0.md) | 0.2.0 改了什么，以及从 0.1.0 升上来要注意什么 |
+| [docs/release-notes-0.3.0.md](docs/release-notes-0.3.0.md) | 当前 0.3.0 的能力、执行后端与发布边界 |
+| [docs/release-notes-0.2.0.md](docs/release-notes-0.2.0.md) | 0.2.0 的历史迁移说明 |

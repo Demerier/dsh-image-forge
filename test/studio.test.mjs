@@ -359,7 +359,7 @@ import {
 } from '../src/workbench-assets.ts'
 
 /** The authoritative compiled-layout sample (T21's format authority). */
-const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('../verify/layout_prompt.json', import.meta.url)), 'utf8')
+const LAYOUT_SAMPLE = readFileSync(fileURLToPath(new URL('./fixtures/layout/layout_prompt.json', import.meta.url)), 'utf8')
 import { resolveDefaultSize } from '../testlib/ratio.js'
 
 // The published surface is exactly `Config, apply, inject, name` (asserted in

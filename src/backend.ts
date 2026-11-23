@@ -8,7 +8,7 @@
  * 1. **MCP** — spawn the official `comfy-mcp` stdio server and drive it with the
  *    Host-supplied `@modelcontextprotocol/client`. The plugin declares that
  *    package as a peer dependency; the Host's profile runtime resolution
- *    supplies it (see [mcp-backend.md](../docs/mcp-backend.md)).
+ *    supplies it (see [mcp-backend.md](../docs/usage-reference.md)).
  * 2. **comfy CLI** — spawn `comfy run/download` directly, no MCP layer.
  * 3. **HTTP** — the original `/prompt` → `/history` → `/view` path in
  *    `src/comfyui.ts`, kept last so a missing toolchain never loses a feature.

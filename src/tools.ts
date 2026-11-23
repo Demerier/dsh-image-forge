@@ -709,7 +709,7 @@ export const CFG_MAX = 5
  * The negative set the quality tier adds when `cfg > 1` but the caller gave none.
  *
  * The first entry is the community fix for Qwen-Image 2.1's yellow shift at
- * elevated cfg (`docs/qwen21-optimization.md` §三-①); the rest are the mild quality
+ * elevated cfg (`../docs/configuration.md` §三-①); the rest are the mild quality
  * guards that advice assumes. Kept short on purpose — a long negative list at
  * cfg>1 fights the positive prompt.
  */
@@ -742,7 +742,7 @@ export interface QualityTierResolution {
  * - the caller's own `steps`/`cfg` never change the defaults: an omitted pair
  *   leaves the rendered graph byte-identical.
  *
- * 2.5–3 is the documented provisional range (`docs/qwen21-optimization.md` §四-3);
+ * 2.5–3 is the documented provisional range (`docs/configuration.md` §四-3);
  * X02 is the blind test that will calibrate it, so the note says so.
  *
  * @param profile - the profile the caller **asked for** (not a degraded one).

@@ -6,7 +6,7 @@
  * The panel is served by the host, never by ComfyUI. A page that opened
  * ComfyUI's own WebSocket would be cross-origin against the renderer and would
  * make the UI depend on a renderer detail; decision 4 in
- * `docs/DIRECTION-ALIGNMENT.md` settles it the other way: **this plugin
+ * `docs/usage-reference.md` settles it the other way: **this plugin
  * subscribes to `/ws`, and the page only ever talks to this plugin**. The
  * bridge keeps exactly one ComfyUI socket for the whole host process and fans
  * normalized events out to every subscribed SSE response, so two panels (the
@@ -351,7 +351,7 @@ export function createProgressBridge(options: ProgressBridgeOptions): ProgressBr
    * Attach the canvas link to one event, when its run was registered.
    *
    * `cached` is deliberately left alone: it is a renderer cache hint, not a
-   * lifecycle event, and the design list (`docs/CANVAS-DESIGN.md` §4.3) names
+   * lifecycle event, and the design list (`../docs/usage-reference.md` §4.3) names
    * only the events the task node renders. A run that was never registered (the
    * Agent tools') keeps the exact pre-DD7 shape, which is the
    * backward-compatibility half of DD7.

@@ -7,13 +7,16 @@ pnpm build
 pnpm test
 ```
 
-**30 个文件 / 639 个用例**（2026-11-23 计数），全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重
+**31 个文件 / 644 个用例**（2026-11-23 计数），全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重
 （ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / moss-edit 3 / settings 60 /
 studio 118 / canvas-flow-model 48 / studio-canvas 36 / boards 30 / board-migration 8 /
 output 3 / package-contents 4 / studio-file-route 7 / studio-log-route 3 / model-profiles 7 /
 progress 8 / runs 7 / environment 41 / layout-editor 25 / studio-lineage 5 /
 canvas-interactions 27 / canvas-connections 21 / canvas-export 6 / moss-layout 9 /
-mcp-backend 22 / workbench-tabs 30 / workbench-workspace 7 / workbench-shell 28 / bundle-xyflow 10）。
+mcp-backend 22 / workbench-tabs 30 / workbench-workspace 7 / workbench-shell 28 / bundle-xyflow 10 /
+docs-consistency 5）。
+
+布局编辑器与 MOSS 布局测试使用 `test/fixtures/layout/` 中的公开 JSON 夹具；`verify/` 只保留本机私有证据，CI 不读取它。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——
@@ -65,7 +68,7 @@ schema 里 **10** 个字段齐全且 5 个云端字段绝迹、
 
 后端接线与自研 MCP client。**假的是 stdio 连接缝，不是断言**：宿主随包的
 `@modelcontextprotocol/client` 是 peerDependency，由 DSH profile 运行时解析，普通
-`node` 里 import 不到（见 [mcp-backend.md](mcp-backend.md)），所以假对象实现的是
+`node` 里 import 不到（见 [usage-reference.md](usage-reference.md#执行后端与受管环境t22)），所以假对象实现的是
 `McpConnectionLike`（`listTools`/`callTool`/close）——生产代码的每个分支都被真的走到：
 
 - **工具过滤**：39 工具清单里只放行 `run_workflow` / `job` / `fetch_outputs` /
@@ -115,7 +118,7 @@ Windows 路径出 `…\models\clip\`、POSIX 路径出 `…/models/clip/`，两�
 - **文生图不上传**：同一台假 ComfyUI 上先编辑（2 次上传、2 个 `LoadImage`），再文生图（上传数不变、
   图里没有 `LoadImage` 节点）。
 
-### `test/studio.test.mjs`（75）与 `test/studio-canvas.test.mjs`（29）
+### `test/studio.test.mjs`（118）与 `test/studio-canvas.test.mjs`（36）
 
 工作台的**纯函数契约**，在请求上线之前就拦住问题——请求体字段收窄（`undefined` 保持缺省而不是变 0/NaN）、
 **画幅必须是选择器真正提供过的那 7 档**（未知比例直接拒绝，而不是悄悄当成正方形）、提示词长度上下界、
@@ -175,8 +178,15 @@ active 画板的记忆与 `state.json` 的形状。
 ### `test/package-contents.test.mjs`（4）
 
 `npm pack` 的 `files` 白名单：Host 与技能按路径读取的文件（含 README 顶部的 `docs/images/repo-banner.png`）都在包里且真的存在、
-`docs/*.md` 这个 glob（而不是某个一次性条目）让部署文档可被发现、`docs/plans/` **不入包**、
+显式 docs 白名单而不是 `docs/*.md` glob，避免本地调研被误打包；每个公共文档必须同时出现在 README
+  和 `package.json.files`；`docs/plans/` **不入包**、
 **`resources/` 与 6 个已删除的源文件不许再出现**、以及许可证与第三方声明随包分发。
+
+### `test/docs-consistency.test.mjs`（5）
+
+文档与发布边界的机器检查：README 必须引用每一个公共 `docs/*.md`，当前版本必须有对应发布说明；
+README 和文档里的相对链接必须存在；`src` 里的 `docs/...` 注释链接必须指向已跟踪公共文档；
+配置字段数量和字段表必须与 `src/index.ts` 的 `Config` 一致。
 
 ### `test/canvas-export.test.mjs`（6，T22 入链）
 
@@ -194,7 +204,7 @@ T22 把 T15 的后端选择从「环境变量专属」提升为配置项、补�
 | `test/surface.test.mjs` | 文档化字段列表补 6 个新字段 | 已发布 schema 的字段集合必须可执行核对 |
 | `test/mcp-backend.test.mjs` | +3：配置默认值/环境变量优先（含显式 `MCP_DEBUG=0`）、MCP `fetch_outputs` 工作区镜像保留、CLI `download` 镜像 | 结果镜像与「旧环境变量行为不变」必须机器判定 |
 | `test/studio.test.mjs` | +3：stepper 四步纯函数映射（ready/未安装/权重缺失/运行中/失败/已有图）、面板渲染与「重新检测」、未就绪原因落到失败步 | stepper 是 P6 的可见交付，状态必须可测 |
-| 本文件 | 12 个旧章节计数同步到实际值（comfyui-e2e 31 / studio 75 / studio-canvas 29 / progress 8 / boards 24 / ratio 14）；补 canvas-export 与本节 | 终态核对：`npm test` 的 23 个文件逐个计数与文档一致 |
+| 本文件 | 12 个旧章节计数同步到 T22 当时的实际值（comfyui-e2e 31 / studio 75 / studio-canvas 29 / progress 8 / boards 24 / ratio 14）；补 canvas-export 与本节 | 这些数字是 T22 历史记录；当前计数以本文上方表格为准 |
 
 口径边界不变：`backend`（旧云端字段）、`qwen_image_env`、`一键部署`/`127.0.0.1:8411` 仍禁止；
 `RETIRED_FIELDS` 26 个字段一个不少。新增的 `executionBackend` 是**本地执行链选择**，不是云端后端回魂。

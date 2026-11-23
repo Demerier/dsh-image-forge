@@ -1,5 +1,5 @@
 /**
- * Workspace persistence tests (U02, `docs/WORKBENCH-SHELL.md` §4, §14.3).
+ * Workspace persistence tests (U02, `../docs/usage-reference.md` §4, §14.3).
  *
  * The codec alone is covered in `test/workbench-tabs.test.mjs`; what is added
  * here is the half that touches the disk: `workspace.json` is read verbatim,

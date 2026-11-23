@@ -2,23 +2,31 @@
 
 ## 配置
 
-在 profile 的插件配置里给出（全部有默认值，`Config` schema 见 `src/index.ts`）。**一共 10 个字段**，
-没有一个是「本地运行时」相关的——插件不拥有任何运行时；云端 API 字段（`backend` / `apiBaseUrl` /
-`apiKey` / `apiModel` / `apiStyle`）已随该后端一起删除，出图与改图只跑本机 ComfyUI。
-旧 profile 里残留的这几个键会被忽略，不会报错。
+在 profile 的插件配置里给出（`Config` schema 见 `src/index.ts`）。**一共 16 个字段**。
+插件不下载、不托管 ComfyUI 或权重，但可以选择 MCP / CLI / HTTP 三种执行路径；云端 API 字段
+（`backend` / `apiBaseUrl` / `apiKey` / `apiModel` / `apiStyle`）已删除，旧 profile 里残留的键会被忽略。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `comfyEndpoint` | 空 | ComfyUI 地址，如 `http://127.0.0.1:8188`；**空 = 自动探测 `comfyPorts`**。非回环地址会被拒绝（本后端只与本机通信） |
+| `comfyEndpoint` | 空 | ComfyUI 地址，如 `http://127.0.0.1:8188`；**空 = 自动探测 `comfyPorts`**。非回环地址会被拒绝（本地生成只与本机通信） |
 | `comfyPorts` | `8000,8188,8189,8190,8191,8192` | `comfyEndpoint` 为空时依次尝试的端口（桌面版常见 8000/8188，便携版 8188） |
-| `comfyModelsDir` | **探测**：候选目录里第一个存在的 | ComfyUI 的 `models` 根目录，**只用于报错里写清「文件该放到哪」**；探测不到就留空，错误只说相对路径 |
-| `comfyModel` | `qwen21-base` | 三个规范值：`qwen21-base`（Qwen 40 步，官方全量）/ `qwen21-turbo`（8 步蒸馏，缺权重自动回落 base）/ `moss-sft`（MOSS-Image 文生图，缺权重**报错**，不回落）。旧值 `base` / `turbo` 仍被接受并映射到前两个 |
-| `mossSampling` | `comfy` | MOSS 的采样档位：`comfy`（ComfyUI 模板口径，25 步 / CFG 2.5 / `er_sde`）/ `official`（OpenMOSS 卡片，50 步 / CFG 3 / `euler`）。**只对 `moss-sft` 生效**——Qwen 两个 profile 没有档位，读到它也不改变任何采样数值 |
-| `turboSteps` | 空 | turbo 专用步数；**空 = 8**。它**不**继承 `defaultSteps`（把 25 递给蒸馏版会让画面变差） |
-| `defaultSteps` | `40` | **Qwen base 的默认采样步数**。没有单独指定时用它；40 = 官方模型卡/教程推荐区间（40–50）的起点，官方模板的 25 只是起步值。MOSS 的步数由采样档位决定，不走这个字段 |
-| `comfyuiSteps` | 空 | ComfyUI 专用步数（只对 base 那一支生效）；**空 = 用 `defaultSteps`** |
+| `comfyModelsDir` | **探测**：候选目录里第一个存在的 | ComfyUI 的 `models` 根目录，**只用于报错里写清「文件该放到哪」**；探测不到就留空 |
+| `comfyModel` | `qwen21-base` | `qwen21-base` / `qwen21-turbo` / `moss-sft`；旧值 `base` / `turbo` 仍兼容 |
+| `mossSampling` | `comfy` | MOSS 采样档位：`comfy`（25 步 / CFG 2.5 / `er_sde`）或 `official`（50 步 / CFG 3 / `euler`） |
+| `turboSteps` | 空 | turbo 专用步数；**空 = 8**，不继承 `defaultSteps` |
+| `defaultSteps` | `40` | Qwen base 的默认步数；MOSS 使用自己的采样档位 |
+| `comfyuiSteps` | 空 | ComfyUI 专用步数；**空 = `defaultSteps`** |
+| `executionBackend` | `auto` | `auto` 依次尝试 MCP → CLI → HTTP；`mcp` / `cli` 为严格模式，失败不会静默回退；`http` 直接走内置路径 |
+| `comfyMcpBin` | 空 | `comfy-mcp` 可执行文件路径；**空 = 从 PATH 查找** |
+| `comfyBin` | 空 | 传给 MCP 子进程的 comfy CLI 路径；**空 = 从 PATH 查找** |
+| `backendTimeoutMs` | 空 | 单个后端的超时预算；**空 = 使用 `timeoutMs`** |
+| `mcpDebug` | `false` | 开启后每次 MCP 工具调用写一行 stderr |
+| `backendTmpDir` | 空 | 后端临时/镜像目录；**空 = 工作区 `.dsh-image-forge/backend-mirror`** |
 | `outputDir` | `~/Pictures/dsh-image-forge` | 图片落盘目录 |
 | `timeoutMs` | `180000` | 单次调用预算（ComfyUI 首次冷加载模型很慢，可调到 `900000`） |
+
+执行后端只改变「怎么把图请求交给本机 ComfyUI」，不改变图的内容或画板落盘语义。详细链路和结果镜像见
+[usage-reference.md](usage-reference.md#执行后端与受管环境t22)。
 
 **步数解析优先级**（三条，互不越界）：
 
@@ -50,10 +58,10 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
 
 ## 设置页（DSH Web GUI）
 
-**10 个字段全部可写，也全部在页面上**——没有隐藏项。云端 API 标签页随该后端一起删除了。
+**16 个字段全部可写，也全部在页面上**——没有隐藏项。云端 API 标签页随该后端一起删除了。
 
 - 菜单位置：**设置 → 「生图配置」**——和「通用设置 / 模式 / 插件 / Agent 预设」同级的**一级菜单项**
-  （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。这里**只剩配置**：第一个页签是「出图」。
+  （注册进 `settings.section` 这个 **list 槽**，用 `id` 定位）。
 - **工作台不在这里**：它是 web 客户端的**全局面板**（T17 迁出设置页），两处注册都由 `registerStudioPanel`
   发出——`main` **keyed 槽**（`{ name: 'main', key: 'dsh-image-forge' }`）放面板本体，`sidebar.panellist`
   **list 槽**（`{ name: 'sidebar.panellist', id: 'dsh-image-forge', order, label: '图像工作台' }`）放左侧栏那一行；
@@ -63,15 +71,16 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
 
   | 标签 | 内容 |
   |---|---|
-  | 出图 | `defaultSteps` / `comfyuiSteps` / `comfyModel` / `mossSampling` / `turboSteps`、`outputDir` / `timeoutMs`，以及 turbo/base 说明 |
-  | ComfyUI | `comfyEndpoint`、`comfyPorts`、`comfyModelsDir`（+ 部署文档入口） |
+  | 出图 | 步数与输出分组：`defaultSteps` / `comfyuiSteps` / `turboSteps` / `comfyModel` / `mossSampling` / `outputDir` / `timeoutMs` |
+  | ComfyUI / 执行后端 | ComfyUI 分组：`comfyEndpoint` / `comfyPorts` / `comfyModelsDir`；执行后端分组：`executionBackend` / `comfyMcpBin` / `comfyBin` / `backendTimeoutMs` / `mcpDebug` / `backendTmpDir` |
 
-- **页面可见字段**（三块，每块都有标题与一行说明）：
+- **页面可见字段**（四块，每块都有标题与一行说明）：
 
   | 分区 | 字段 |
   |---|---|
   | 步数（画质与耗时） | `defaultSteps`、`comfyuiSteps`、`comfyModel`、`mossSampling`、`turboSteps` |
   | ComfyUI | `comfyEndpoint`、`comfyPorts`、`comfyModelsDir` |
+  | 执行后端 | `executionBackend`、`comfyMcpBin`、`comfyBin`、`backendTimeoutMs`、`mcpDebug`、`backendTmpDir` |
   | 输出与超时 | `outputDir`、`timeoutMs` |
 
 - `comfyModel` 是**下拉**，数值字段带默认值与上下限提示，其余是文本框（带说明文案）。
