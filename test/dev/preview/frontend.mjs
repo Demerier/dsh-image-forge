@@ -1,15 +1,15 @@
 /**
  * Visual preview harness for the settings page and tool cards.
  *
- * Not part of `pnpm test`. Builds `test/client-preview.html` from the real
+ * Not part of `pnpm test`. Builds `.preview/client-preview.html` from the real
  * `CLIENT_CSS` and the DOM shape `client.ts` renders, so a human (or a
  * screenshot) can check narrow-column wrapping and pill/checklist layout
  * without loading a full DSH host.
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const styles = readFileSync(fileURLToPath(new URL('../src/client-styles.ts', import.meta.url)), 'utf8')
+const styles = readFileSync(fileURLToPath(new URL('../../../src/client-styles.ts', import.meta.url)), 'utf8')
 
 /** Pull one `export const NAME = \`…\`` body out of the stylesheet module. */
 function extract(name) {
@@ -311,6 +311,8 @@ const html = `<!doctype html>
 </html>
 `
 
-const out = fileURLToPath(new URL('./client-preview.html', import.meta.url))
+const previewDir = fileURLToPath(new URL('../../../.preview/', import.meta.url))
+const out = fileURLToPath(new URL('../../../.preview/client-preview.html', import.meta.url))
+mkdirSync(previewDir, { recursive: true })
 writeFileSync(out, html)
 console.log('wrote', out, 'bytes', html.length)

@@ -100,7 +100,7 @@ import {
   flowViewportProps,
   foldDragChanges,
   hasInboundHandle,
-  initialFlowView,
+  initialFlowViewForBoard,
   judgeConnection,
   planConnectionDrop,
   reseedFlowNodes,
@@ -188,6 +188,7 @@ export function CanvasPane(props: CanvasPaneProps): ReactNode {
   return createElement(StudioPanel, {
     boardId: props.boardId,
     canvas: FlowCanvas,
+    workspaceMode: true,
     ...(props.onOpenNode === undefined ? {} : { onOpenNode: props.onOpenNode }),
     ...(props.detailOpen === undefined ? {} : { detailOpen: props.detailOpen }),
     ...(props.intent === undefined ? {} : { intent: props.intent }),
@@ -692,6 +693,10 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
 
   const onInit = (instance: ReactFlowInstance): void => {
     flowRef.current = instance
+    // Persist the viewport the engine actually opened with. In particular, a
+    // recovered board (stored camera points at no node) must write the fitted
+    // camera back instead of reopening on the same empty corner next time.
+    latest.current.onCameraChange?.(cameraFromFlow(instance.getViewport()))
     const api: FlowCanvasApi = {
       fitView: () => {
         const bounds = selectionBounds(flowNodeRects(latest.current.nodes))
@@ -1071,7 +1076,11 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     // must take its own.
     initialViewRef.current = undefined
   } else if (initialViewRef.current === undefined) {
-    initialViewRef.current = initialFlowView(props.initialCamera)
+    initialViewRef.current = initialFlowViewForBoard(
+      props.initialCamera,
+      flowNodeRects(props.nodes),
+      size,
+    )
   }
   const initialView = initialViewRef.current
   // Nothing on screen means nothing to command: a closed gate (or an unmeasured
@@ -1132,7 +1141,13 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             isValidConnection,
             onConnectStart,
             onConnectEnd,
-            zoomOnScroll: true,
+            // Wheel and trackpad scroll pan the infinite canvas; pinch (which
+            // the browser reports as ctrl-wheel on a trackpad) zooms. This is
+            // the Figma/TapNow gesture model rather than "every wheel zooms".
+            panOnScroll: true,
+            panOnScrollSpeed: 0.8,
+            zoomOnScroll: false,
+            zoomOnPinch: true,
             proOptions: { hideAttribution: true },
           },
           createElement(CanvasBackground),
@@ -1140,7 +1155,7 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             ? createElement(
                 'p',
                 { className: 'dsh-forge-flow-hint' },
-                '这个画板还是空的。生成的第一张图会落在这里；拖空白处框选，空格或中键平移，滚轮缩放。',
+                '这个画板还是空的。从工具栏新建生成或布局，或把素材拖到这里。',
               )
             : null,
         )

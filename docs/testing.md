@@ -7,18 +7,19 @@ pnpm build
 pnpm test
 ```
 
-**23 个文件 / 410 个用例**（2026-11-18 T22 收口时点计数；画布批 C01–C15 与 T22 全部入链），
-全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重（ratio 14 / surface 13 / comfyui-e2e 31 /
-edit-e2e 8 / moss-edit 3 / settings 60 / studio 75 / studio-canvas 29 / boards 24 /
-board-migration 8 / output 3 / package-contents 4 / studio-file-route 3 / model-profiles 7 /
-progress 8 / runs 7 / environment 28 / layout-editor 16 / studio-lineage 5 /
-canvas-interactions 27 / canvas-export 6 / moss-layout 9 / mcp-backend 22）。
+**30 个文件 / 639 个用例**（2026-11-23 计数），全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重
+（ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / moss-edit 3 / settings 60 /
+studio 118 / canvas-flow-model 48 / studio-canvas 36 / boards 30 / board-migration 8 /
+output 3 / package-contents 4 / studio-file-route 7 / studio-log-route 3 / model-profiles 7 /
+progress 8 / runs 7 / environment 41 / layout-editor 25 / studio-lineage 5 /
+canvas-interactions 27 / canvas-connections 21 / canvas-export 6 / moss-layout 9 /
+mcp-backend 22 / workbench-tabs 30 / workbench-workspace 7 / workbench-shell 28 / bundle-xyflow 10）。
 
 `pnpm build` 会产出两个目录：`lib/`（`index.js` + `client.js`，**自包含**，Web 客户端只加载 `./client` 这一个入口）
 和 `testlib/`（设置与 Studio 逻辑的独立 bundle，只给测试用，**不随包发布**——
 为什么不把设置逻辑直接做成 `lib/` 的额外入口，见 `tsdown.config.ts` 的注释）。
 
-前端观感的**布局**可以用 `node test/preview-frontend.mjs` 生成 `test/client-preview.html`
+前端观感的**布局**可以用 `node test/dev/preview/frontend.mjs` 生成 `.preview/client-preview.html`
 （真实 `CLIENT_CSS` + 与 `client.ts` 同构的 DOM），再用无头浏览器看窄栏/宽栏；它不是
 `pnpm test` 的一部分，也**不能替代**在真实 DSH web 客户端里过一遍设置页。
 

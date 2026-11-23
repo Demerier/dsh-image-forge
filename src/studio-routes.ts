@@ -46,6 +46,8 @@ import {
   STUDIO_IMPORT_MAX_BODY_BYTES,
   STUDIO_IMPORT_MAX_ITEM_BYTES,
   STUDIO_IMPORT_ROUTE,
+  STUDIO_LOG_DEFAULT_LIMIT,
+  STUDIO_LOG_MAX_LIMIT,
   STUDIO_LOG_ROUTE,
   STUDIO_MAX_BODY_BYTES,
   STUDIO_MAX_LAYOUT_CHARS,
@@ -66,6 +68,8 @@ import {
   type StudioGenerateRequest,
   type StudioImportRequest,
   type StudioImportResponse,
+  type StudioLogLine,
+  type StudioLogPage,
   type StudioOptimizeRequest,
   type StudioOptimizeTurn,
   type StudioProgressEvent,
@@ -188,6 +192,77 @@ function guard(
 }
 
 /** Register the Studio's routes (JSON endpoints plus one SSE stream) on the host web server. */
+/** Largest log one request may load; larger files fail visibly instead of freezing the UI. */
+const LOG_PAGE_MAX_BYTES = 64 * 1024 * 1024
+
+/** Pull a timestamp out of the common line-prefix forms ComfyUI and wrappers emit. */
+function timestampOfLogLine(text: string): string | undefined {
+  const absolute = text.match(/^\s*\[?([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?)\]?/)
+  if (absolute !== null) return absolute[1]
+  const clock = text.match(/^\s*\[?([0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]+)?)\]?/)
+  return clock === null ? undefined : clock[1]
+}
+
+/** Classify a line for the reader without changing its text. */
+function levelOfLogLine(text: string): StudioLogLine['level'] {
+  if (/\b(error|exception|traceback|fatal|critical|failed)\b/i.test(text)) return 'error'
+  if (/\b(warn|warning)\b/i.test(text)) return 'warn'
+  if (/\b(debug|trace)\b/i.test(text)) return 'plain'
+  return 'info'
+}
+
+/** Read one bounded page, newest by default and older/newer by explicit cursor. */
+async function readStudioLogPage(file: string, url: URL): Promise<StudioLogPage> {
+  const info = await stat(file)
+  if (!info.isFile()) throw new Error('not-a-file')
+  if (info.size > LOG_PAGE_MAX_BYTES) throw new Error('日志文件超过 64 MiB，无法在面板中分页读取')
+  const text = (await readFile(file)).toString('utf8')
+  const split = text.replace(/\r\n/g, '\n').split('\n')
+  if (split.length > 0 && split[split.length - 1] === '') split.pop()
+  const totalLines = split.length
+  const rawLimit = Number.parseInt(url.searchParams.get('limit') ?? '', 10)
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(STUDIO_LOG_MAX_LIMIT, Math.max(1, rawLimit))
+    : STUDIO_LOG_DEFAULT_LIMIT
+  const afterRaw = url.searchParams.get('after')
+  const beforeRaw = url.searchParams.get('before')
+  let start = Math.max(0, totalLines - limit)
+  let end = totalLines
+  if (afterRaw !== null) {
+    const after = Number.parseInt(afterRaw, 10)
+    start = Number.isFinite(after) ? Math.min(totalLines, Math.max(0, after)) : totalLines
+    end = Math.min(totalLines, start + limit)
+  } else if (beforeRaw !== null) {
+    const before = Number.parseInt(beforeRaw, 10)
+    // `before` is an exclusive line-number cursor: asking for the page before
+    // line 31 must not repeat line 31 in both pages.
+    end = Number.isFinite(before) ? Math.min(totalLines, Math.max(0, before - 1)) : totalLines
+    start = Math.max(0, end - limit)
+  }
+  const lines: StudioLogLine[] = split.slice(start, end).map((line, offset) => {
+    const timestamp = timestampOfLogLine(line)
+    return {
+      number: start + offset + 1,
+      text: line,
+      level: levelOfLogLine(line),
+      ...(timestamp === undefined ? {} : { timestamp }),
+    }
+  })
+  return {
+    version: 'studio-log/v1',
+    path: file,
+    source: basename(file).startsWith('dsh-image-forge-launch-') ? 'plugin' : 'desktop',
+    totalLines,
+    fromLine: lines.length === 0 ? 0 : start + 1,
+    toLine: lines.length === 0 ? 0 : end,
+    hasOlder: start > 0,
+    hasNewer: end < totalLines,
+    modifiedAt: info.mtime.toISOString(),
+    timestampedLines: lines.filter((line) => line.timestamp !== undefined).length,
+    lines,
+  }
+}
+
 export function registerStudioRoutes(
   ctx: Context,
   deps: StudioRouteDeps,
@@ -245,20 +320,13 @@ export function registerStudioRoutes(
         if (!target.includes('/logs/') && !target.includes('\\logs\\')) {
           return jsonError(res, 400, '日志文件必须位于 logs 目录内')
         }
-        let text: string
         try {
-          const buf = await readFile(target)
-          text = buf.toString('utf8')
-        } catch {
-          return jsonError(res, 404, '日志文件不存在或不可读')
+          const page = await readStudioLogPage(target, url)
+          json(res, 200, page)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return jsonError(res, 404, message === 'not-a-file' ? '日志路径不是普通文件' : message)
         }
-        const lines = text.split(/\r?\n/)
-        const tail = lines.slice(-200).join('\n')
-        res.writeHead(200, {
-          'content-type': 'text/plain; charset=utf-8',
-          'cache-control': 'no-store',
-        })
-        res.end(tail)
       }),
     }),
 

@@ -48,6 +48,14 @@ export const MAX_RECENT_PROJECTS = 20
 /** The single tab that is always present, always leftmost and never closable (§3.1). */
 export const PROJECTS_TAB = 'projects'
 
+/**
+ * Session-only utility tab for the ComfyUI log page.
+ *
+ * The strip's 看日志 button opens it like any other tab, but it is never written
+ * to workspace.json: a reload must not reopen a diagnostic page on its own.
+ */
+export const LOGS_TAB = 'logs'
+
 /** The only `version` this module writes (§4.2: 只写 1). */
 export const WORKSPACE_VERSION = 1
 
@@ -62,7 +70,7 @@ export const NODE_DETAIL_KINDS: readonly NodeDetailKind[] = ['layout', 'task', '
 export type TabKey = string
 
 /** The three tab families (§3.1). */
-export type TabKind = 'projects' | 'canvas' | 'node'
+export type TabKind = 'projects' | 'logs' | 'canvas' | 'node'
 
 /** Which editor a `node:` tab hosts (§8.2). Not encodable in the key, so stored alongside. */
 export type NodeDetailKind = 'layout' | 'task' | 'image'
@@ -70,6 +78,7 @@ export type NodeDetailKind = 'layout' | 'task' | 'image'
 /** A key decomposed into its parts; `null` when the key is not a tab we can build. */
 export type TabRef =
   | { readonly kind: 'projects'; readonly key: TabKey }
+  | { readonly kind: 'logs'; readonly key: TabKey }
   | { readonly kind: 'canvas'; readonly key: TabKey; readonly boardId: string }
   | { readonly kind: 'node'; readonly key: TabKey; readonly boardId: string; readonly itemId: string }
 
@@ -183,6 +192,7 @@ export function nodeTabKey(boardId: string, itemId: string): TabKey {
 export function parseTabKey(key: unknown): TabRef | null {
   if (typeof key !== 'string') return null
   if (key === PROJECTS_TAB) return { kind: 'projects', key }
+  if (key === LOGS_TAB) return { kind: 'logs', key }
   const parts = key.split(':')
   if (parts.length === 2 && parts[0] === 'canvas' && parts[1].length > 0) {
     return { kind: 'canvas', key, boardId: parts[1] }
@@ -195,6 +205,7 @@ export function parseTabKey(key: unknown): TabRef | null {
 
 /** Build a key from its parts — the inverse of {@link parseTabKey}. */
 export function formatTabKey(ref: { readonly kind: TabKind; readonly boardId?: string; readonly itemId?: string }): TabKey {
+  if (ref.kind === 'logs') return LOGS_TAB
   if (ref.kind === 'canvas' && typeof ref.boardId === 'string') return canvasTabKey(ref.boardId)
   if (ref.kind === 'node' && typeof ref.boardId === 'string' && typeof ref.itemId === 'string') {
     return nodeTabKey(ref.boardId, ref.itemId)
@@ -240,6 +251,8 @@ export function listTabs(state: WorkbenchTabsState): TabDescriptor[] {
     if (ref === null) continue
     if (ref.kind === 'projects') {
       tabs.push({ key, kind: 'projects', orphaned: false })
+    } else if (ref.kind === 'logs') {
+      tabs.push({ key, kind: 'logs', orphaned: false })
     } else if (ref.kind === 'canvas') {
       tabs.push({ key, kind: 'canvas', boardId: ref.boardId, orphaned: false })
     } else {
@@ -281,7 +294,7 @@ export function isTabAllowed(state: WorkbenchTabsState, key: TabKey): boolean {
   if (ref === null) return false
   if (ref.kind === 'projects' || state.tabOrder.includes(key)) return true
   if (!canOpenTab(state)) return false
-  return ref.kind === 'node' || canOpenCanvas(state)
+  return ref.kind === 'node' || ref.kind === 'logs' || canOpenCanvas(state)
 }
 
 /* -------------------------------------------------------------------------- */
@@ -315,6 +328,11 @@ export function openTab(state: WorkbenchTabsState, key: TabKey, options: OpenTab
   const ref = parseTabKey(key)
   if (ref === null) return { state, rejected: 'invalid' }
   if (ref.kind === 'projects') return { state: activateTab(state, PROJECTS_TAB), reused: true }
+  if (ref.kind === 'logs') {
+    if (state.tabOrder.includes(LOGS_TAB)) return { state: activateTab(state, LOGS_TAB), reused: true }
+    if (!canOpenTab(state)) return { state, rejected: 'tab-limit' }
+    return { state: { ...state, tabOrder: [...state.tabOrder, LOGS_TAB], activeTab: LOGS_TAB } }
+  }
   if (ref.kind === 'node') {
     const detailKind = options.detailKind
     if (detailKind === undefined) return { state, rejected: 'invalid' }
@@ -547,7 +565,7 @@ export function toWorkspaceJson(state: WorkbenchTabsState): WorkspaceFile {
     openProjects,
     activeTab,
     nodeDetailTabs,
-    tabOrder: [...state.tabOrder],
+    tabOrder: state.tabOrder.filter((key) => key !== LOGS_TAB),
     recentProjects: state.recentProjects.map((entry) => ({ boardId: entry.boardId, openedAt: entry.openedAt })),
   }
 }

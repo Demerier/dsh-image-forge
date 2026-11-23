@@ -333,6 +333,35 @@ export const STUDIO_CSS = `
   .dsh-forge-canvas-side{--dsh-forge-inspector-width:280px;position:absolute;right:0;top:0;bottom:0;pointer-events:none;z-index:3}
   .dsh-forge-canvas-side>.dsh-forge-inspector{pointer-events:auto;height:100%;background:var(--dsh-forge-surface,rgba(24,24,27,.92));backdrop-filter:blur(2px);box-shadow:-6px 0 18px rgba(0,0,0,.22)}
 }
+
+/* ------------------------------------------------------------------------- */
+/* Workspace mode: canvas first, chrome compressed into a top rail.           */
+/* ------------------------------------------------------------------------- */
+.dsh-image-forge-studio.is-workbench{height:100%;gap:7px;min-height:0;overflow:hidden}
+.is-workbench .dsh-forge-studio-head{min-height:34px;flex:none;padding:1px 2px 0;justify-content:flex-end}
+.is-workbench .dsh-forge-studio-title{display:none}
+.is-workbench .dsh-forge-studio-status{gap:7px;font-size:11.5px;opacity:.72}
+.is-workbench .dsh-forge-stepper{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) auto;gap:4px;padding:5px;flex:none;border-radius:10px}
+.is-workbench .dsh-forge-step{min-width:0;margin:0;padding:4px 7px;border-radius:7px;background:color-mix(in srgb,currentColor 3%,transparent)}
+.is-workbench .dsh-forge-step-detail{display:block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.is-workbench .dsh-forge-step-retry{white-space:nowrap;align-self:stretch}
+.is-workbench .dsh-forge-studio-alert{max-height:40px;overflow:auto;padding:5px 9px;font-size:11px;flex:none}
+.is-workbench .dsh-forge-board-bar{display:none}
+.is-workbench .dsh-forge-progress{padding:4px 7px;flex:none;border-radius:8px;background:color-mix(in srgb,currentColor 3%,transparent)}
+.is-workbench .dsh-forge-studio-body.is-canvas{display:flex;flex:1 1 auto;min-height:0;gap:0}
+.is-workbench .dsh-forge-studio-results{height:100%;min-height:0;gap:6px}
+.is-workbench .dsh-forge-results-head{padding:3px 2px;flex:none;border-bottom:1px solid color-mix(in srgb,currentColor 12%,transparent)}
+.is-workbench .dsh-forge-canvas-shell{flex:1 1 auto;min-height:0;gap:8px}
+.is-workbench .dsh-forge-canvas-side.is-empty{display:none}
+.is-workbench .dsh-forge-canvas-side{--dsh-forge-inspector-width:304px;flex:0 0 min(304px,32vw)}
+.is-workbench .dsh-forge-canvas{width:100%;height:auto;min-height:0;border-radius:12px;border-color:color-mix(in srgb,currentColor 16%,transparent);box-shadow:inset 0 1px 0 color-mix(in srgb,currentColor 5%,transparent)}
+.is-workbench .dsh-forge-canvas.is-flow{background:color-mix(in srgb,currentColor 2%,transparent)}
+.is-workbench .dsh-forge-canvas-foot{font-size:10px;opacity:.55}
+.is-workbench .dsh-forge-flow-node{border-radius:12px;border-color:color-mix(in srgb,currentColor 22%,transparent);background:color-mix(in srgb,Canvas 8%,transparent);box-shadow:0 10px 30px rgba(0,0,0,.12),0 1px 3px rgba(0,0,0,.08)}
+.is-workbench .dsh-forge-flow-node.is-selected{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.25),0 12px 32px rgba(0,0,0,.14)}
+.is-workbench .dsh-forge-flow-task{background:color-mix(in srgb,Canvas 7%,transparent)}
+.is-workbench .dsh-forge-flow-bar{margin:4px 9px;height:5px}
+.is-workbench .dsh-forge-flow-btn{font-size:10px;padding:4px 8px;border-radius:6px}
 `
 
 /**
@@ -350,7 +379,11 @@ export const WORKBENCH_CSS = `
    meant to *fill* it: without this chain the canvas kept its fixed
    clamp(300px,50vh,540px) and the rest of the tab stayed blank. */
 .dsh-forge-workbench-panel>.dsh-image-forge-studio{height:100%;min-height:0}
-.dsh-forge-workbench-strip{display:flex;align-items:flex-end;gap:3px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:0 2px;border-bottom:1px solid rgba(127,127,127,.26);scrollbar-width:thin}
+.dsh-forge-workbench-strip{display:flex;align-items:flex-end;gap:6px;padding:0 2px;border-bottom:1px solid rgba(127,127,127,.26)}
+.dsh-forge-workbench-tablist{display:flex;align-items:flex-end;gap:3px;flex:1 1 auto;min-width:0;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+.dsh-forge-workbench-log-open{appearance:none;flex:none;padding:5px 9px;border:1px solid rgba(127,127,127,.3);border-radius:6px;background:rgba(127,127,127,.05);color:inherit;font:inherit;font-size:11.5px;line-height:1.4;cursor:pointer;white-space:nowrap}
+.dsh-forge-workbench-log-open:hover{background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.45)}
+.dsh-forge-workbench-log-open.is-active{background:rgba(59,130,246,.16);border-color:rgba(59,130,246,.6)}
 .dsh-forge-workbench-tab{appearance:none;display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;background:transparent;color:inherit;font:inherit;font-size:12.5px;line-height:1.5;cursor:pointer;white-space:nowrap;max-width:26ch;opacity:.72;user-select:none}
 .dsh-forge-workbench-tab:hover{opacity:1;background:color-mix(in srgb,currentColor 5%,transparent)}
 .dsh-forge-workbench-tab-active{opacity:1;border-color:rgba(127,127,127,.26);background:color-mix(in srgb,currentColor 7%,transparent);position:relative;top:1px}
@@ -361,7 +394,9 @@ export const WORKBENCH_CSS = `
 .dsh-forge-workbench-notice{padding:5px 9px;border-radius:6px;font-size:11.5px;line-height:1.5;border:1px solid rgba(59,130,246,.4);background:rgba(59,130,246,.1)}
 .dsh-forge-workbench-error{padding:5px 9px;border-radius:6px;font-size:11.5px;line-height:1.5;border:1px solid rgba(220,38,38,.45);background:rgba(220,38,38,.1);color:#dc2626}
 .dsh-forge-workbench-projects{display:flex;flex-direction:column;gap:9px;min-width:0;min-height:0}
-.dsh-forge-workbench-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dsh-forge-workbench{--dsh-forge-wb-gap:10px}
+.dsh-forge-workbench-toolbar{display:grid;grid-template-columns:minmax(14ch,20ch) auto minmax(12ch,1fr) auto auto;align-items:center;gap:7px;padding:7px;border:1px solid color-mix(in srgb,currentColor 12%,transparent);border-radius:12px;background:color-mix(in srgb,currentColor 2%,transparent)}
+@media (max-width:760px){.dsh-forge-workbench-toolbar{display:flex;flex-wrap:wrap}.dsh-forge-workbench-toolbar .dsh-forge-workbench-search{flex:1 1 14ch}.dsh-forge-workbench-toolbar .dsh-forge-workbench-assets-entry{margin-left:0}}
 .dsh-forge-workbench-input{font:inherit;font-size:12.5px;line-height:1.5;padding:5px 8px;border-radius:6px;border:1px solid rgba(127,127,127,.32);background:rgba(127,127,127,.05);color:inherit;outline:none;min-width:0}
 .dsh-forge-workbench-input:focus{border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,.16)}
 .dsh-forge-workbench-new-name{flex:0 1 15ch;width:15ch}
@@ -371,16 +406,35 @@ export const WORKBENCH_CSS = `
 .dsh-forge-workbench-primary:hover{background:rgba(59,130,246,.24)}
 .dsh-forge-workbench-action{appearance:none;font:inherit;font-size:11px;line-height:1.4;padding:3px 7px;border-radius:5px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
 .dsh-forge-workbench-action:hover{background:rgba(127,127,127,.13);border-color:rgba(127,127,127,.5)}
+.dsh-forge-workbench-action.is-active{border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.12)}
 .dsh-forge-workbench-action.is-danger{color:#dc2626;border-color:rgba(220,38,38,.42)}
 .dsh-forge-workbench-action.is-danger:hover{background:rgba(220,38,38,.12)}
 .dsh-forge-workbench-assets-entry{margin-left:auto}
 .dsh-forge-workbench-env{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 9px;border-radius:6px;font-size:11.5px;line-height:1.5;border:1px dashed rgba(127,127,127,.4);background:rgba(127,127,127,.04)}
 .dsh-forge-workbench-env-text{flex:1 1 16ch;min-width:0;opacity:.82;overflow-wrap:anywhere}
 .dsh-forge-env-start-group{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
-.dsh-forge-log-drawer{border:1px solid rgba(127,127,127,.28);border-radius:8px;background:rgba(0,0,0,.04);margin:6px 0;overflow:hidden}
-.dsh-forge-log-head{display:flex;gap:8px;align-items:center;padding:5px 8px;border-bottom:1px solid rgba(127,127,127,.18);font-size:11px;opacity:.85}
-.dsh-forge-log-head>span{flex:1 1 auto}
-.dsh-forge-log-body{margin:0;padding:8px 10px;max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 ui-monospace,Menlo,Consolas,monospace;tab-size:2}
+.dsh-forge-workbench-log{display:flex;flex-direction:column;gap:8px;height:100%;min-height:0;padding:2px}
+.dsh-forge-workbench-log-head{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.dsh-forge-workbench-log-title-wrap{display:flex;flex-direction:column;gap:1px;min-width:0}
+.dsh-forge-workbench-log-title{margin:0;font-size:15px;line-height:1.35;font-weight:650}
+.dsh-forge-workbench-log-subtitle{font-size:11px;line-height:1.45;opacity:.65}
+.dsh-forge-workbench-log-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.dsh-forge-workbench-log-status{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:7px;border:1px solid rgba(127,127,127,.26);background:rgba(127,127,127,.04);font-size:11.5px;line-height:1.5;overflow-wrap:anywhere}
+.dsh-forge-workbench-log-meta{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:10.5px;line-height:1.5;opacity:.72}
+.dsh-forge-workbench-log-error{padding:5px 9px;border-radius:6px;border:1px solid rgba(220,38,38,.45);background:rgba(220,38,38,.1);color:#dc2626;font-size:11px;line-height:1.5}
+.dsh-forge-workbench-log-path{flex:1 1 22ch;min-width:0;font:10.5px/1.5 ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;opacity:.9}
+.dsh-forge-workbench-log-output{margin:0;padding:9px 11px;flex:1 1 auto;min-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border-radius:8px;border:1px solid rgba(127,127,127,.26);background:rgba(0,0,0,.055);font:11px/1.55 ui-monospace,Menlo,Consolas,monospace;tab-size:2}
+.dsh-forge-workbench-log-foot{font-size:10.5px;line-height:1.45;opacity:.58}
+.dsh-forge-workbench-log-output{padding:0;white-space:normal;background:color-mix(in srgb,currentColor 3%,transparent);font:0/0 inherit}
+.dsh-forge-log-line{display:grid;grid-template-columns:5ch 19ch minmax(0,1fr);gap:8px;align-items:start;padding:3px 9px;border-bottom:1px solid color-mix(in srgb,currentColor 7%,transparent);font:10.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.dsh-forge-log-line:last-child{border-bottom:0}
+.dsh-forge-log-line.is-error{background:rgba(220,38,38,.055)}
+.dsh-forge-log-line.is-warn{background:rgba(245,158,11,.055)}
+.dsh-forge-log-line-no{text-align:right;opacity:.42;user-select:text;font-variant-numeric:tabular-nums}
+.dsh-forge-log-line-time{opacity:.66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.dsh-forge-log-line-text{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}
+.dsh-forge-log-line.is-error .dsh-forge-log-line-text{color:#dc2626}
+.dsh-forge-workbench-log-empty{display:block;padding:14px;font-size:11.5px;line-height:1.6;white-space:pre-wrap;opacity:.64}
 .dsh-forge-weights-drawer{border:1px solid rgba(127,127,127,.28);border-radius:8px;background:rgba(0,0,0,.04);margin:6px 0;overflow:hidden}
 .dsh-forge-weights-head{display:flex;gap:8px;align-items:center;padding:5px 8px;font-size:11px;opacity:.9;border-bottom:1px solid rgba(127,127,127,.18)}
 .dsh-forge-weights-head>span{flex:1 1 auto;overflow-wrap:anywhere}
@@ -389,12 +443,12 @@ export const WORKBENCH_CSS = `
 .dsh-forge-weight-row{display:flex;gap:8px;justify-content:space-between;gap:10px}
 .dsh-forge-weight-name{font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;min-width:0}
 .dsh-forge-weight-state{opacity:.78;white-space:nowrap}
-.dsh-forge-workbench-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;min-width:0}
-.dsh-forge-workbench-card{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:9px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.03);min-width:0}
-.dsh-forge-workbench-card:hover{border-color:rgba(59,130,246,.45)}
-.dsh-forge-workbench-card-open{appearance:none;display:flex;flex-direction:column;gap:6px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;min-width:0}
-.dsh-forge-workbench-cover{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;border-radius:6px;overflow:hidden;background:rgba(127,127,127,.1);min-width:0}
-.dsh-forge-workbench-cover img{width:100%;height:100%;object-fit:cover;display:block}
+.dsh-forge-workbench-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,232px),1fr));gap:14px;min-width:0;align-items:start}
+.dsh-forge-workbench-card{display:flex;flex-direction:column;gap:6px;padding:7px;border-radius:14px;border:1px solid color-mix(in srgb,currentColor 15%,transparent);background:color-mix(in srgb,currentColor 3%,transparent);min-width:0;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:border-color .16s,background .16s,transform .16s}
+.dsh-forge-workbench-card:hover{border-color:color-mix(in srgb,currentColor 34%,transparent);background:color-mix(in srgb,currentColor 6%,transparent);transform:translateY(-1px)}
+.dsh-forge-workbench-card-open{appearance:none;display:flex;flex-direction:column;gap:7px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;min-width:0}
+.dsh-forge-workbench-cover{position:relative;display:block;width:100%;aspect-ratio:16/10;border-radius:10px;overflow:hidden;background:color-mix(in srgb,currentColor 9%,transparent);min-width:0;flex:none}
+.dsh-forge-workbench-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 .dsh-forge-workbench-cover-empty{font-size:22px;opacity:.4}
 .dsh-forge-workbench-card-title{font-size:12.5px;font-weight:600;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .dsh-forge-workbench-card-meta{display:flex;align-items:baseline;gap:5px;font-size:10.5px;line-height:1.4;opacity:.6;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}

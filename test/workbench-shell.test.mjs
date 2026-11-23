@@ -40,6 +40,8 @@ const CONFIG_ROUTE = '/plugins/dsh-image-forge/studio/config'
 const BOARD_ROUTE = '/plugins/dsh-image-forge/studio/board'
 const FILE_ROUTE = '/plugins/dsh-image-forge/studio/file'
 const ASSETS_ROUTE = '/plugins/dsh-image-forge/studio/assets'
+const ENVIRONMENT_ROUTE = '/plugins/dsh-image-forge/studio/environment'
+const LOG_ROUTE = '/plugins/dsh-image-forge/studio/log'
 
 /** The one tab that is always present, in the strip's own language. */
 const PROJECTS_LABEL = '项目管理'
@@ -55,6 +57,10 @@ const PROJECTS_LABEL = '项目管理'
 const textOf = fakeText
 const visit = fakeVisit
 const respond = fakeResponse
+/** A text-shaped response for the log route. */
+function respondText(value, status = 200) {
+  return { ok: status >= 200 && status < 300, status, text: async () => value }
+}
 
 /** The first host element whose class list contains `className`. */
 function byClass(root, className) {
@@ -165,11 +171,22 @@ const BOARD_TWO = {
 function installFakeNetwork(options = {}) {
   const previousFetch = globalThis.fetch
   const calls = []
+  let logReads = 0
   const library = (options.boards ?? []).map((board) => ({ ...board }))
   // U06: the board a canvas tab reads, when a case needs nodes on the canvas (a
   // detail tab needs something to be the detail *of*). Absent means the old
   // behaviour: a read answers 404 and the canvas stays empty.
   const detail = options.board
+  const environment = options.environment === undefined
+    ? {
+        state: options.ready === false ? 'not-running' : 'ready',
+        endpoint: 'http://127.0.0.1:8188',
+        owned: true,
+        pid: 4242,
+        logPath: 'C:/ComfyUI/logs/dsh-image-forge-launch-test.log',
+      }
+    : options.environment
+  const logBody = options.logBody ?? 'ComfyUI started\nloaded Qwen-Image\nsystem_stats ready'
   const config = {
     ready: options.ready !== false,
     ...(options.reason === undefined ? {} : { reason: options.reason }),
@@ -194,6 +211,28 @@ function installFakeNetwork(options = {}) {
     const url = String(input)
     const method = init === undefined || init.method === undefined ? 'GET' : init.method
     calls.push({ url, method, body: init === undefined ? undefined : init.body })
+    if (url.indexOf(ENVIRONMENT_ROUTE) === 0 && method === 'POST') return respond({ environment: { ...environment } })
+    if (url.indexOf(LOG_ROUTE) === 0) {
+      logReads += 1
+      const lines = logBody.split(/\r?\n/).map((line, index) => ({
+        number: index + 1,
+        text: line,
+        level: /error|failed/i.test(line) ? 'error' : 'info',
+      }))
+      return respond({
+        version: 'studio-log/v1',
+        path: environment.logPath,
+        source: 'plugin',
+        totalLines: lines.length,
+        fromLine: lines.length === 0 ? 0 : 1,
+        toLine: lines.length,
+        hasOlder: false,
+        hasNewer: false,
+        modifiedAt: null,
+        timestampedLines: 0,
+        lines,
+      })
+    }
     if (url.indexOf(ASSETS_ROUTE) === 0) {
       return respond({ assets: assets.map((asset) => ({ ...asset })), boards: library, total: assets.length })
     }
@@ -331,6 +370,10 @@ function installFakeNetwork(options = {}) {
     assetReads() {
       return calls.filter((call) => call.method === 'GET' && call.url.indexOf(ASSETS_ROUTE) === 0).map((call) => call.url)
     },
+    /** Every log-tail read, so the page's live source is observable. */
+    logReads() {
+      return logReads
+    },
     restore() {
       globalThis.fetch = previousFetch
     },
@@ -421,6 +464,53 @@ test('the panel opens on 项目管理, and that tab has no close button', async 
   }
 })
 
+test('the 看日志 button opens a sibling log page and reads the live tail', async () => {
+  const { network, host, mounted } = await mountShell({ boards: [BOARD_ONE] })
+  try {
+    const button = byClass(mounted.tree, 'dsh-forge-workbench-log-open')
+    assert.ok(button !== undefined, 'the workbench always offers one log entry point')
+    assert.equal(textOf(button).trim(), '看日志')
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'projects')
+
+    button.props.onClick()
+    await settle(host, mounted)
+    await settle(host, mounted)
+    assert.deepEqual(
+      tabsOf(mounted.tree).map((tab) => tab.props['data-tab-key']),
+      ['projects', 'logs'],
+      '日志 is a sibling page, not a settings section or an in-canvas drawer',
+    )
+    assert.equal(selectedTab(mounted.tree).props['data-tab-kind'], 'logs')
+    assert.ok(byClass(mounted.tree, 'dsh-forge-workbench-tab-close') !== undefined, 'the log page closes like any tab')
+    assert.ok(byClass(mounted.tree, 'dsh-forge-workbench-log') !== undefined)
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-log-status')), /ComfyUI 已连接/)
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-log-output')), /ComfyUI started/)
+    assert.ok(network.logReads() >= 1, 'the page reads through the same-origin log route')
+
+    const logTab = tabsOf(mounted.tree).find((tab) => tab.props['data-tab-key'] === 'logs')
+    byClass(logTab, 'dsh-forge-workbench-tab-close').props.onClick({ stopPropagation() {} })
+    await settle(host, mounted)
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'projects')
+  } finally {
+    await stop(host, network)
+  }
+})
+test('the log page still opens when no log file is available', async () => {
+  const { network, host, mounted } = await mountShell({
+    environment: { state: 'not-running', note: 'ComfyUI 没在跑' },
+    boards: [BOARD_ONE],
+  })
+  try {
+    byClass(mounted.tree, 'dsh-forge-workbench-log-open').props.onClick()
+    await settle(host, mounted)
+    await settle(host, mounted)
+    assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'logs')
+    assert.match(textOf(byClass(mounted.tree, 'dsh-forge-workbench-log-output')), /当前没有可读取的 ComfyUI 日志/)
+    assert.equal(network.logReads(), 0, 'without a path there is no arbitrary file read')
+  } finally {
+    await stop(host, network)
+  }
+})
 test('a card opens a canvas tab, activates it, and can be closed again', async () => {
   const { network, host, mounted } = await mountShell({ boards: [BOARD_ONE, BOARD_TWO] })
   try {
@@ -470,11 +560,11 @@ test('the strip moves focus with the arrows and closes the focused tab with Esca
   try {
     byClass(cardOf(mounted.tree, 'b_one'), 'dsh-forge-workbench-card-open').props.onClick()
     await settle(host, mounted)
-    assert.equal(byClass(mounted.tree, 'dsh-forge-workbench-strip').props.role, 'tablist')
+    assert.equal(byClass(mounted.tree, 'dsh-forge-workbench-tablist').props.role, 'tablist')
 
     // `stripOf` re-reads the element after every settle: a handler captured
     // before a re-render closes over the focus index from back then.
-    const stripOf = () => byClass(mounted.tree, 'dsh-forge-workbench-strip')
+    const stripOf = () => byClass(mounted.tree, 'dsh-forge-workbench-tablist')
     const press = async (key) => {
       stripOf().props.onKeyDown({ key, preventDefault() {} })
       await settle(host, mounted)

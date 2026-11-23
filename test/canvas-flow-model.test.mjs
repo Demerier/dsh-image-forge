@@ -63,6 +63,7 @@ import {
   canAcceptConnection,
   canStartConnection,
   cameraFromFlow,
+  cameraSeesAnyNode,
   connectionIsValid,
   connectionNodesOf,
   fitWouldClamp,
@@ -77,6 +78,7 @@ import {
   imageMeta,
   imageTitle,
   initialFlowView,
+  initialFlowViewForBoard,
   judgeConnection,
   nodeSizeOf,
   nodeTypeOf,
@@ -871,6 +873,25 @@ test('a board opens at the camera it was stored with, not at a fresh fit', () =>
 
   // And a board that *did* store a view opens exactly there.
   assert.deepEqual(initialFlowView(stored), { kind: 'viewport', viewport: { x: 28, y: 28, zoom: 1 } })
+})
+
+test('a stored camera that points away from every node recovers by framing the board', () => {
+  const viewport = { width: 1000, height: 600 }
+  const nodes = [
+    { x: 40, y: 40, width: 1600, height: 240 },
+    { x: 560, y: 440, width: 608, height: 240 },
+  ]
+  const visible = { x: 0, y: 0, zoom: 0.5 }
+  assert.equal(cameraSeesAnyNode(visible, nodes, viewport), true)
+  assert.deepEqual(initialFlowViewForBoard(visible, nodes, viewport), { kind: 'viewport', viewport: { x: 0, y: 0, zoom: 0.5 } })
+
+  const drifted = { x: 12000, y: 9000, zoom: 1 }
+  assert.equal(cameraSeesAnyNode(drifted, nodes, viewport), false)
+  assert.deepEqual(initialFlowViewForBoard(drifted, nodes, viewport), { kind: 'fit' })
+
+  // An empty board has no content that can prove the stored camera wrong.
+  assert.equal(cameraSeesAnyNode(drifted, [], viewport), true)
+  assert.deepEqual(initialFlowViewForBoard(drifted, [], viewport), { kind: 'viewport', viewport: { x: -12000, y: -9000, zoom: 1 } })
 })
 
 test('restoring the view and framing the board are one decision, never both', () => {

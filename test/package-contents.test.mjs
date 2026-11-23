@@ -53,14 +53,19 @@ const SHIPPED = [
   'skill.md',
   'references/t2i_rules.md',
   'references/edit_rules.md',
+  'scripts/comfyui-discovery.mjs',
+  'scripts/start-comfyui.mjs',
+  'docs/client-bundle.md',
   'docs/comfyui-deployment.md',
   'docs/configuration.md',
-  // The one-command ComfyUI starter the README and the "not running" error
-  // message both point at; a tarball without it breaks that instruction.
-  'scripts/start-comfyui.mjs',
-  // The banner the README renders; a missing image is a broken first screen on
-  // npm and GitHub both, and `docs/*.md` does not reach into a subdirectory.
+  'docs/license-and-limits.md',
+  'docs/local-install.md',
+  'docs/release-notes-0.2.0.md',
+  'docs/testing.md',
+  'docs/usage-reference.md',
   'docs/images/repo-banner.png',
+  'docs/images/studio-assets.png',
+  'docs/images/studio-workbench.png',
 ]
 
 test('every file the Host or the skill reads by path is in the tarball', () => {
@@ -77,14 +82,26 @@ test('every file the Host or the skill reads by path is in the tarball', () => {
   ))
 })
 
-test('the deployment document is reachable through the docs glob, not by a one-off entry', () => {
-  // `docs/*.md` is the rule; a new document is then picked up without editing
-  // package.json. If someone narrows this to a single file, the citation in the
-  // settings tab and the tool errors stops resolving after a pack.
-  const entries = entriesPublishing('docs/comfyui-deployment.md')
-  assert.deepEqual(entries, ['docs/*.md'])
-  // The plans/ directory stays out of the tarball: it is history, not a document.
-  assert.deepEqual(entriesPublishing('docs/plans/dsh-image-forge-开发计划.md'), [])
+test('only README-referenced docs and tooling are packaged', () => {
+  // The package whitelist is explicit. A document is not published merely
+  // because it happens to exist under docs/ or is present on this machine.
+  assert.deepEqual(entriesPublishing('docs/comfyui-deployment.md'), ['docs/comfyui-deployment.md'])
+  assert.ok(!packageJson.files.includes('docs/*.md'), 'the blanket docs glob would ship local research')
+  assert.ok(!packageJson.files.includes('scripts'), 'the scripts directory would ship dev-only preview tools')
+  assert.ok(!packageJson.files.includes('test'), 'test and test/dev never enter the tarball')
+
+  for (const localOnly of [
+    '.local/docs/CANVAS-DESIGN.md',
+    '.local/docs/CANVAS-PRIOR-ART.md',
+    '.local/docs/WORKBENCH-SHELL.md',
+    '.local/docs/mcp-backend.md',
+    'test/dev/preview/run.mjs',
+    'test/dev/preview/shot.mjs',
+    'test/preview-run.mjs',
+    'scripts/preview-page.mjs',
+  ]) {
+    assert.deepEqual(entriesPublishing(localOnly), [], `${localOnly} must stay out of the tarball`)
+  }
 })
 
 test('no Python ships any more: the resources directory is gone', () => {

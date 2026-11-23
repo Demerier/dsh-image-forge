@@ -78,13 +78,43 @@ export const STUDIO_IMPORT_ROUTE = '/plugins/dsh-image-forge/studio/import'
  */
 export const STUDIO_ENVIRONMENT_ROUTE = '/plugins/dsh-image-forge/studio/environment'
 /**
- * Same-origin GET route that tails a ComfyUI launch log into the panel.
- * `STUDIO_LOG_ROUTE?path=<encoded absolute path>` returns the last N lines as
- * plain UTF-8 text. It never opens an external terminal window: the panel reads
- * it and shows it inline. Only launch logs under the Desktop `logs/` dir are
- * served (see studio-routes).
+ * Same-origin GET route that pages a ComfyUI launch log into the panel.
+ *
+ * `?path=<encoded absolute path>&before=<line>&after=<line>&limit=<n>` returns
+ * structured, line-numbered JSON. `before` walks toward older lines, `after`
+ * continues a live follow. It never opens an external terminal window.
  */
 export const STUDIO_LOG_ROUTE = '/plugins/dsh-image-forge/studio/log'
+
+/** The default and maximum number of log lines one page may contain. */
+export const STUDIO_LOG_DEFAULT_LIMIT = 200
+export const STUDIO_LOG_MAX_LIMIT = 500
+
+/** A line's inferred visual severity. */
+export type StudioLogLevel = 'error' | 'warn' | 'info' | 'plain'
+
+/** One numbered line from a ComfyUI log. */
+export interface StudioLogLine {
+  readonly number: number
+  readonly text: string
+  readonly timestamp?: string
+  readonly level: StudioLogLevel
+}
+
+/** Structured page returned by {@link STUDIO_LOG_ROUTE}. */
+export interface StudioLogPage {
+  readonly version: 'studio-log/v1'
+  readonly path: string
+  readonly source: 'plugin' | 'desktop'
+  readonly totalLines: number
+  readonly fromLine: number
+  readonly toLine: number
+  readonly hasOlder: boolean
+  readonly hasNewer: boolean
+  readonly modifiedAt: string | null
+  readonly timestampedLines: number
+  readonly lines: readonly StudioLogLine[]
+}
 
 /** Actions {@link STUDIO_ENVIRONMENT_ROUTE} accepts. */
 export const STUDIO_ENVIRONMENT_ACTIONS = ['status', 'start', 'stop', 'download'] as const

@@ -17,6 +17,7 @@ import test from 'node:test'
 import {
   MAX_CANVAS_TABS,
   MAX_RECENT_PROJECTS,
+  LOGS_TAB,
   MAX_TABS,
   NODE_DETAIL_KINDS,
   PROJECTS_TAB,
@@ -74,8 +75,9 @@ function canvases(count) {
 /* Keys (§3.1)                                                                */
 /* -------------------------------------------------------------------------- */
 
-test('parseTabKey: the three §3.1 shapes, and nothing else', () => {
+test('parseTabKey: the four tab shapes, and nothing else', () => {
   assert.deepEqual(parseTabKey('projects'), { kind: 'projects', key: 'projects' })
+  assert.deepEqual(parseTabKey('logs'), { kind: 'logs', key: 'logs' })
   assert.deepEqual(parseTabKey('canvas:b_7fk2'), { kind: 'canvas', key: 'canvas:b_7fk2', boardId: 'b_7fk2' })
   assert.deepEqual(parseTabKey('node:b_7fk2:i_a1b2'), {
     kind: 'node',
@@ -105,7 +107,7 @@ test('parseTabKey: the three §3.1 shapes, and nothing else', () => {
 })
 
 test('formatTabKey is the inverse of parseTabKey for every kind', () => {
-  for (const key of [PROJECTS_TAB, canvas('b_7fk2'), node('b_7fk2', 'i_a1b2')]) {
+  for (const key of [PROJECTS_TAB, LOGS_TAB, canvas('b_7fk2'), node('b_7fk2', 'i_a1b2')]) {
     assert.equal(formatTabKey(parseTabKey(key)), key)
   }
   // The builders agree with the parser.
@@ -180,6 +182,21 @@ test('openTab is the key-shaped entry point and refuses what it cannot build', (
   assert.equal(openTab(state, 'nonsense').rejected, 'invalid')
 })
 
+test('the logs tab is a session-only tab beside projects and canvas', () => {
+  const opened = openTab(emptyState(), LOGS_TAB)
+  assert.equal(opened.rejected, undefined)
+  assert.deepEqual(opened.state.tabOrder, [PROJECTS_TAB, LOGS_TAB])
+  assert.equal(opened.state.activeTab, LOGS_TAB)
+  assert.deepEqual(listTabs(opened.state)[1], { key: LOGS_TAB, kind: 'logs', orphaned: false })
+  // Reopening only activates the existing page.
+  assert.equal(openTab(opened.state, LOGS_TAB).reused, true)
+  // Closing it follows the same neighbour rule as any other closable tab.
+  assert.equal(closeTab(opened.state, LOGS_TAB).state.activeTab, PROJECTS_TAB)
+  // Diagnostics are session state: a reload must not reopen the log page.
+  const stored = toWorkspaceJson(opened.state)
+  assert.deepEqual(stored.tabOrder, [PROJECTS_TAB])
+  assert.deepEqual(stored.activeTab, { kind: 'projects' })
+})
 test('openNodeDetail sits right of its source canvas and keeps the board group together (§3.2 rule 3)', () => {
   const state = withCanvases('b1', 'b2')
   const first = openNodeDetail(state, 'b1', 'i1', 'layout')

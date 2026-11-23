@@ -6,8 +6,8 @@
  * It generates nothing, so it finishes in seconds and can be rerun while
  * iterating on the panel.
  *
- * Run after `node test/preview-run.mjs` is listening:
- *   node test/preview-boards-shot.mjs
+ * Run after `node test/dev/preview/run.mjs` is listening:
+ *   node test/dev/preview/boards-shot.mjs
  */
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
-const SHOTS = join(HERE, '..', '.preview', 'shots')
+const SHOTS = join(HERE, '..', '..', '..', '.preview', 'shots')
 mkdirSync(SHOTS, { recursive: true })
 
 const CHROME = process.env.PREVIEW_CHROME ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'

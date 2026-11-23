@@ -917,7 +917,15 @@ export function flowViewportOf(
   if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined
   if (!Number.isFinite(zoom) || zoom <= 0) return undefined
   const clamped = Math.min(FLOW_MAX_ZOOM, Math.max(FLOW_MIN_ZOOM, zoom))
-  return { x: -x * clamped, y: -y * clamped, zoom: clamped }
+  const translateX = -x * clamped
+  const translateY = -y * clamped
+  // Avoid JavaScript's observable -0 leaking into persisted viewports and
+  // exact-equality tests; it projects the same point.
+  return {
+    x: Object.is(translateX, -0) ? 0 : translateX,
+    y: Object.is(translateY, -0) ? 0 : translateY,
+    zoom: clamped,
+  }
 }
 
 /** How a board's canvas opens: at the view it was stored with, or framed. */
@@ -936,6 +944,53 @@ export type FlowInitialView =
 export function initialFlowView(camera: Camera | undefined | null): FlowInitialView {
   const viewport = flowViewportOf(camera)
   return viewport === undefined ? { kind: 'fit' } : { kind: 'viewport', viewport }
+}
+
+/**
+ * Whether a stored camera shows at least one node at the supplied viewport size.
+ *
+ * A board can outlive the node arrangement it was saved against. When every node
+ * has moved out of the stored world rectangle, restoring that camera opens on a
+ * blank corner and looks like the board itself failed to render. The camera is
+ * still valid arithmetic, so `flowViewportOf` cannot detect this; this predicate
+ * answers the board-level question instead.
+ */
+export function cameraSeesAnyNode(
+  camera: Camera,
+  nodes: readonly Rect[],
+  viewport: { readonly width: number; readonly height: number },
+): boolean {
+  const projected = flowViewportOf(camera)
+  if (projected === undefined) return false
+  if (nodes.length === 0) return true
+  const normalized = cameraFromFlow(projected)
+  const width = Math.max(1, viewport.width) / normalized.zoom
+  const height = Math.max(1, viewport.height) / normalized.zoom
+  const right = normalized.x + width
+  const bottom = normalized.y + height
+  return nodes.some((node) => {
+    const nodeRight = node.x + Math.max(1, node.width)
+    const nodeBottom = node.y + Math.max(1, node.height)
+    return node.x < right && nodeRight > normalized.x && node.y < bottom && nodeBottom > normalized.y
+  })
+}
+
+/**
+ * The opening view for a board, including recovery from an empty stored frame.
+ *
+ * A project-recovery corner, not a free camera: when the stored viewport exists
+ * but none of the board's painted rectangles intersect it, opening framed is the
+ * only useful answer. An empty board keeps the stored view because there is no
+ * encoded content to prove the camera wrong.
+ */
+export function initialFlowViewForBoard(
+  camera: Camera | undefined | null,
+  nodes: readonly Rect[],
+  viewport: { readonly width: number; readonly height: number },
+): FlowInitialView {
+  const view = initialFlowView(camera)
+  if (view.kind === 'fit' || camera === undefined || camera === null) return view
+  return cameraSeesAnyNode(camera, nodes, viewport) ? view : { kind: 'fit' }
 }
 
 /**

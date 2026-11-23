@@ -58,6 +58,7 @@ import {
   type StudioConfigResponse,
 } from './studio-shared.ts'
 import { CanvasPane } from './canvas-pane.ts'
+import { WorkbenchLogPane, WORKBENCH_LOG_LABEL } from './workbench-log.ts'
 import { ProjectsPane } from './workbench-projects.ts'
 // U08 (§9.2): the global asset library is the projects tab's **second view**,
 // not a tab of its own. The pane is presentational; this module owns the read,
@@ -82,6 +83,7 @@ import {
   type NodeDetailSubject,
 } from './node-detail-pane.ts'
 import {
+  LOGS_TAB,
   MAX_CANVAS_TABS,
   MAX_TABS,
   PROJECTS_TAB,
@@ -92,6 +94,7 @@ import {
   listTabs,
   openCanvas,
   openNodeDetail,
+  openTab,
   parseTabKey,
   stateFromWorkspace,
   toWorkspaceJson,
@@ -237,6 +240,7 @@ export function tabLabelFor(
   subjects?: Readonly<Record<TabKey, NodeDetailSubject>>,
 ): string {
   if (tab.kind === 'projects') return WORKBENCH_PROJECTS_LABEL
+  if (tab.kind === 'logs') return WORKBENCH_LOG_LABEL
   const name = tab.boardId === undefined ? undefined : boardNameOf(tab.boardId, boards)
   const label = name === undefined || name.length === 0 ? (tab.boardId ?? '未命名项目') : name
   if (tab.kind === 'canvas') return label
@@ -552,6 +556,26 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
   )
 
   /**
+   * Open (or re-activate) the session-only log page.
+   *
+   * This is the workbench-level 看日志 button's whole job: diagnostics belong to
+   * one stable page beside the project and canvas tabs, never to settings or a
+   * temporary drawer inside the canvas.
+   */
+  const openLogs = useCallback(() => {
+    const result = openTab(stateRef.current, LOGS_TAB)
+    if (result.rejected === 'tab-limit') {
+      setNotice(`同时最多打开 ${String(MAX_TABS)} 个页签，请先关闭一个。`)
+      return
+    }
+    if (result.rejected !== undefined) {
+      setNotice('日志页暂时打不开。')
+      return
+    }
+    setNotice(undefined)
+    commit(result.state)
+  }, [commit])
+  /**
    * The detail tab's breadcrumb, both directions of it (§8.3).
    *
    * When the source canvas is still on the strip this is an activation; when it
@@ -862,7 +886,7 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
 
   const activeTab = tabs.find((tab) => tab.key === state.activeTab)
   const activeRef = parseTabKey(state.activeTab)
-  const activeBoardId = activeRef !== null && activeRef.kind !== 'projects' ? activeRef.boardId : undefined
+  const activeBoardId = activeRef !== null && (activeRef.kind === 'canvas' || activeRef.kind === 'node') ? activeRef.boardId : undefined
   /**
    * §8.4 (WD10): the nodes the canvas must paint as read-only thumbnails.
    *
@@ -930,6 +954,8 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
           },
           onOpenAssets: () => setProjectsView('assets'),
         })
+  } else if (activeTab.kind === 'logs') {
+    panel = createElement(WorkbenchLogPane)
   } else if (activeTab.kind === 'canvas') {
     panel = missingBoard
       ? createElement('div', { className: 'dsh-forge-workbench-deleted' }, [
@@ -1058,17 +1084,39 @@ export function WorkbenchShell(): ReturnType<typeof createElement> {
     )
   })
 
+  const logsOpen = tabs.some((tab) => tab.kind === 'logs')
+  const logsActive = activeTab?.kind === 'logs'
   return createElement('div', { className: 'dsh-forge-workbench', 'data-tabs': tabs.length }, [
     createElement(
       'div',
-      {
-        key: 'strip',
-        className: 'dsh-forge-workbench-strip',
-        role: 'tablist',
-        'aria-label': WORKBENCH_TABLIST_LABEL,
-        onKeyDown: onStripKeyDown,
-      },
-      stripTabs,
+      { key: 'strip', className: 'dsh-forge-workbench-strip' },
+      [
+        createElement(
+          'div',
+          {
+            key: 'tablist',
+            className: 'dsh-forge-workbench-tablist',
+            role: 'tablist',
+            'aria-label': WORKBENCH_TABLIST_LABEL,
+            onKeyDown: onStripKeyDown,
+          },
+          stripTabs,
+        ),
+        createElement(
+          'button',
+          {
+            key: 'logs',
+            type: 'button',
+            className: logsActive
+              ? 'dsh-forge-workbench-log-open is-active'
+              : 'dsh-forge-workbench-log-open',
+            'data-log-tab-open': logsOpen ? 'yes' : 'no',
+            title: '打开 ComfyUI 连接与日志页（不弹终端窗口）',
+            onClick: openLogs,
+          },
+          '看日志',
+        ),
+      ],
     ),
     notice === undefined
       ? null

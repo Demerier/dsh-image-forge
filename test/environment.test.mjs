@@ -1028,7 +1028,7 @@ test('a Windows launch prefers pythonw.exe so no console window can appear', () 
   assert.equal(discoverComfyPlan(depsOf(machine)).python, winPythonw, 'pythonw wins when it exists')
 })
 test('a running ComfyUI the plugin did not start still gets a log to tail', async () => {
-  // The panel's 看日志 button only renders when the snapshot carries a logPath.
+  // The workspace log page reads the snapshot logPath; a Desktop-log fallback keeps that source available.
   // A start this plugin did returns its launch log; an instance the user started
   // has no record, so the snapshot used to say `logPath: null` and the button
   // never appeared. Comfy Desktop's own logs/comfyui.log is that instance's live

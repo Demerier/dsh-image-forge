@@ -4578,25 +4578,16 @@ test('U06: the detail pane ships, and the canvas keeps its half of the single-ed
 
 
 
-test('P2: 看日志 opens an inline drawer and reads the log through the log route', async () => {
-  const { network, panel } = await mountWorkbench({
-    configOverrides: { ready: false, reason: 'ComfyUI 没在跑' },
-    environment: () => ({ environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: '已后台拉起', logPath: 'C:/logs/dsh-image-forge-launch-1.log' } }),
-  })
-  try {
-    const logBtn = buttonWithText(panel, '看日志')
-    assert.ok(logBtn !== undefined, 'a log path offers the inline viewer')
-    logBtn.props.onClick()
-    await settle(panel)
-    const logCalls = network.calls.filter((call) => call.url.indexOf('/plugins/dsh-image-forge/studio/log') === 0)
-    assert.ok(logCalls.length >= 1, 'the drawer fetches the log through the same-origin route')
-    const drawer = byClassNow(panel, 'dsh-forge-log-drawer')
-    assert.ok(drawer !== undefined, 'the log is shown inline, not in an external window')
-  } finally {
-    network.restore()
-  }
+test('P2: logs are a workspace page, so the canvas has no duplicate log drawer', () => {
+  // The observation surface is the workbench strip's 看日志 button and a
+  // sibling logs tab. Keeping a second drawer inside every canvas would give
+  // the product two different answers to the same question.
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-workbench-log-open'), 'the workspace log button ships')
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-workbench-log-output'), 'the sibling log page ships')
+  assert.ok(CLIENT_SOURCE.includes('ComfyUI 日志'), 'the page names itself')
+  assert.ok(!CLIENT_SOURCE.includes('dsh-forge-env-log-btn'), 'the canvas status line no longer duplicates the entry point')
+  assert.ok(!CLIENT_SOURCE.includes('dsh-forge-log-drawer'), 'the old inline log drawer is gone')
 })
-
 // ---------------------------------------------------------------------------
 // P2b: the panel can download missing weights itself, and shows a live log.
 // ---------------------------------------------------------------------------
@@ -4776,4 +4767,17 @@ test('a layout node wired to a picture refuses the layout run by name', () => {
   const refused = layoutGeneratePlan(draft, 2)
   assert.equal(refused.ok, false)
   assert.match(refused.reason, /参考图/)
+})
+
+test('client stylesheet rule nesting stays balanced', () => {
+  for (const [name, sheet] of [['studio', STUDIO_CSS], ['workbench', WORKBENCH_CSS]]) {
+    const withoutComments = sheet.replace(/\/\*[\s\S]*?\*\//g, '')
+    let depth = 0
+    for (const character of withoutComments) {
+      if (character === '{') depth += 1
+      if (character === '}') depth -= 1
+      assert.ok(depth >= 0, `${name} CSS closes a block that was never opened`)
+    }
+    assert.equal(depth, 0, `${name} CSS has one or more unclosed rule blocks`)
+  }
 })
