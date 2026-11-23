@@ -1004,6 +1004,8 @@ export interface LayoutItemWrite {
   readonly x?: number | null
   readonly y?: number | null
   readonly parents?: readonly string[]
+  /** Board ids of the pictures wired into this draft as references. */
+  readonly references?: readonly string[]
   /** The editable draft, in draft pixels; never touched by a node resize. */
   readonly draft: BoardLayoutDraft
   /** Display width/height in world units (§8.3: width-driven, height proportional). */
@@ -1150,6 +1152,9 @@ export async function saveLayoutItem(
       draft: entry.draft,
       w: entry.w,
       h: entry.h,
+      ...(entry.references === undefined || entry.references.length === 0
+        ? {}
+        : { references: [...entry.references] }),
     }
     if (index >= 0) board.items[index] = item
     else board.items.push(item)

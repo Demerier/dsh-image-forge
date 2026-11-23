@@ -649,6 +649,14 @@ export type BoardItemKind = 'image' | 'task' | 'layout'
 export interface BoardLayoutItem {
   /** `object` / `character` / `text`, the labels the compiler accepts. */
   label: 'object' | 'character' | 'text'
+  /**
+   * A human's name for this box ("标题", "人物 1").
+   *
+   * Stored so it survives a reload, but **not** part of the compiled prompt: the
+   * official schema rejects unknown item fields, and the compiler in
+   * `layout-editor.ts` strips it. What the model reads is `caption`.
+   */
+  name?: string
   caption: string
   /** Draft pixels, `[x1, y1, x2, y2]`, origin top-left. */
   bbox: readonly [number, number, number, number]
@@ -747,6 +755,15 @@ export interface BoardItem {
   /** `kind:'layout'` only: display size in world units (`draft` has its own pixels). */
   w?: number
   h?: number
+  /**
+   * `kind:'layout'` only: pictures wired into this draft as references.
+   *
+   * Stored as board item ids, not payloads: the pixels are already on disk and
+   * belong to another item, so a reference is a pointer. Without this the wire
+   * a user drew vanished on the next reload — `parents` records lineage, but a
+   * reference is what the run would send.
+   */
+  references?: string[]
   /** `kind:'task'` only: the terminal state and the request to retry. */
   task?: BoardTaskInfo
 }

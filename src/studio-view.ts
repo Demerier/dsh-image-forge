@@ -592,6 +592,39 @@ function fallbackSpot(index: number): Point {
  * already has one stays readable by this build instead of crashing on an item
  * that has no picture.
  */
+/**
+ * Rebuild a layout node's held references from stored board ids.
+ *
+ * A stored reference is a *pointer* ("this draft used that picture"), so the
+ * pixels are described by the picture's own item — the same object
+ * `referenceOf` produces from a live node. An id whose picture is gone is
+ * dropped: a reference to a missing file would fail at generation time, and the
+ * wire it came from is already invisible.
+ */
+function referencesFromIds(
+  ids: readonly string[] | undefined,
+  items: readonly BoardItem[],
+): { references?: HeldReference[] } {
+  if (ids === undefined || ids.length === 0) return {}
+  const references: HeldReference[] = []
+  for (const id of ids) {
+    // Ten is the reference cap the adapter declares (`EDIT_MAX_REFERENCES`);
+    // restating the number here keeps shared code free of the ComfyUI module.
+    if (references.length >= 10) break
+    const item = items.find((entry) => entry.id === id)
+    if (item === undefined || (item.kind !== undefined && item.kind !== 'image')) continue
+    const name = item.path.split(/[\\/]/).pop() ?? '参考图'
+    references.push({
+      id: `${id}-ref`,
+      name,
+      previewUrl: studioFileUrl(item.markdownPath),
+      payload: { path: item.path, mediaType: item.mediaType, name },
+      nodeId: id,
+    })
+  }
+  return references.length === 0 ? {} : { references }
+}
+
 function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
   const nodes: CanvasNode[] = []
   items.forEach((item, index) => {
@@ -611,6 +644,7 @@ function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
         w: width,
         h: item.h ?? layoutNodeHeight(width, draft),
         draft,
+        ...referencesFromIds(item.references, items),
       })
       return
     }
@@ -2401,6 +2435,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       w: node.w,
       h: node.h,
       ...(node.parents.length === 0 ? {} : { parents: [...node.parents] }),
+      // The wired-in pictures, as board ids: a reference is a pointer to a file
+      // that already exists, and without it the edge vanished on reload.
+      ...(node.references === undefined || node.references.length === 0
+        ? {}
+        : { references: node.references.map((reference) => reference.nodeId).filter((id): id is string => typeof id === 'string') }),
     })
     if (error !== undefined) {
       setBoardError(error)

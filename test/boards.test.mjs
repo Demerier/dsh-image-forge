@@ -803,3 +803,32 @@ test('non-picture nodes never become the board cover or an asset card', async ()
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a stored layout node keeps its box names and its references', async () => {
+  // Two fields were lost on restart: an editor box name was stripped from the
+  // draft, and the pictures wired into a layout were never stored at all. Both
+  // now ride in the board entry — the name in the draft, the references as item
+  // ids, because a reference is a pointer to a picture that already exists.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-forge-layout-persist-'))
+  try {
+    const draft = {
+      width: 1024, height: 1024, bbox_coord_space: 'abs', bbox_format: 'xyxy',
+      summary: { caption: 'poster' },
+      items: [{ label: 'object', caption: 'cup', name: '杯子', bbox: [0, 0, 400, 400] }],
+    }
+    const written = await saveLayoutItem(dir, undefined, {
+      draft, w: 480, h: 420, x: 0, y: 0, references: ['img-1'],
+    })
+    assert.ok(written !== undefined)
+    const item = written.item
+    assert.equal(item.draft.items[0].name, '杯子', 'the box name survives the store')
+    assert.deepEqual(item.references, ['img-1'], 'the reference ids survive the store')
+    // The read side hands the same values back after a reload.
+    const board = await readBoard(dir, written.board.id)
+    const reloaded = board.items.find((entry) => entry.id === item.id)
+    assert.equal(reloaded.draft.items[0].name, '杯子')
+    assert.deepEqual(reloaded.references, ['img-1'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

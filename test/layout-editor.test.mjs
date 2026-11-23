@@ -824,9 +824,14 @@ test('a box can be named for the panel, and the name never reaches the prompt', 
   state = setBoxName(state, id, '  杯子  ')
   assert.equal(state.items[0].name, '杯子', 'surrounding whitespace is trimmed')
   const draft = stateToDraft(setSummary(state, { caption: 'x' }))
-  assert.equal('name' in draft.items[0], false, 'the draft carries no editor-only field')
+  // The name *is* stored in the draft — otherwise it vanished on every reload —
+  // but it is not model input: the compiled prompt drops it, because the
+  // official contract rejects unknown item fields.
+  assert.equal(draft.items[0].name, '杯子', 'the name survives in the stored draft')
   const compiled = JSON.parse(compileLayout(draft))
-  assert.equal(compiled.items[0].name, undefined)
+  assert.equal(compiled.items[0].name, undefined, 'the compiled prompt never carries the name')
+  // And the draft with a name still validates (it is a draft-only key).
+  assert.deepEqual(validateLayoutDraft(draft), [])
   // An empty name clears it instead of storing an empty string.
   assert.equal('name' in setBoxName(state, id, '   ').items[0], false)
 })

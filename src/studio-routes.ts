@@ -642,6 +642,7 @@ export function registerStudioRoutes(
               ...(action.x === undefined ? {} : { x: action.x }),
               ...(action.y === undefined ? {} : { y: action.y }),
               ...(action.parents === undefined ? {} : { parents: action.parents }),
+              ...(action.references === undefined ? {} : { references: action.references }),
               draft: action.draft,
               w: action.w,
               h: action.h,
@@ -1034,6 +1035,8 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
   const parents = parseParentIds(body.parents)
   const task = body.task === undefined ? undefined : parseBoardTask(body.task)
   const draft = body.draft === undefined ? undefined : parseBoardDraft(body.draft)
+  // Layout references are board item ids, same shape as `parents`.
+  const layoutReferences = parseParentIds(body.references)
   const workspace = body.workspace
   const w = parseCoordinate(body.w)
   const h = parseCoordinate(body.h)
@@ -1057,6 +1060,7 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
     ...(toBoard === undefined ? {} : { toBoard }),
     ...(x === undefined || y === undefined ? {} : { x, y }),
     ...(parents === undefined ? {} : { parents }),
+    ...(layoutReferences === undefined ? {} : { references: layoutReferences }),
     ...(task === undefined ? {} : { task }),
     ...(draft === undefined ? {} : { draft }),
     ...(w === undefined ? {} : { w }),

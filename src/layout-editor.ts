@@ -367,6 +367,8 @@ const DRAFT_ROOT_KEYS = ['width', 'height', 'bbox_coord_space', 'bbox_format', '
 const COMPILED_ROOT_KEYS = ['summary', 'items', 'bbox_coord_space', 'bbox_format']
 const SUMMARY_KEYS = ['caption', 'meta', 'canvas', 'palette']
 const ITEM_KEYS = ['label', 'caption', 'bbox', 'text', 'tags', 'palette']
+/** Draft items may also carry the editor's own box name; compiled items may not. */
+const DRAFT_ITEM_KEYS = [...ITEM_KEYS, 'name']
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -449,10 +451,19 @@ function readCenteredTuple(value: unknown): LayoutCenteredBbox | null {
   return [value[0] as number, value[1] as number, value[2] as number, value[3] as number]
 }
 
-function validateItemHead(item: Record<string, unknown>, location: string): string[] {
+/**
+ * Item shape checks, shared by the draft and compiled validators.
+ *
+ * @param item - one raw item object.
+ * @param location - `items[i]`, for the message.
+ * @param allowName - draft items may carry the editor-only `name`; the compiled
+ *   form may not, because the official contract rejects unknown fields there.
+ */
+function validateItemHead(item: Record<string, unknown>, location: string, allowName = false): string[] {
   const issues = [
-    ...unknownKeys(item, ITEM_KEYS, location),
+    ...unknownKeys(item, allowName ? DRAFT_ITEM_KEYS : ITEM_KEYS, location),
     ...missingKeys(item, ['label', 'caption', 'bbox'], location),
+    ...(typeof item.name === 'string' && item.name.length > 0 ? [] : []),
   ]
   if ('label' in item && !LAYOUT_ITEM_LABELS.includes(item.label as LayoutItemLabel)) {
     issues.push(location + '.label must be object, character or text')
@@ -567,7 +578,7 @@ export function validateLayoutDraft(value: unknown): string[] {
       issues.push(location + ' must be an object')
       return
     }
-    issues.push(...validateItemHead(item, location))
+    issues.push(...validateItemHead(item, location, true))
     const box = readBoxTuple(item.bbox)
     if (box === null) {
       issues.push(location + '.bbox must be [x1,y1,x2,y2] with four finite numbers')
@@ -656,6 +667,9 @@ export function compileLayout(draft: LayoutDraft): string {
   const compiledItems = items.map((item) => {
     const compiled: Record<string, unknown> = {}
     for (const key of Object.keys(item)) {
+      // The editor's own box name is not part of the model contract — the official
+      // compiler rejects unknown item fields, so compiling has to drop it.
+      if (key === 'name') continue
       if (key === 'bbox') {
         const box = readBoxTuple(item.bbox)
         compiled.bbox = toCompiledBox(box as LayoutBox, width, height)
@@ -1087,6 +1101,7 @@ function draftToEditorStateWith(draft: unknown, tolerateDrafting: boolean): Layo
       caption: item.caption,
       bbox: readBboxValue(item.bbox),
     }
+    if (typeof item.name === 'string' && item.name.length > 0) editable.name = item.name
     if (item.text !== undefined) editable.text = item.text
     if (item.tags !== undefined) editable.tags = [...item.tags]
     if (item.palette !== undefined) editable.palette = [...item.palette]
@@ -1111,6 +1126,10 @@ export function stateToDraft(state: LayoutEditorState): LayoutDraft {
       caption: item.caption,
       bbox: [item.bbox.x1, item.bbox.y1, item.bbox.x2, item.bbox.y2],
     }
+    // The human name rides in the draft so a reload keeps it, but it is **not**
+    // model input: `compileLayout` drops it, and the official compiler rejects
+    // unknown item fields. Without this line the name vanished on every reload.
+    if (item.name !== undefined) draftItem.name = item.name
     if (item.text !== undefined) draftItem.text = item.text
     if (item.tags !== undefined) draftItem.tags = [...item.tags]
     if (item.palette !== undefined) draftItem.palette = [...item.palette]
