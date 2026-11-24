@@ -9,7 +9,7 @@
 ```
 
 ```text
-qwen_image_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
+image_forge_generate(prompt = <rewritten_prompt>, wh_ratio = "16:9")
 ```
 
 `wh_ratio` 7 档（官方）与插件换算出的像素（**~1.5MP 预算**、32 对齐）：
@@ -68,7 +68,7 @@ turbo 与 MOSS 不接受这两个参数（采样器/调度器分别由蒸馏 sig
 `moss-sft` 的步数由 `mossSampling` 档位决定（comfy 25 / official 50），不受 `defaultSteps` 影响。
 结果里恒带 `steps_used` 与 `steps_source`，可以直接回答「这张为什么和上一张不一样」。
 
-落盘命名：`<outputDir>/<prefix>_<W>x<H>_<n>.png`，`prefix` 默认 `qwen`，可用 `preset` 覆盖；
+落盘命名：`<outputDir>/<prefix>_<W>x<H>_<n>.png`，`prefix` 默认 `forge`，可用 `preset` 覆盖；
 编号从 1 起且**跳过已占用的名字**，所以重复调用不会覆盖旧图。
 
 ## 画板：成果的存储与显示单位
@@ -100,7 +100,7 @@ PNG 落在同一个 `outputDir` 里，但「哪几张图属于同一件事」由
   说明原因。
 
 图片回传：工具结果里给出 `![](绝对路径)` 的 Markdown（客户端会渲染成真图），
-另有一份 JSON 供机器读；客户端侧注册了 `tool.call.toolview` 的 `qwen_image_generate` 槽做卡片显示。
+另有一份 JSON 供机器读；客户端侧注册了 `tool.call.toolview` 的 `image_forge_generate` 槽做卡片显示。
 
 ## 工作台画布：任务节点与布局节点
 
@@ -235,7 +235,7 @@ MCP `fetch_outputs` 与 CLI `download` 的 `out_dir` 指向**工作区内**的
 - 「重新检测」只重新读快照。**权重下载在工作台内就能做**：缺权重时状态行下方出现
   「下载缺失权重（约 N GB）」抽屉，先给「查看计划」（文件名、体积、目标目录），再点下载
   才写字节；`POST /studio/environment {action:"download", confirm:true}` 以 NDJSON 回流
-  逐文件进度。同一个能力也可由 agent 调 `qwen_image_setup action=download`（默认 dry-run）。
+  逐文件进度。同一个能力也可由 agent 调 `image_forge_setup action=download`（默认 dry-run）。
 - 双底模口径：`qwen21-base` 40 步 / `qwen21-turbo` 8 步（缺 turbo 权重明确退化到 base）/ `moss-sft`
   MOSS-Image（25 步模板；缺权重直接报错，不静默）。
 
@@ -256,10 +256,10 @@ MCP `fetch_outputs` 与 CLI `download` 的 `out_dir` 指向**工作区内**的
 - 启动参数定制（`extraArgs`）属阶段 3：环境层接口已留（默认不追加任何 flag），UI 暂不暴露输入。
 ## 参考图编辑（图生图）
 
-用户给了参考图（一张或多张）时，这是**改图任务**，走 `qwen_image_edit`：
+用户给了参考图（一张或多张）时，这是**改图任务**，走 `image_forge_edit`：
 
 ```text
-qwen_image_edit(prompt = <成品改图指令>, images = ["D:\\pictures\\room.png"], ratio_follow = "image1")
+image_forge_edit(prompt = <成品改图指令>, images = ["D:\\pictures\\room.png"], ratio_follow = "image1")
 ```
 
 **画布比例三选一，`wh_ratio` 与 `ratio_follow` 互斥**（官方 Edit 契约要求「一个非空另一个必须是空字符串」；
@@ -291,7 +291,7 @@ MOSS 的改图走**社区 edit LoRA + 原生节点**，不是 Qwen 的编码器�
 参考图缩放到与采样画布同尺寸后再编码。用法与 Qwen 完全相同：
 
 ```text
-qwen_image_edit(prompt = <成品修改指令>, images = ["D:\\pictures\\cup.png"], comfyModel 由插件配置为 "moss-sft")
+image_forge_edit(prompt = <成品修改指令>, images = ["D:\\pictures\\cup.png"], comfyModel 由插件配置为 "moss-sft")
 ```
 
 - **前置**：LoRA 必须在 ComfyUI 的 `models/loras/` 里（本机装载脚本见
@@ -312,14 +312,14 @@ qwen_image_edit(prompt = <成品修改指令>, images = ["D:\\pictures\\cup.png"
 
 ### MOSS-Image 的布局控制（`layout`，仅 `comfyModel: "moss-sft"`）
 
-`qwen_image_generate` 的 `layout` 参数把布局编辑器导出的 **compiled JSON** 作为 MOSS 的
+`image_forge_generate` 的 `layout` 参数把布局编辑器导出的 **compiled JSON** 作为 MOSS 的
 **正向编码文本**：MOSS 的布局 prompt 本来就是这段 JSON（原生 `MOSSImageLayoutPrompt` 节点的输出
 就是 `{summary:{caption},items,bbox_coord_space:"abs_centralized",bbox_format:"yxyx"}`），
 官方模板把它直接喂给正向 `CLIPTextEncode`。插件在本地完成同一份编译，所以布局通路只换一个
 文本值，**不注入任何额外节点**。
 
 ```text
-qwen_image_generate(
+image_forge_generate(
   prompt  = <整图描述：布局 summary.caption，工具会把它与布局一起校验>,
   layout  = <布局编辑器「导出 compiled」原文（abs_centralized / yxyx）>,
   wh_ratio = "1:1",   // 或 width/height，需与布局 draft 的坐标空间一致
@@ -342,13 +342,13 @@ qwen_image_generate(
 
 | 工具 | 说明 |
 |---|---|
-| `qwen_image_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`size_tier`（`1.5mp` 默认 / `2k` 官方 4.2MP 表）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`preset`、`board`（画板 id/名字，**省略就新建**，见「画板」一节）、`layout`（MOSS 专用：布局编辑器导出的 compiled JSON，见「MOSS-Image 的布局控制」）、以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见[配置](configuration.md)） |
-| `qwen_image_edit` | **参考图编辑（图生图）**。`prompt`（成品修改指令，必填）、`images`（1–10 张绝对路径或 `data:image/…;base64,…`，必填，按序对应 `<image1>`…）、`ratio_follow`（画布跟随某张参考图的宽高比；`image1`… 或该图在 `images` 里的原字符串）、`wh_ratio`（**与 `ratio_follow` 互斥**）、`size_tier`、`width`/`height`、`steps`、`seed`、`count`、`preset`（默认 `edit`）、`board`（改图通常传参考图所在画板的 id） |
-| `qwen_image_status` | **只读**体检：**本机 ComfyUI 是否在跑**（探了哪几个端口、三个权重能不能枚举到、显卡型号与显存余量）、输出目录能否写。不产图、不写盘、不改配置，也不拉起或杀掉任何进程 |
+| `image_forge_generate` | 出图主入口。`prompt`（成品，必填）、`wh_ratio`（一等参数，官方 7 档）、`size_tier`（`1.5mp` 默认 / `2k` 官方 4.2MP 表）、`width`/`height`（可选覆盖）、`steps`、`seed`、`count`(1–4)、`preset`、`board`（画板 id/名字，**省略就新建**，见「画板」一节）、`layout`（MOSS 专用：布局编辑器导出的 compiled JSON，见「MOSS-Image 的布局控制」）、以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见[配置](configuration.md)） |
+| `image_forge_edit` | **参考图编辑（图生图）**。`prompt`（成品修改指令，必填）、`images`（1–10 张绝对路径或 `data:image/…;base64,…`，必填，按序对应 `<image1>`…）、`ratio_follow`（画布跟随某张参考图的宽高比；`image1`… 或该图在 `images` 里的原字符串）、`wh_ratio`（**与 `ratio_follow` 互斥**）、`size_tier`、`width`/`height`、`steps`、`seed`、`count`、`preset`（默认 `edit`）、`board`（改图通常传参考图所在画板的 id） |
+| `image_forge_status` | **只读**体检：**本机 ComfyUI 是否在跑**（探了哪几个端口、三个权重能不能枚举到、显卡型号与显存余量）、输出目录能否写。不产图、不写盘、不改配置，也不拉起或杀掉任何进程 |
 
-排障顺序：先 `qwen_image_status`，`next_steps` 非空就照着那句话做。
+排障顺序：先 `image_forge_status`，`next_steps` 非空就照着那句话做。
 
-### `qwen_image_status` 返回什么
+### `image_forge_status` 返回什么
 
 ```jsonc
 {

@@ -1,6 +1,6 @@
 /**
  * Live acceptance for the reference-image edit path: the real ComfyUI, driven
- * through `qwen_image_edit` exactly as a session would.
+ * through `image_forge_edit` exactly as a session would.
  *
  * This is **not** part of `npm test`: it needs this machine's ComfyUI with the
  * Qwen-Image weights loaded and a GPU with room for one ~1.5 MP edit. Everything
@@ -142,7 +142,7 @@ async function editAndReport(label, forge, args) {
   console.log(`\n===== ${label} =====`)
   console.log('args:', JSON.stringify({ ...args, prompt: `${PROMPT.slice(0, 24)}…` }))
   const started = Date.now()
-  const result = await forge.run('qwen_image_edit', { ...args, prompt: PROMPT })
+  const result = await forge.run('image_forge_edit', { ...args, prompt: PROMPT })
   const elapsed = Date.now() - started
   console.log(
     'result:',
@@ -200,6 +200,6 @@ await editAndReport('ComfyUI · ratio_follow image1 of a 2048x1152 reference', f
   preset: 'live-comfy-wide',
 })
 
-const status = await forge.run('qwen_image_status', {})
+const status = await forge.run('image_forge_status', {})
 console.log('\nstatus:', JSON.stringify({ comfyui: status.comfyui, output: status.output }, null, 2))
 await forge.dispose()

@@ -233,7 +233,7 @@ test('a MOSS edit reaches /prompt with the LoRA, the native encode nodes and the
       timeoutMs: 30_000,
     })
     const reference = referenceFile(outputDir, 'ref.png', 1024, 1024)
-    const result = await run(tools, 'qwen_image_edit', {
+    const result = await run(tools, 'image_forge_edit', {
       prompt: '只把标题换成「夏日特惠」，其余保持原样。',
       images: [reference],
       seed: 42,
@@ -353,7 +353,7 @@ test('a MOSS edit wires every reference: two uploads, two slots, one canvas', as
     // is conditioning only, and must still be uploaded and scaled to that canvas.
     const first = referenceFile(outputDir, 'one.png', 1024, 1024)
     const second = referenceFile(outputDir, 'two.png', 1024, 768)
-    const result = await run(tools, 'qwen_image_edit', {
+    const result = await run(tools, 'image_forge_edit', {
       prompt: '把两张图里的主体合并成一张海报。',
       images: [first, second],
       seed: 7,
@@ -396,7 +396,7 @@ test('the official MOSS register reaches the edit sampler too', async () => {
       timeoutMs: 30_000,
     })
     const reference = referenceFile(outputDir, 'ref.png', 1024, 1024)
-    const result = await run(tools, 'qwen_image_edit', { prompt: '把背景换成黄昏。', images: [reference], seed: 11 })
+    const result = await run(tools, 'image_forge_edit', { prompt: '把背景换成黄昏。', images: [reference], seed: 11 })
     const sampler = comfy.state.graph['9'].inputs
     console.log('MOSS edit official sampler:', JSON.stringify(sampler))
     // One profile, one sampling policy: text-to-image and edit run the same

@@ -246,7 +246,7 @@ test('a fake ComfyUI edit: references uploaded, graph wired, image written', asy
       timeoutMs: 20_000,
     })
 
-    const result = await run(tools, 'qwen_image_edit', {
+    const result = await run(tools, 'image_forge_edit', {
       prompt: '把整幅画面改成黄昏色调，其余保持不变。',
       images: [widePath, squarePath],
       ratio_follow: 'image1',
@@ -323,7 +323,7 @@ test('with neither ratio nor size the canvas follows the first reference by defa
   try {
     const path = fx.ref('exact.png', makePng(1664, 928))
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
-    const result = await run(tools, 'qwen_image_edit', { prompt: '只把标题换成「夏日特惠」。', images: [path] })
+    const result = await run(tools, 'image_forge_edit', { prompt: '只把标题换成「夏日特惠」。', images: [path] })
     console.log('defaulted ratio_follow:', JSON.stringify({ ratio_follow: result.ratio_follow, defaulted: result.ratio_follow_defaulted, size: result.size, deviation: result.ratio_deviation_percent }))
     assert.equal(result.ratio_follow, 'image1')
     assert.equal(result.ratio_follow_defaulted, true)
@@ -349,17 +349,17 @@ test('ratio_follow also accepts the path (or data URI) that images[] carried', a
     const square = fx.ref('square.png', makePng(1200, 1200))
     const wide = fx.ref('wide.png', makePng(2048, 1152))
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
-    const result = await run(tools, 'qwen_image_edit', { prompt: '把第二张图的天空换到第一张图上。', images: [square, wide], ratio_follow: wide.toUpperCase() })
+    const result = await run(tools, 'image_forge_edit', { prompt: '把第二张图的天空换到第一张图上。', images: [square, wide], ratio_follow: wide.toUpperCase() })
     console.log('ratio_follow by path ->', JSON.stringify({ followed: result.ratio_follow_image, size: result.size }))
     assert.equal(result.ratio_follow, 'image2', 'the path resolves to the reference it matches, not to image1')
     assert.deepEqual(result.ratio_follow_image, { index: 2, source: wide, size: { width: 2048, height: 1152 } })
     assert.deepEqual(result.size, { width: 1664, height: 928 })
     await assert.rejects(
-      run(tools, 'qwen_image_edit', { prompt: 'x', images: [square], ratio_follow: 'C:\\nope\\other.png' }),
+      run(tools, 'image_forge_edit', { prompt: 'x', images: [square], ratio_follow: 'C:\\nope\\other.png' }),
       /matches none of the 1 reference images/,
     )
     await assert.rejects(
-      run(tools, 'qwen_image_edit', { prompt: 'x', images: [square], ratio_follow: 'image3' }),
+      run(tools, 'image_forge_edit', { prompt: 'x', images: [square], ratio_follow: 'image3' }),
       /points at reference image 3, but this call carries 1/,
     )
   } finally {
@@ -377,7 +377,7 @@ test('wh_ratio and ratio_follow together are refused before any backend is touch
   const fx = fixture('forge-edit-exclusive')
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
-    const error = await failure(tools, 'qwen_image_edit', {
+    const error = await failure(tools, 'image_forge_edit', {
       prompt: '把背景换成雪夜。',
       images: [fx.ref('a.png', makePng(256, 256))],
       wh_ratio: '16:9',
@@ -413,7 +413,7 @@ test('every unusable reference is refused by position, never dropped', async () 
       { name: 'blank entry', images: ['   '], match: /images\[0\] must be a non-empty string/ },
     ]
     for (const scenario of cases) {
-      const error = await failure(tools, 'qwen_image_edit', { prompt: 'x', images: scenario.images })
+      const error = await failure(tools, 'image_forge_edit', { prompt: 'x', images: scenario.images })
       console.log(`${scenario.name} -> ${error.message.split('\n')[0]}`)
       assert.ok(error instanceof Error, `${scenario.name} must reject`)
       assert.match(error.message, scenario.match, `${scenario.name} message`)
@@ -436,7 +436,7 @@ test('editing runs on ComfyUI only, and the failure names the remedy', async () 
     // No ComfyUI anywhere: the error must name what it probed and point at the
     // deployment document, never at a backend that no longer exists.
     const down = register({ comfyEndpoint: '', comfyPorts: '1', timeoutMs: 5000, outputDir: fx.outputDir })
-    const error = await failure(down, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('a.png', makePng(256, 256))] })
+    const error = await failure(down, 'image_forge_edit', { prompt: 'x', images: [fx.ref('a.png', makePng(256, 256))] })
     console.log('edit with ComfyUI down:\n' + error.message)
     assert.match(error.message, /comfyui backend: 没找到在跑的 ComfyUI/)
     assert.match(error.message, /docs\/comfyui-deployment\.md/)
@@ -445,7 +445,7 @@ test('editing runs on ComfyUI only, and the failure names the remedy', async () 
     const comfy = await startFakeComfy({ rendered: makePng(992, 992) })
     try {
       const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
-      const result = await run(tools, 'qwen_image_edit', { prompt: 'x', images: [fx.ref('b.png', makePng(600, 600))] })
+      const result = await run(tools, 'image_forge_edit', { prompt: 'x', images: [fx.ref('b.png', makePng(600, 600))] })
       console.log('edit ->', JSON.stringify({ backend: result.backend }))
       assert.equal(result.backend, 'comfyui')
       assert.equal(result.api_skipped, undefined, 'the removed cloud-routing note must not come back')
@@ -471,7 +471,7 @@ test('a full-size canvas edits fine over ComfyUI, with no gate in between', asyn
       comfyEndpoint: comfy.endpoint,
       outputDir: fx.outputDir,
     })
-    const result = await run(tools, 'qwen_image_edit', {
+    const result = await run(tools, 'image_forge_edit', {
       prompt: '把背景换成雪夜。',
       images: [fx.ref('a.png', makePng(256, 256))],
       // 1248×1248 is the 1:1 default canvas — the largest one this plugin asks
@@ -501,7 +501,7 @@ test('every reference is uploaded for an edit, and text-to-image uploads none', 
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir: fx.outputDir })
     const square = makePng(512, 512)
     const wide = makePng(2048, 1152)
-    const result = await run(tools, 'qwen_image_edit', {
+    const result = await run(tools, 'image_forge_edit', {
       prompt: '把参考图里的招牌文字改成「夏日特惠」。',
       images: [fx.ref('wide.png', wide), fx.ref('square.png', square)],
       ratio_follow: 'image2',
@@ -525,7 +525,7 @@ test('every reference is uploaded for an edit, and text-to-image uploads none', 
 
     // Text-to-image must not grow an upload: the graph has no LoadImage at all.
     const uploadsBefore = comfy.state.uploads.length
-    const generated = await run(tools, 'qwen_image_generate', { prompt: 'A brass compass.', wh_ratio: '1:1' })
+    const generated = await run(tools, 'image_forge_generate', { prompt: 'A brass compass.', wh_ratio: '1:1' })
     assert.equal(generated.backend, 'comfyui')
     assert.equal(comfy.state.uploads.length, uploadsBefore, 'a text-to-image call must not upload anything')
     const generatedClasses = Object.values(comfy.state.graph).map((node) => node.class_type)

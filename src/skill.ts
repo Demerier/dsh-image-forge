@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SkillRegistration } from '@deepseek-ai/dsh-skill'
 
 /** Skill name shown in the catalog and used when routing. */
-export const SKILL_NAME = 'qwen-image-forge'
+export const SKILL_NAME = 'image-forge'
 
 /** Short catalog blurb; the routing keywords live here, not in the body. */
 const SKILL_DESCRIPTION =

@@ -197,7 +197,7 @@ function portsOf(value: string | readonly number[]): number[] {
  * Translate the plugin config into environment options.
  *
  * The port list goes through `comfyui.ts`'s own parser, so a typo in
- * `comfyPorts` behaves here exactly as it does in `qwen_image_status`.
+ * `comfyPorts` behaves here exactly as it does in `image_forge_status`.
  */
 export function environmentOptionsOf(settings: EnvironmentSettings): EnvironmentOptions {
   return {
@@ -1481,7 +1481,7 @@ export async function runInstallAutomation(deps: EnvironmentDeps = {}): Promise<
 }
 
 /** The tool name the environment layer registers. Never `qwen_image_env`. */
-export const ENVIRONMENT_TOOL_NAME = 'qwen_image_setup'
+export const ENVIRONMENT_TOOL_NAME = 'image_forge_setup'
 
 /** One-line, user-facing summary of a status report. */
 function summarize(status: EnvironmentStatus): string {

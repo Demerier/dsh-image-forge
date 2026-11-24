@@ -122,7 +122,7 @@ jobs:
 
             ## Notes
 
-            - Qwen-Image **weights are not bundled** (research license); run `qwen_image_env action:"fetch-weights"` or the settings-page one-click deploy.
+            - Model **weights are not bundled** (their own licenses apply); run `image_forge_setup action:"download"` or use the workbench download control.
             - Plugin code is MIT. See `README.md` and `docs/license-and-limits.md`.
           files: |
             ${{ steps.pack.outputs.tarball }}

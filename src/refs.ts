@@ -1,7 +1,7 @@
 /**
  * Reference images for the edit path.
  *
- * `qwen_image_edit` accepts, for each entry, either an absolute path or a
+ * `image_forge_edit` accepts, for each entry, either an absolute path or a
  * `data:image/…;base64,…` URI. This module turns that list into bytes plus the
  * pixel size, and it is the only place that decides whether a list is usable —
  * a reference that cannot be read is an error that names its position, never a

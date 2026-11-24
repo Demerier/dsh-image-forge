@@ -40,7 +40,7 @@ export interface WrittenImage {
  * @returns an ASCII-safe prefix; multi-byte-only input collapses to the
  *   fallback rather than producing an untypable name.
  */
-export function sanitizePrefix(raw: string | undefined, fallback = 'qwen'): string {
+export function sanitizePrefix(raw: string | undefined, fallback = 'forge'): string {
   const cleaned = (raw ?? '')
     .trim()
     .replace(/[^A-Za-z0-9._-]+/g, '-')

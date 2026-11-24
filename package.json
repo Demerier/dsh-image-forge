@@ -1,7 +1,7 @@
 {
   "name": "dsh-image-forge",
-  "version": "0.3.0",
-  "description": "DeepSeek Harness plugin: Qwen-Image 文生图 / 参考图编辑，把官方提示词契约的 wh_ratio 做成一等参数；仅本机 ComfyUI 后端（零下载、零转换），成果按画板归档。",
+  "version": "0.4.0",
+  "description": "DSH 本机图像生成 / 参考图编辑插件：通过 ComfyUI 支持 Qwen-Image 2.1 与 MOSS-Image，模型由 comfyModel 选择；成果按画板归档。",
   "license": "MIT",
   "author": "Demerier",
   "homepage": "https://github.com/Demerier/dsh-image-forge#readme",
@@ -19,6 +19,7 @@
     "cordis",
     "qwen",
     "qwen-image",
+    "moss-image",
     "text-to-image",
     "image-edit",
     "image-generation",
@@ -55,6 +56,7 @@
     "docs/local-install.md",
     "docs/release-notes-0.2.0.md",
     "docs/release-notes-0.3.0.md",
+    "docs/release-notes-0.4.0.md",
     "docs/testing.md",
     "docs/usage-reference.md",
     "docs/images/repo-banner.png",
@@ -65,7 +67,7 @@
   ],
   "scripts": {
     "build": "tsdown && tsdown -c tsdown.client.config.ts",
-    "test": "node test/ratio.test.mjs && node test/surface.test.mjs && node test/comfyui-e2e.test.mjs && node test/edit-e2e.test.mjs && node test/moss-edit.test.mjs && node test/settings.test.mjs && node --test-force-exit test/studio.test.mjs && node test/canvas-flow-model.test.mjs && node test/studio-canvas.test.mjs && node test/boards.test.mjs && node test/board-migration.test.mjs && node test/output.test.mjs && node test/package-contents.test.mjs && node test/studio-file-route.test.mjs && node test/studio-log-route.test.mjs && node test/model-profiles.test.mjs && node test/progress.test.mjs && node test/runs.test.mjs && node test/environment.test.mjs && node test/layout-editor.test.mjs && node test/studio-lineage.test.mjs && node test/canvas-interactions.test.mjs && node test/canvas-connections.test.mjs && node test/canvas-export.test.mjs && node test/moss-layout.test.mjs && node test/mcp-backend.test.mjs && node test/workbench-tabs.test.mjs && node test/workbench-workspace.test.mjs && node test/workbench-shell.test.mjs && node test/docs-consistency.test.mjs && node test/bundle-xyflow.test.mjs",
+    "test": "node test/ratio.test.mjs && node test/surface.test.mjs && node test/comfyui-e2e.test.mjs && node test/edit-e2e.test.mjs && node test/moss-edit.test.mjs && node test/settings.test.mjs && node --test-force-exit test/studio.test.mjs && node test/canvas-flow-model.test.mjs && node test/studio-canvas.test.mjs && node test/boards.test.mjs && node test/board-migration.test.mjs && node test/output.test.mjs && node test/package-contents.test.mjs && node test/studio-file-route.test.mjs && node test/studio-log-route.test.mjs && node test/model-profiles.test.mjs && node test/progress.test.mjs && node test/runs.test.mjs && node test/environment.test.mjs && node test/layout-editor.test.mjs && node test/studio-lineage.test.mjs && node test/canvas-interactions.test.mjs && node test/canvas-connections.test.mjs && node test/canvas-export.test.mjs && node test/moss-layout.test.mjs && node test/mcp-backend.test.mjs && node test/workbench-tabs.test.mjs && node test/workbench-workspace.test.mjs && node test/workbench-shell.test.mjs && node test/docs-consistency.test.mjs && node test/bundle-xyflow.test.mjs && node test/blind-pe.test.mjs",
     "test:live": "node test/live-generate-e2e.mjs",
     "test:live:edit": "node test/live-edit-e2e.mjs",
     "comfy": "node scripts/start-comfyui.mjs",
@@ -74,7 +76,18 @@
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm test",
     "blind:turbo": "node test/blind-turbo.mjs",
-    "blind:page": "node test/blind-regen.mjs && node test/blind-score-check.mjs"
+    "blind:page": "node test/blind-regen.mjs && node test/blind-score-check.mjs",
+    "blind:pe": "node test/blind-pe.mjs",
+    "blind:pe:audit": "node test/blind-pe.mjs audit",
+    "blind:pe:generate": "node test/blind-pe.mjs generate",
+    "blind:pe:score": "node test/blind-pe.mjs score",
+    "blind:pe:check": "node test/blind-pe.mjs check",
+    "blind:pe2": "node test/blind-pe.mjs audit --round v2",
+    "blind:pe2:audit": "node test/blind-pe.mjs audit --round v2",
+    "blind:pe2:generate": "node test/blind-pe.mjs generate --round v2",
+    "blind:pe2:score": "node test/blind-pe.mjs score --round v2",
+    "blind:pe2:check": "node test/blind-pe.mjs check --round v2",
+    "blind:pe2:analyze": "node test/blind-pe.mjs analyze --round v2"
   },
   "dsh": {
     "bundle": {

@@ -62,6 +62,7 @@ const SHIPPED = [
   'docs/local-install.md',
   'docs/release-notes-0.2.0.md',
   'docs/release-notes-0.3.0.md',
+  'docs/release-notes-0.4.0.md',
   'docs/testing.md',
   'docs/usage-reference.md',
   'docs/images/repo-banner.png',

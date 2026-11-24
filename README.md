@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
 
-在 DeepSeek Harness 里生图、改图：底模是本机的 **Qwen-Image 2.1** 或 **MOSS-Image**，由设置页的 `comfyModel` 选。当前发布版本：`0.3.0`（[发布说明](docs/release-notes-0.3.0.md)）。
+在 DeepSeek Harness 里生图、改图：底模是本机的 **Qwen-Image 2.1** 或 **MOSS-Image**，由设置页的 `comfyModel` 选。当前发布版本：`0.4.0`（[发布说明](docs/release-notes-0.4.0.md)）。
 
 说「画一张 16:9 的夏日饮料海报」，出图；丢一张客厅照片说「改成晚上的」，改图。比例、像素由插件换算，不用你查表；成果按**画板**归档，工作台里能看、能摆、能接着改。
 
@@ -79,7 +79,7 @@ node scripts/start-comfyui.mjs --doctor  # 只看缺什么：安装、torch、�
 
 模型会把它改写成 Qwen 提示词契约再调工具，图片落盘并内联显示在回复里。也可以在左侧边栏打开「图像工作台」全局面板，手写提示词点「生成」（出图入口在面板里，设置页只放配置）。
 
-**验收标准**：对话里能看到 `qwen_image_generate` / `qwen_image_edit` / `qwen_image_status` 三个工具；设置页左侧出现「生图配置」。跑不通先调 `qwen_image_status`，它会点名缺什么。
+**验收标准**：对话里能看到 `image_forge_generate` / `image_forge_edit` / `image_forge_status` / `image_forge_setup` 四个工具；设置页左侧出现「生图配置」。跑不通先调 `image_forge_status`，它会点名缺什么。
 
 本机改代码时：
 
@@ -123,7 +123,7 @@ dsh plugin --profile <profile> add <本仓库绝对路径>
 给了参考图就是改图任务。
 
 ```text
-qwen_image_edit(prompt = <改图指令>, images = ["D:\\pictures\\room.png"], ratio_follow = "image1")
+image_forge_edit(prompt = <改图指令>, images = ["D:\\pictures\\room.png"], ratio_follow = "image1")
 ```
 
 画布怎么定，三选一：
@@ -170,11 +170,14 @@ ComfyUI 没起来时工作台照样打开，状态行会写清连接失败的原
 
 | 工具 | 用途 | 主要参数 |
 |---|---|---|
-| `qwen_image_generate` | 出图 | `prompt`、`wh_ratio`、`width`/`height`、`steps`、`seed`、`count`、`preset`、`board` |
-| `qwen_image_edit` | 改图 | `prompt`、`images`（1–10 张）、`ratio_follow` 或 `wh_ratio`、`board` |
-| `qwen_image_status` | 检查环境 | 无 |
+| `image_forge_generate` | 出图 | `prompt`、`wh_ratio`、`width`/`height`、`steps`、`seed`、`count`、`preset`、`board` |
+| `image_forge_edit` | 改图 | `prompt`、`images`（1–10 张）、`ratio_follow` 或 `wh_ratio`、`board` |
+| `image_forge_status` | 检查环境 | `timeoutMs` |
+| `image_forge_setup` | 环境管理 | `action`（`status` / `start` / `stop` / `install` / `download`）、`timeoutMs`、`confirm` |
 
-不确定为什么跑不通时，先跑 `qwen_image_status`。它会告诉你 ComfyUI 在不在、三个权重能不能识别、显卡剩多少显存、输出目录能不能写。不产图、不写盘。
+不确定为什么跑不通时，先跑 `image_forge_status`。它会告诉你 ComfyUI 在不在、当前模型的三个权重能不能识别、显卡剩多少显存、输出目录能不能写。不产图、不写盘。
+
+需要拉起、停止、安装引导或下载缺失权重时用 `image_forge_setup`；下载默认只出计划，必须显式传 `confirm: true` 才会写盘。
 
 `board` 不传时会新建一块画板，把返回的 `board.id` 传回后续调用就能归到同一块。同一组图继续出图 / 改图时记得传——新图和它的来源才会落在同一块画布上。
 
@@ -247,5 +250,6 @@ ComfyUI 后端与工作流占位符协议（`{{prompt}}` / `{{seed}}` / `{{image
 | [docs/local-install.md](docs/local-install.md) | 开发：本机构建、打包、tarball 安装 |
 | [docs/testing.md](docs/testing.md) | 开发：怎么跑测试 |
 | [docs/client-bundle.md](docs/client-bundle.md) | 开发：改客户端和设置页 UI |
-| [docs/release-notes-0.3.0.md](docs/release-notes-0.3.0.md) | 当前 0.3.0 的能力、执行后端与发布边界 |
+| [docs/release-notes-0.4.0.md](docs/release-notes-0.4.0.md) | 当前 0.4.0：工具/技能去 Qwen 绑定与命名迁移 |
+| [docs/release-notes-0.3.0.md](docs/release-notes-0.3.0.md) | 0.3.0 的能力、执行后端与发布边界 |
 | [docs/release-notes-0.2.0.md](docs/release-notes-0.2.0.md) | 0.2.0 的历史迁移说明 |

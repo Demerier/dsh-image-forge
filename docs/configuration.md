@@ -149,7 +149,7 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
   而 `nvidia-smi --query-compute-apps` **列不出占用进程**。只有「卡被别的程序挤占、这一轮必须立刻回收显存」时，
   才让 ComfyUI 自己交回：`POST /free` + `{"unload_models":false,"free_memory":true}`——`free_memory=true` 清 VRAM，
   `unload_models=true` 会连 RAM 里的模型一起清、下一轮被迫重载，所以**别在轮次之间调**。插件**不会再替你发**
-  这个请求（它不碰别人的进程），只在 `qwen_image_status` 里把显存数字报出来，由你决定。
+  这个请求（它不碰别人的进程），只在 `image_forge_status` 里把显存数字报出来，由你决定。
 - **权重档位选择（8 GB 卡口径）**：插件按 `/object_info` 枚举到的**文件名打分**，不硬编码文件名。
   文本编码器优先 `qwen3vl_8b_w4a8.safetensors`（≈5.88 GiB，比 `int8_convrot` 的 8.71 GiB 省 ~2.8 GiB；
   8 GB 卡上它是**驻 RAM / 按需 offload**，不是常驻显存），没有 w4a8 才回落 `qwen3vl_8b_int8_convrot`，
@@ -159,7 +159,7 @@ lapvar **1019 → 970**、hf_frac **0.0317 → 0.0279**（高频占比变小 = �
   `QwenImage21Cache`（`device=auto`、`dtype=default`），把文本/参考图 token 的前缀只算一次、全步复用；
   官方说明**改图的大部分加速来自这里**。插件已把它接进 base / turbo 的 t2i 与 edit 四张图。它需要
   **ComfyUI ≥ 0.37.0**：老版本缺这个节点时插件会**自动跳过并提示**（图照常出，只是没有前缀缓存），
-  不会提交一张必失败的工作流；`qwen_image_status` 会把 `/system_stats` 的版本与要求对比，给出
+  不会提交一张必失败的工作流；`image_forge_status` 会把 `/system_stats` 的版本与要求对比，给出
   `qwen_cache.version_satisfied`（版本读不到时为 `null`，不猜）。`gpu` 档有已知损坏 bug
   （ComfyUI #16879 / #16900），所以固定用 `auto` 与无损的 `default` dtype。
   **加速数字不写死**：开/关 × t2i/edit × turbo 的 A/B 由 X04 实验补齐，本表不编造。

@@ -1,6 +1,6 @@
 /**
  * Live smoke test for the ComfyUI backend: one 1:1 text-to-image call, through
- * `qwen_image_generate` exactly as a session would.
+ * `image_forge_generate` exactly as a session would.
  *
  * Not part of `npm test` — it needs a running ComfyUI with the Qwen-Image
  * weights. It is the quickest way to answer "is this deployment usable?" after
@@ -37,14 +37,14 @@ plugin.apply(
   },
 )
 
-const status = await tools.get('qwen_image_status').execute({}, { signal: new AbortController().signal })
+const status = await tools.get('image_forge_status').execute({}, { signal: new AbortController().signal })
 console.log('status:', JSON.stringify({ comfyui: status.comfyui, output: status.output }, null, 2))
 if (status.comfyui?.reachable !== true || status.comfyui?.models?.ok !== true) {
   console.error('\nComfyUI is not ready — see docs/comfyui-deployment.md.')
   process.exitCode = 1
 } else {
   const started = Date.now()
-  const result = await tools.get('qwen_image_generate').execute(
+  const result = await tools.get('image_forge_generate').execute(
     { prompt: PROMPT, wh_ratio: '1:1', seed: 42, preset: `live-${MODEL}` },
     { signal: new AbortController().signal },
   )

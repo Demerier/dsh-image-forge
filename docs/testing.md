@@ -7,14 +7,14 @@ pnpm build
 pnpm test
 ```
 
-**31 个文件 / 644 个用例**（2026-11-23 计数），全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重
+**32 个文件 / 651 个用例**（2026-11-24 计数），全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重
 （ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / moss-edit 3 / settings 60 /
 studio 118 / canvas-flow-model 48 / studio-canvas 36 / boards 30 / board-migration 8 /
 output 3 / package-contents 4 / studio-file-route 7 / studio-log-route 3 / model-profiles 7 /
 progress 8 / runs 7 / environment 41 / layout-editor 25 / studio-lineage 5 /
 canvas-interactions 27 / canvas-connections 21 / canvas-export 6 / moss-layout 9 /
 mcp-backend 22 / workbench-tabs 30 / workbench-workspace 7 / workbench-shell 28 / bundle-xyflow 10 /
-docs-consistency 5）。
+docs-consistency 5 / blind-pe 7）。
 
 布局编辑器与 MOSS 布局测试使用 `test/fixtures/layout/` 中的公开 JSON 夹具；`verify/` 只保留本机私有证据，CI 不读取它。
 
@@ -25,6 +25,43 @@ docs-consistency 5）。
 前端观感的**布局**可以用 `node test/dev/preview/frontend.mjs` 生成 `.preview/client-preview.html`
 （真实 `CLIENT_CSS` + 与 `client.ts` 同构的 DOM），再用无头浏览器看窄栏/宽栏；它不是
 `pnpm test` 的一部分，也**不能替代**在真实 DSH web 客户端里过一遍设置页。
+
+### PE 盲测 v1（开发工具，不随包发布）
+
+PE 盲测脚本直接请求本机 ComfyUI，不经过插件工具或画板；图片和答案只写入
+`.blindtest/pe-v1/`。固定流程是：
+
+```powershell
+pnpm blind:pe:audit
+pnpm blind:pe:generate
+pnpm blind:pe:score -- --reviewer reviewer-1
+pnpm blind:pe:check
+```
+
+`generate` 会先用官方最小分支 `CLIPLoader → TextGenerateV2 → PreviewAny` 生成并冻结提示词，随后才生成评分图。v1 为 3 个通用题 + 4 个 IP 角色，共 42 张；v2 为 6 个通用题 × 2 seeds，共 96 张，不包含 IP。MOSS 评分图只接收冻结后的最终 prompt，不在评分工作流里重复跑增强节点。
+
+v2 使用独立命令和输出目录：
+
+```powershell
+pnpm blind:pe2:audit
+pnpm blind:pe2:generate
+pnpm blind:pe2:score -- --reviewer reviewer-1
+pnpm blind:pe2:score -- --reviewer reviewer-2
+pnpm blind:pe2:check
+pnpm blind:pe2:analyze -- --reviewer reviewer-1 --input .blindtest/pe-v2/reviewers/reviewer-1/rankings.txt
+```
+
+v2 的每道题以两个独立“样次”出现；评审页不会显示 seed。把页面导出的排名文本保存为对应评审目录的 `rankings.txt` 后，`analyze` 会输出逐组名次、来源平均名次、归一化平均名次、组内第一率和两个 seed 的名次波动。
+
+`score` 每位评审人生成 `main-images` 主评审页和 `ip-images` 附加题页；不再生成
+提示词评审页。人类评审只依据页面上的原始需求和图片打分，每个图片组都可填写意见描述，
+每组必须完成唯一排名后才能导出。来源、模型、最终 prompt 与答案映射只留在评审目录的 `key.json`。
+IP 只作尝试性附加题，主结论以通用题目为准。
+
+`check` 验证任务矩阵、冻结提示词、随机文件名、PNG 尺寸、工作流参数、答案映射以及
+HTML 不含来源或最终 prompt 泄露。`test/blind-pe.test.mjs` 用假 ComfyUI 覆盖 Qwen、MOSS、
+TextGenerateV2 文本抓取、42 张图片映射与页面导出。单个 seed 只形成方向性结论，
+建议 3 位评审人分别完成页面，再按多数排名和题材一致性报告。
 
 ## 每个文件钉住了什么
 
@@ -52,12 +89,12 @@ docs-consistency 5）。
 - **客户端产物断言**：三个工具都进了 `tool.call.toolview`、`qwen_image_env` **已从 bundle 里消失**、
   样式注入与窄栏容器查询在 bundle 里、数字控件带单位后缀、label 绑到控件、tabs 暴露成 `role=tab`。
 - **一键部署卡片已删除**：`dsh-image-forge-deploy` / `一键部署` / `127.0.0.1:8411` 都不许再出现在 bundle 里。
-- **T14 新方向断言**：随包散文面必须写到受管入口 `qwen_image_setup`、下载判据 `/object_info`、Desktop 模型根 `ComfyUI-Shared` 与授权门槛 `computer use`；这是「新能力必须写进散文面」，不是旧口径回魂。
+- **T14 新方向断言**：随包散文面必须写到受管入口 `image_forge_setup`、下载判据 `/object_info`、Desktop 模型根 `ComfyUI-Shared` 与授权门槛 `computer use`；这是「新能力必须写进散文面」，不是旧口径回魂。
 
 ### `test/surface.test.mjs`（13）
 
 `lib/index.js` 的四个导出、**四个**工具名（`generate` / `edit` / `status` / `setup`）、出图/改图**不带 `backend` 与 `transparent` 参数**、
-`qwen_image_status` 只收 `timeoutMs`、`qwen_image_setup` 的 action 是 `status/start/stop/install/download` 且 `confirm` 是布尔（T14）、
+`image_forge_status` 只收 `timeoutMs`、`image_forge_setup` 的 action 是 `status/start/stop/install/download` 且 `confirm` 是布尔（T14）、
 schema 里 **10** 个字段齐全且 5 个云端字段绝迹、
 `wh_ratio` enum 与它在 `skill.md` 里被引用的换算表、参考文件绝对路径、以及**compose 后的技能正文**：
 里面必须只剩本机 ComfyUI 一条路、不许再提 `qwen_image_env` / `localReferenceBudget` / `freeComfyBeforeLocalStart` /
@@ -97,7 +134,7 @@ schema 里 **10** 个字段齐全且 5 个云端字段绝迹、
 `/view` 取图 → 落盘**逐字节一致**）、缺文件点名、没在跑时报出探过的端口、
 非回环端点拒绝且**一个请求都不发**、`node_errors` 与 traceback 原文回传、
 ComfyUI 没在跑时**永远走本机**这条唯一路径（报错点名探过的端口并指向部署文档，
-不再提供任何云端补救）、以及 `qwen_image_status` 读到的 `version` / `devices`
+不再提供任何云端补救）、以及 `image_forge_status` 读到的 `version` / `devices`
 （来自 `/system_stats`，不是 `nvidia-smi`）、以及**权重缺失报错里的目录提示按「配置路径自己的风格」拼**——
 Windows 路径出 `…\models\clip\`、POSIX 路径出 `…/models/clip/`，两种风格在任意宿主上都成立
 （曾按 `process.platform` 拼，Windows 本地绿、Linux CI 红）。
@@ -214,20 +251,20 @@ T14 把「零下载 / 一键部署」的旧口径换成了**受管安装 + 按�
 
 | 文件 | 改了什么 | 为什么 |
 |---|---|---|
-| `test/surface.test.mjs` | 「三个工具」→ 四个（含 `qwen_image_setup`）；新增 action 枚举与 `confirm` 断言；描述必须点名 `/object_info` 与 `computer use` | 新能力必须可被契约测到；`qwen_image_env` 旧名仍禁 |
+| `test/surface.test.mjs` | 「三个工具」→ 四个（含 `image_forge_setup`）；新增 action 枚举与 `confirm` 断言；描述必须点名 `/object_info` 与 `computer use` | 新能力必须可被契约测到；`qwen_image_env` 旧名仍禁 |
 | `test/settings.test.mjs` | 保留旧禁项（`dsh-image-forge-deploy` / `一键部署` / `127.0.0.1:8411` / `qwen_image_env` / `DeployStatusPayload`）；新增「随包散文面必须写到受管安装/下载方向」 | 旧字段与旧一键部署卡片**不回魂**；同时新能力不能只活在代码里 |
 | 本文件 | 11 文件/159 → 14 文件/242；补 3 个测试文件章节；`surface` 的字段数 9 → 10 | 计数与实际一致；`schema` 已是 10 个字段 |
 | `test/mcp-backend.test.mjs`（T15 新增） | 19 用例：假 stdio 连接缝覆盖提交/轮询/取图/超时/杀进程树、后端链严格/回退、CLI envelope、隐私（无 `mcpManager`/`mcp__`） | MCP 主通道必须可被契约测到；工具不进对话工具表要机器判定；后端选择走环境变量是刻意的范围裁决 |
 
 口径边界：`qwen_image_env`（旧本地运行时工具）、`一键部署` 卡片、云端 `backend` 仍然**禁止**出现；
-新增的是 `qwen_image_setup` 的受管安装引导与权重下载（只与本机 ComfyUI 通信、只写 Desktop 模型目录）。
+新增的是 `image_forge_setup` 的受管安装引导与权重下载（只与本机 ComfyUI 通信、只写 Desktop 模型目录）。
 
 ## 真机端到端（不在 `pnpm test` 里）
 
 - `test/live-generate-e2e.mjs`：一次 1:1 文生图，打印落盘路径与 IHDR。`FORGE_LIVE_MODEL=turbo` 切权重家族，
   所以这一条同时是「turbo 契约在真卡上成立」的检查。
 - `test/live-edit-e2e.mjs`：两次参考图编辑（默认跟随 `image1`、以及 `ratio_follow`），最后跑一次
-  `qwen_image_status`。需要本机 ComfyUI 在跑、三个权重就位。
+  `image_forge_status`。需要本机 ComfyUI 在跑、三个权重就位。
 
 两者都读插件自己的配置（`comfyEndpoint` / `comfyPorts` / `outputDir`），不额外要求环境变量。
 

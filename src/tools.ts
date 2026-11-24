@@ -1,7 +1,7 @@
 /**
- * The `qwen_image_*` tool surface.
+ * The `image_forge_*` tool surface.
  *
- * `qwen_image_generate` is the only entry point that produces an image, and its
+ * `image_forge_generate` is the only entry point that produces an image, and its
  * first-class `wh_ratio` parameter is the product's reason to exist: the Qwen
  * prompt contract already answers in `wh_ratio` terms, so the caller hands that
  * value straight to the tool instead of translating it into pixels by hand.
@@ -120,21 +120,21 @@ const SIZE_TIER_PARAMETER: ParameterSchemaSpec['size_tier'] = {
     '显式 `width`/`height` 优先于本档；4K 不是一个档（官方明确 4K 丢提示词贴合度）。',
 }
 
-/** Everything `qwen_image_generate` accepts, as one schema reused by validation. */
+/** Everything `image_forge_generate` accepts, as one schema reused by validation. */
 const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   prompt: {
     type: 'string',
     required: true,
     description:
       '成品提示词（已经按 Qwen 提示词契约改写好的那一段描述性散文）。本工具不做改写——' +
-      '把口语需求翻译成契约提示词是 skill `qwen-image-forge` 的职责，改写结果里的 wh_ratio 直接传给本参数旁边的 wh_ratio。',
+      '把口语需求翻译成契约提示词是 skill `image-forge` 的职责，改写结果里的 wh_ratio 直接传给本参数旁边的 wh_ratio。',
   },
   wh_ratio: {
     type: 'string',
     enum: WH_RATIOS,
     description:
       '画幅比（一等参数，官方 7 档）：1:1 / 4:3 / 3:4 / 3:2 / 2:3 / 16:9 / 9:16。' +
-      '本插件按 ~1.5MP 预算换算成 32 对齐的像素尺寸（换算表见 skill `qwen-image-forge` 正文「画幅比与像素」一节），' +
+      '本插件按 ~1.5MP 预算换算成 32 对齐的像素尺寸（换算表见 skill `image-forge` 正文「画幅比与像素」一节），' +
       '因此契约里的 wh_ratio 不需要人工换算成宽高（`size_tier: 2k` 时换成官方 4.2MP 表）。' +
       '省略时用 1:1；给了 width/height 时以 width/height 为准。',
   },
@@ -185,14 +185,14 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
   },
 }
 
-/** Everything `qwen_image_edit` accepts. */
+/** Everything `image_forge_edit` accepts. */
 const EDIT_PARAMETERS: ParameterSchemaSpec = {
   prompt: {
     type: 'string',
     required: true,
     description:
       '成品**修改指令**（已经按 Qwen 改图契约改写好的那一段，一整段、不要换行）。本工具不做改写——' +
-      '把口语需求翻译成改图契约是 skill `qwen-image-forge` 的职责（见 references/edit_rules.md）：' +
+      '把口语需求翻译成改图契约是 skill `image-forge` 的职责（见 references/edit_rules.md）：' +
       '只动点名要改的属性、其余按输入锁住，N ≥ 2 张参考图时用 `<image1>`、`<image2>`… 指代。',
   },
   images: {
@@ -309,7 +309,7 @@ function validateCount(count: number | undefined): number {
  * The DSH tool layer rejects a result whose value does not round-trip through
  * JSON, and an object that still carries `undefined` properties does not:
  * `JSON.stringify` drops the key, so `parse(stringify(x))` is missing it. A
- * real client run of `qwen_image_status` failed exactly that way once
+ * real client run of `image_forge_status` failed exactly that way once
  * (`value is not lossless JSON`) — this helper is the mechanical guarantee
  * that a tool never hands the layer such a value again. `undefined` becomes
  * `null` at every depth; everything else is left alone.
@@ -478,7 +478,7 @@ export interface EditSizeChoice {
   readonly height: number
   /** Which input decided the canvas. */
   readonly sizeSource: 'wh_ratio' | 'explicit-size' | 'ratio_follow'
-  /** Official tier closest to the chosen canvas, for continuity with `qwen_image_generate`. */
+  /** Official tier closest to the chosen canvas, for continuity with `image_forge_generate`. */
   readonly whRatio: string
   /** Signed deviation of the canvas from the ratio that was asked for, in percent. */
   readonly ratioDeviationPercent: number
@@ -500,7 +500,7 @@ export interface EditSizeChoice {
  * `wh_ratio` and `ratio_follow` are mutually exclusive — the prompt contract
  * itself says one must be empty whenever the other is set — so supplying both is
  * an error rather than a silent winner. `width`/`height` stay the plugin-level
- * override they already are for `qwen_image_generate`, which is why they beat
+ * override they already are for `image_forge_generate`, which is why they beat
  * both ratio forms.
  *
  * @param whRatio - fixed ratio, if the caller gave one.
@@ -927,7 +927,7 @@ interface ComfyRunReport {
  */
 export function registerImageForgeTools(ctx: Context, getConfig: () => Config): void {
   ctx.tools.register(defineTool({
-    name: 'qwen_image_generate',
+    name: 'image_forge_generate',
     description:
       '用 Qwen-Image 2.1 或 MOSS-Image 生图（本机 ComfyUI；底模由 `comfyModel` 选择：`qwen21-base` / `qwen21-turbo` 走 Qwen-Image 2.1，`moss-sft` 走 MOSS-Image）。`prompt` 收**成品**提示词（本工具不改写），`wh_ratio` 是**一等参数**：' +
       `直接接受官方契约的 7 档画幅比（${WH_RATIOS.join(' / ')}），插件自己换算成 ${SIZE_MULTIPLE} 对齐的像素尺寸——` +
@@ -1107,7 +1107,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
   }))
 
   ctx.tools.register(defineTool({
-    name: 'qwen_image_edit',
+    name: 'image_forge_edit',
     description:
       '用 Qwen-Image 2.1 做**参考图编辑（图生图）**，在本机 ComfyUI 的官方改图工作流上运行：' +
       '给 1 张或多张参考图 + 一段**成品修改指令**，出改好的图。' +
@@ -1124,7 +1124,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       schema: { type: 'json' },
       render: (_args, value) => renderResultBlocks(value),
     },
-    // Same reasoning as `qwen_image_generate`.
+    // Same reasoning as `image_forge_generate`.
     timeoutMs: getConfig().timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -1145,7 +1145,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
       )
       const count = validateCount(args.count)
       const steps = asInteger(args.steps, 'steps')
-      // Same early validation as `qwen_image_generate`, plus the multi-reference
+      // Same early validation as `image_forge_generate`, plus the multi-reference
       // guard: elevated cfg on a multi-reference edit is the documented artifact case.
       const requestedProfile = resolveProfile(settings.comfyModel)
       const quality = resolveQualityTier(
@@ -1322,7 +1322,7 @@ export function registerImageForgeTools(ctx: Context, getConfig: () => Config): 
   }))
 
   ctx.tools.register(defineTool({
-    name: 'qwen_image_status',
+    name: 'image_forge_status',
     description:
       '后端健康探测：**本机 ComfyUI 是否在跑**（含探测过哪几个端口、当前 `comfyModel` 那个 profile 的三个权重能不能被它的加载器枚举到、' +
       '显卡型号与显存余量），以及输出目录能不能写。不产生任何图片、不写盘、不改配置。排障时先跑它。',

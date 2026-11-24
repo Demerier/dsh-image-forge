@@ -1,0 +1,96 @@
+{
+  "version": "pe-blind-v1",
+  "testDate": "2026-11-24",
+  "outputDir": ".blindtest/pe-v1",
+  "goldFrozenAt": "2026-11-24T00:00:00+08:00",
+  "goldPolicy": "GOLD 在任何优化器输出与生成图产生之前冻结；之后不得回看并修改。",
+  "officialSkill": {
+    "name": "moss-image-prompt-enhancer",
+    "repository": "https://github.com/OpenMOSS/MOSS-Image",
+    "skillPath": "skills/moss-image-prompt-enhancer/SKILL.md",
+    "commit": "6be4453024c5acae9dcd0a191e26ee524e743310",
+    "frozenAt": "2026-11-24T00:00:00+08:00"
+  },
+  "projectSkill": {
+    "name": "image-forge",
+    "repository": "D:/file/qwen生图插件/dsh-image-forge",
+    "entry": "skill.md",
+    "references": ["references/t2i_rules.md", "references/edit_rules.md"],
+    "frozenAt": "2026-11-24T00:00:00+08:00"
+  },
+  "releaseAnchors": {
+    "qwen-image-2.1": "2026-09-23",
+    "moss-image": "2026-10-16"
+  },
+  "freshnessWindowDays": 30,
+  "releaseAnchorWindowDays": 30,
+  "releaseAnchorFallbackWindowDays": 45,
+  "models": {
+    "qwen21-base": {
+      "family": "qwen-image-2.1",
+      "settings": {
+        "steps": 40,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "cfg": 1,
+        "width": 1024,
+        "height": 1024
+      },
+      "weights": {
+        "unet": "qwen_image_2\\.1_(?!turbo).*int8.*safetensors",
+        "clip": "qwen3vl.*int8.*safetensors",
+        "vae": "qwen_image_2\\.1_vae.*safetensors"
+      },
+      "clipType": "qwen_image",
+      "filenamePrefix": "blind-pe-qwen"
+    },
+    "moss-sft": {
+      "family": "moss-image",
+      "settings": {
+        "steps": 25,
+        "sampler": "er_sde",
+        "scheduler": "simple",
+        "cfg": 2.5,
+        "width": 1024,
+        "height": 1024
+      },
+      "weights": {
+        "unet": "moss_image_sft.*int8.*safetensors",
+        "clip": "qwen3\\.5_9b_w4a8_gptq.*safetensors",
+        "vae": "flux2-vae_small.*safetensors"
+      },
+      "clipType": "moss_image",
+      "filenamePrefix": "blind-pe-moss",
+      "negativePrompt": "nsfw, worst quality, bad anatomy, watermark, jpeg artifact"
+    }
+  },
+  "sourceMatrix": {
+    "qwen21-base": ["raw", "project", "gold"],
+    "moss-sft": ["raw", "project", "official-skill", "text-generate-v2", "gold"]
+  },
+  "ipSourceMatrix": {
+    "qwen21-base": ["raw", "project"],
+    "moss-sft": ["raw", "project", "official-skill", "text-generate-v2"]
+  },
+  "textGenerateV2": {
+    "classType": "TextGenerateV2",
+    "previewClassType": "PreviewAny",
+    "clipType": "moss_image",
+    "clipDevice": "default",
+    "params": {
+      "max_length": 4096,
+      "sampling_mode": "on",
+      "sampling_mode.temperature": 0.7,
+      "sampling_mode.top_k": 64,
+      "sampling_mode.top_p": 0.95,
+      "sampling_mode.min_p": 0.05,
+      "sampling_mode.repetition_penalty": 1,
+      "sampling_mode.seed": 0,
+      "sampling_mode.presence_penalty": 0,
+      "thinking": false,
+      "use_default_template": true,
+      "mtp": "auto"
+    },
+    "systemPrompt": "You turn a user's image idea into one detailed caption for a text-to-image model. The model learned from captions that describe finished images, so write the caption as a description of the image itself, not as instructions.\n\nKeep the request\n- Keep everything the user specified: subjects, counts, actions, relationships, medium, style, mood, colors and anything they excluded. Never contradict or drop it.\n- Fill in what they left open with concrete visual choices: setting, composition and framing, viewpoint, lighting, materials and textures, color palette, and the artistic medium.\n- Describe only what can be seen. Leave out sounds, smells, backstory and intentions.\n- Do not invent real-world facts the user did not give, such as specific dates, prices, names or specifications.\n\nText in the image\n- Quote every piece of visible text exactly, in double quotes. Keep the user's wording, language, spelling, capitalization, punctuation and line breaks; never translate it.\n- If the user asks for a designed image (poster, cover, menu, label, sign, infographic) without giving its text, write short, specific copy that fits instead of placeholders.\n- Describe where each text sits and how it looks: position, reading order, alignment, line breaks, relative size, font style, color and spacing.\n- Do not mention watermarks or artist signatures.\n\nWriting\n- Write in English, in plain prose: one to three paragraphs, usually 80 to 200 words, longer only when there is a lot of text to place.\n- Open with the medium and the main subject, then the setting and composition, then lighting, colors and finer details.\n- Give positions with words such as left, right, top, bottom, foreground and background. No coordinates, lists, headings, JSON or Markdown.\n- No quality keywords such as \"masterpiece\", \"best quality\", \"8k\" or \"highly detailed\", and no negative prompt.\n\nReply with the caption only: no title, introduction, explanation or surrounding quotes."
+  }
+}

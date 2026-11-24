@@ -191,7 +191,7 @@ interface FinishLike {
  * below is the plugin's own house style, authored against the same output
  * contract so a Studio rewrite and an Agent rewrite are interchangeable: either
  * one can be pasted into the other, and either can be handed straight to
- * `qwen_image_generate`. Where the two schools disagree — the house style bans
+ * `image_forge_generate`. Where the two schools disagree — the house style bans
  * `4K` / `masterpiece` and wants long observational prose, while Alibaba's
  * published formula is a `主体+场景+风格+镜头+氛围+细节` keyword stack that
  * actively invites those quality words — this file follows the house style.

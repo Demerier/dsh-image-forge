@@ -966,7 +966,7 @@ export interface StepperInput {
  * the panel only renders them. The real state machine lives in
  * `src/environment.ts`; this is its **presentation projection** — the same
  * facts the environment tool reports, mapped onto the four user-facing steps.
- * Install/download themselves are run by `qwen_image_setup` (the managed entry);
+ * Install/download themselves are run by `image_forge_setup` (the managed entry);
  * the stepper's own action is "重新检测", which re-reads the snapshot.
  */
 export function stepperStepsOf(input: StepperInput): StepperStep[] {
@@ -979,15 +979,15 @@ export function stepperStepsOf(input: StepperInput): StepperStep[] {
     state: input.ready ? 'done' : 'failed',
     detail: input.ready
       ? '已连接 ' + (input.endpoint ?? 'ComfyUI')
-      : (reason ?? '未检测到 ComfyUI；按 qwen_image_setup action=start 拉起或先安装'),
+      : (reason ?? '未检测到 ComfyUI；按 image_forge_setup action=start 拉起或先安装'),
   })
   steps.push({
     id: 'install',
     label: '安装 / 受管环境',
     state: input.ready ? 'done' : 'pending',
     detail: input.ready
-      ? '受管入口 qwen_image_setup 可用'
-      : '让 agent 调 qwen_image_setup action=install 看引导，或按 docs/local-install.md 安装',
+      ? '受管入口 image_forge_setup 可用'
+      : '让 agent 调 image_forge_setup action=install 看引导，或按 docs/local-install.md 安装',
   })
   steps.push({
     id: 'weights',
@@ -996,7 +996,7 @@ export function stepperStepsOf(input: StepperInput): StepperStep[] {
     detail: modelsReady
       ? [input.models?.unet, input.models?.clip, input.models?.vae].filter((value) => typeof value === 'string').join(' · ')
       : input.ready
-        ? '已连上 ComfyUI 但三权重不齐：用下方的「下载缺失权重」，或让 agent 调 qwen_image_setup action=download'
+        ? '已连上 ComfyUI 但三权重不齐：用下方的「下载缺失权重」，或让 agent 调 image_forge_setup action=download'
         : '等 ComfyUI 就绪后自动检查权重',
   })
   const phase = input.livePhase ?? 'idle'

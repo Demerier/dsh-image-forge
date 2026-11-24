@@ -3,7 +3,7 @@
 本插件**不自带任何本地运行时**：不建 venv、不下权重、不拉进程。出图与改图**只有一条路**——
 **你自己装好的 ComfyUI**（云端 API 已随 0.3 方向调整删除，本文不再涉及）。这份文档讲它怎么从零搭起来。
 
-一句话边界：文生图、改图 / 融图（`qwen_image_edit`）都跑在这台机器上；首次下载权重之后**完全离线**；
+一句话边界：文生图、改图 / 融图（`image_forge_edit`）都跑在这台机器上；首次下载权重之后**完全离线**；
 需要显卡（8 GB 显存起步，实测见 §8）。**ComfyUI 是必装项**，不是可选项。
 
 > 本文所有路径、大小、sha256、端口都来自**本机实测**（Windows 11 + ComfyUI Desktop 0.41.3 +
@@ -94,7 +94,7 @@ node scripts/start-comfyui.mjs --dir D:\path\to\ComfyUI   # 手动指定安装�
 ## 0.8 工作台里的「从安装到出图」stepper（T22）
 
 工作台顶部常驻四步：**ComfyUI 运行 → 安装/受管环境 → 权重就绪 → 首次出图**。状态来自能力快照
-（宿主用环境探测/`/object_info` 生成）与实时 SSE；安装与下载动作由 `qwen_image_setup` 执行。
+（宿主用环境探测/`/object_info` 生成）与实时 SSE；安装与下载动作由 `image_forge_setup` 执行。
 任一步失败时该行直接显示原因首行，不把失败藏进日志。
 
 ### 状态行上的「启动 / 停止」（P2）
@@ -123,9 +123,9 @@ stepper 右上的「重新检测」只重读快照；**真正拉起与停止在�
 （`--dir`/`COMFYUI_DIR` → Desktop 注册表 → 有界扫描），所以便携安装也能停。
 ---
 
-## 0.6 让 qwen_image_setup 带你装、带你下权重（P1b）
+## 0.6 让 image_forge_setup 带你装、带你下权重（P1b）
 
-插件里的环境工具 `qwen_image_setup` 是从零到能出图的入口，能力与上面的手工步骤一一对应：
+插件里的环境工具 `image_forge_setup` 是从零到能出图的入口，能力与上面的手工步骤一一对应：
 
 | action | 做什么 |
 |---|---|
@@ -444,7 +444,7 @@ curl -s http://127.0.0.1:8188/object_info > object_info.json
 做完跑一次体检：
 
 ```
-qwen_image_status
+image_forge_status
 ```
 
 它会把两件事一次报清：ComfyUI 通不通（探了哪几个端口、三个权重能不能被枚举到、
@@ -494,7 +494,7 @@ Qwen-Image 2.1 的 VAE 解码在部分图上会留下 **2px 网格 / halftone / 
 
 | 症状 | 病因 | 处理 |
 |---|---|---|
-| `qwen_image_status` 说 ComfyUI 没在跑，但界面明明开着 | 端口不在探测列表 | 看 §2 拿到真实端口，写进 `comfyPorts` 或 `comfyEndpoint` |
+| `image_forge_status` 说 ComfyUI 没在跑，但界面明明开着 | 端口不在探测列表 | 看 §2 拿到真实端口，写进 `comfyPorts` 或 `comfyEndpoint` |
 | 报「缺 unet / 找不到主干」 | 权重放进了 `Installs\…\models`（没被 yaml 映射的目录） | 搬到 `<base_path>\unet\`（§3） |
 | 文件在 `unet\` 里，下拉框却没有 | 没重启 ComfyUI | 重启实例（§5） |
 | 加载时报 `header` / 反序列化错误 | 下载被截断 | 比对字节数，删掉重下（`-C -` 续传，§4.3） |

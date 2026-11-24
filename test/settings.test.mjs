@@ -1115,7 +1115,7 @@ test('the shipped prose documents the managed install/download direction (T14)',
   // qwen_image_env). This one pins the NEW direction: the managed setup tool and
   // its download criterion must be written down in the shipped prose, not only
   // implemented in code — otherwise the page and the model get no story.
-  assert.match(README_SOURCE, /qwen_image_setup/)
+  assert.match(README_SOURCE, /image_forge_setup/)
   assert.match(README_SOURCE, /object_info/)
   assert.match(README_SOURCE, /ComfyUI-Shared/)
   assert.match(README_SOURCE, /computer use/)
@@ -1198,7 +1198,7 @@ test('the built client entry wires the section and keeps the keyed tool view', (
   assert.match(CLIENT_SOURCE, /tool\.call\.toolview/, 'the tool view slot must survive')
   // All three wire names must be seated, or the missing one silently renders
   // nothing.
-  for (const key of ['qwen_image_generate', 'qwen_image_edit', 'qwen_image_status']) {
+  for (const key of ['image_forge_generate', 'image_forge_edit', 'image_forge_status']) {
     assert.ok(CLIENT_SOURCE.includes(key), `the keyed tool view ${key} must survive`)
   }
   // ...and the retired one must be gone, in the bundle as well as in the source.

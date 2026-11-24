@@ -1,0 +1,297 @@
+{
+  "game": "Genshin Impact",
+  "compositionRules": {
+    "pose": "中性全身站姿，身体略向三/四侧，双臂自然下垂，双脚完整可见",
+    "background": "单一浅灰摄影棚背景，无场景道具，无其他角色",
+    "style": "官方二维角色立绘语言，干净线稿，柔和赛璐璐上色",
+    "frame": "1024×1024 方形构图，人物全身完整，头顶和鞋底留少量空白"
+  },
+  "characters": [
+    {
+      "id": "IP-A",
+      "selectionRole": "known-anchor",
+      "generateImages": true,
+      "names": {
+        "zh": "芙宁娜",
+        "en": "Furina"
+      },
+      "releaseVersion": "4.2",
+      "firstRevealedAt": "2023-09-25",
+      "dateBasis": "官方角色介绍图发布时间",
+      "defaultForm": "默认服装、默认形态、官方单人立绘",
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Sword",
+      "region": "Fontaine",
+      "affiliation": "Court of Fontaine",
+      "evidence": [
+        {
+          "kind": "official-introduction",
+          "url": "https://www.hoyolab.com/article/21858342",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "name",
+            "identity",
+            "appearance"
+          ]
+        },
+        {
+          "kind": "structured-game-data",
+          "url": "https://github.com/theBowja/genshin-db/blob/8e5badd60b5d894284ccc927a56c9683529d2592/src/data/English/characters/furina.json",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "rarity",
+            "element",
+            "weapon",
+            "region",
+            "affiliation"
+          ]
+        }
+      ],
+      "attributes": [
+        "女性角色，来自枫丹",
+        "五星水元素单手剑角色",
+        "默认服装采用白色与蓝色为主的舞台礼服",
+        "佩戴一顶小型礼帽，短款蓝白渐变头发",
+        "异色蓝眼睛，左右虹膜明度不同",
+        "服装有燕尾、荷叶边与蓝宝石装饰",
+        "神之眼为水元素"
+      ],
+      "forbiddenAdditions": [
+        "不要把她画成其他角色或换上其他角色服装",
+        "不要添加不属于默认立绘的皮肤、异格、联动形态",
+        "不要凭空添加多人、武器特写或大幅场景"
+      ],
+      "promptVariants": {
+        "raw": "《原神》角色芙宁娜（Furina）的官方默认全身立绘。中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无其他角色和场景道具。官方二维角色立绘语言，干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "project": "《原神》角色芙宁娜（Furina），枫丹，五星水元素单手剑角色，默认服装与默认形态。女性角色，短款蓝白渐变头发，异色蓝眼睛，白色与蓝色为主的高雅舞台礼服，配小型礼帽、燕尾、荷叶边与蓝宝石装饰，水元素神之眼。官方二维角色立绘语言，中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无场景道具、无其他角色。干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "official-skill": "A full-body official-style anime character illustration of Furina from Genshin Impact, in her default Fontaine outfit and default form. She is a young woman with short white-to-blue gradient hair, heterochromatic blue eyes, a small top hat, an elegant white-and-blue stage costume with tailcoat-like panels, ruffled trim and sapphire ornaments, plus a Hydro Vision. Neutral standing pose, body angled slightly toward three-quarter view, arms relaxed at her sides, both feet fully visible. Centered on a plain pale gray studio backdrop with no props and no other characters. Clean linework, soft cel-shaded coloring, faithful official character-sheet proportions, square composition with modest space above the head and below the shoes.",
+        "text-generate-v2": null
+      },
+      "seed": 2023110801
+    },
+    {
+      "id": "IP-B",
+      "selectionRole": "near-qwen-release",
+      "generateImages": true,
+      "releaseAnchor": "qwen-image-2.1",
+      "names": {
+        "zh": "沃雅妮莎",
+        "en": "Vodyanitsa"
+      },
+      "releaseVersion": "7.1",
+      "firstRevealedAt": "2026-09-23",
+      "dateBasis": "7.1 官方版本更新中的首次角色预告；未找到可稳定读取的独立角色介绍页",
+      "defaultForm": "默认服装、默认形态、官方单人立绘",
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Catalyst",
+      "region": "Snezhnaya",
+      "affiliation": "Korolevskiy Troupe",
+      "evidence": [
+        {
+          "kind": "official-version-update",
+          "url": "https://www.hoyolab.com/article/46791577",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "release-version",
+            "identity",
+            "playable-status"
+          ],
+          "note": "该角色没有发现可稳定读取的独立官方介绍文章；用 7.1 官方更新作为首曝与版本证据，并在夹具中明确记录这一限制。"
+        },
+        {
+          "kind": "structured-game-data",
+          "url": "https://github.com/theBowja/genshin-db/blob/8e5badd60b5d894284ccc927a56c9683529d2592/src/data/English/characters/vodyanitsa.json",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "title",
+            "rarity",
+            "element",
+            "weapon",
+            "region",
+            "affiliation"
+          ]
+        }
+      ],
+      "attributes": [
+        "女性角色，来自至冬",
+        "五星水元素法器角色",
+        "科洛列夫茨基剧团首席女高音",
+        "离群的水妖",
+        "青绿色渐变长发",
+        "以蓝绿色和水元素为主题的舞台演出服",
+        "水妖身份对应的耳部特征",
+        "称号「幽歌萦渊」",
+        "命之座「金鳍座」"
+      ],
+      "forbiddenAdditions": [
+        "不要把她画成芙宁娜、珊瑚宫心海或其他水元素角色",
+        "不要添加不属于默认立绘的皮肤、异格、联动形态",
+        "不要凭空添加乐器、舞台布景或第二个人物"
+      ],
+      "promptVariants": {
+        "raw": "《原神》角色沃雅妮莎（Vodyanitsa）的官方默认全身立绘。中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无其他角色和场景道具。官方二维角色立绘语言，干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "project": "《原神》角色沃雅妮莎（Vodyanitsa），至冬，五星水元素法器角色，科洛列夫茨基剧团首席女高音，离群的水妖，默认服装与默认形态。女性角色，青绿色渐变长发，具有水妖身份对应的耳部特征，穿以蓝绿色和水元素为主题的舞台演出服，水元素神之眼。官方二维角色立绘语言，中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无场景道具、无其他角色、无乐器。干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "official-skill": "A full-body official-style anime character illustration of Vodyanitsa from Genshin Impact, in her default Snezhnayan outfit and default form. She is a female Hydro Catalyst wielder, prima donna of the Korolevskiy Troupe and a Water Imp separated from her kin. Show her long teal-to-green gradient hair, water-imp ear features, and a theatrical blue-green costume with water motifs. Neutral standing pose, body angled slightly toward three-quarter view, arms relaxed at her sides, both feet fully visible. Centered on a plain pale gray studio backdrop with no other characters, instruments or scenery. Clean linework, soft cel-shaded coloring, faithful official character-sheet proportions, square composition with room above the head and below the shoes.",
+        "text-generate-v2": null
+      },
+      "seed": 2026092302
+    },
+    {
+      "id": "IP-C",
+      "selectionRole": "near-moss-release",
+      "generateImages": true,
+      "releaseAnchor": "moss-image",
+      "names": {
+        "zh": "米提亚",
+        "en": "Mitya"
+      },
+      "releaseVersion": "7.2",
+      "firstRevealedAt": "2026-10-23",
+      "dateBasis": "7.2 官方前瞻节目首次公布角色",
+      "defaultForm": "默认服装、默认形态、官方单人立绘",
+      "rarity": 5,
+      "element": "Electro",
+      "weapon": "Catalyst",
+      "region": "Snezhnaya",
+      "affiliation": "Royal Energy Commission of Snezhnaya",
+      "evidence": [
+        {
+          "kind": "official-introduction",
+          "url": "https://www.hoyolab.com/article/46884007",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "name",
+            "title",
+            "identity",
+            "appearance",
+            "affiliation"
+          ]
+        },
+        {
+          "kind": "official-version-update",
+          "url": "https://genshin.hoyoverse.com/en/news/detail/167187",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "release-version",
+            "element",
+            "weapon"
+          ]
+        },
+        {
+          "kind": "structured-game-data",
+          "url": "https://github.com/theBowja/genshin-db/blob/8e5badd60b5d894284ccc927a56c9683529d2592/src/data/English/characters/mitya.json",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "rarity",
+            "element",
+            "weapon",
+            "region",
+            "constellation"
+          ]
+        }
+      ],
+      "attributes": [
+        "男性角色，来自至冬",
+        "五星雷元素法器角色",
+        "至冬皇家能源协会的能源专家",
+        "称号「规则既定于无」",
+        "银白色蓬乱短发与紫色眼睛",
+        "紫色外套配金色滚边",
+        "随身围巾具有独立意识，能行动与遮挡发言",
+        "命之座「结绳座」"
+      ],
+      "forbiddenAdditions": [
+        "不要把他画成枫原万叶、赛诺或其他雷元素角色",
+        "不要添加不属于默认立绘的皮肤、异格、联动形态",
+        "不要凭空添加实验室、机械装置或第二个人物"
+      ],
+      "promptVariants": {
+        "raw": "《原神》角色米提亚（Mitya）的官方默认全身立绘。中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无其他角色和场景道具。官方二维角色立绘语言，干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "project": "《原神》角色米提亚（Mitya），至冬，五星雷元素法器角色，至冬皇家能源协会能源专家，称号「规则既定于无」，默认服装与默认形态。男性角色，银白色蓬乱短发，紫色眼睛，紫色外套配金色滚边，佩戴具有独立意识的围巾，雷元素神之眼。官方二维角色立绘语言，中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无场景道具、无其他角色、无实验室装置。干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "official-skill": "A full-body official-style anime character illustration of Mitya from Genshin Impact, in his default Snezhnayan outfit and default form. He is a male five-star Electro Catalyst user, an energy specialist of the Royal Energy Commission, titled Rules Set at Naught. Show tousled silver-white hair, violet eyes, a purple coat with gold trim, and his distinctive long scarf that behaves as an independent companion. Neutral standing pose, body angled slightly toward three-quarter view, arms relaxed at his sides, both feet fully visible. Centered on a plain pale gray studio backdrop with no props, machinery or other characters. Clean linework, soft cel-shaded coloring, faithful official character-sheet proportions, square composition with space above the head and below the shoes.",
+        "text-generate-v2": null
+      },
+      "seed": 2026102303
+    },
+    {
+      "id": "IP-D",
+      "selectionRole": "latest-text-audit",
+      "generateImages": false,
+      "names": {
+        "zh": "瓦列里",
+        "en": "Valeriy"
+      },
+      "releaseVersion": "7.2",
+      "firstNamedAt": "2026-10-23",
+      "firstRevealedAt": "2026-11-12",
+      "dateBasis": "完整官方角色介绍与公开可玩资料形成日；此前 7.2 前瞻中的名称预告不计入本项新鲜度",
+      "defaultForm": "默认服装、默认形态、官方单人立绘",
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Sword",
+      "region": "Snezhnaya",
+      "affiliation": "Royal Grenadier Guards First Regiment / Special Assignments Battalion",
+      "evidence": [
+        {
+          "kind": "official-introduction",
+          "url": "https://www.hoyolab.com/article/46887682",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "name",
+            "title",
+            "identity",
+            "appearance",
+            "affiliation"
+          ]
+        },
+        {
+          "kind": "official-version-update",
+          "url": "https://genshin.hoyoverse.com/en/news/detail/167187",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "release-version",
+            "element",
+            "weapon"
+          ]
+        },
+        {
+          "kind": "structured-game-data",
+          "url": "https://github.com/theBowja/genshin-db/blob/8e5badd60b5d894284ccc927a56c9683529d2592/src/data/English/characters/valeriy.json",
+          "checkedAt": "2026-11-24",
+          "supports": [
+            "rarity",
+            "element",
+            "weapon",
+            "region",
+            "constellation"
+          ]
+        }
+      ],
+      "attributes": [
+        "男性角色，来自至冬",
+        "四星雷元素单手剑角色",
+        "皇家近卫军第一团少校",
+        "特殊任务营指挥官",
+        "称号「雷霆壁垒」",
+        "高大宽肩，短黑发与紫色眼睛",
+        "深色毛领下的抛光铠甲与长白披风",
+        "使用单手剑与大型棱角盾牌",
+        "命之座「大熊座」"
+      ],
+      "forbiddenAdditions": [
+        "不要把他画成其他至冬男性角色或更换铠甲颜色",
+        "不要添加不属于默认立绘的皮肤、异格、联动形态",
+        "不要凭空添加第二个人物、战场背景或大型特效"
+      ],
+      "promptVariants": {
+        "raw": "《原神》角色瓦列里（Valeriy）的官方默认全身立绘。中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无其他角色和场景道具。官方二维角色立绘语言，干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "project": "《原神》角色瓦列里（Valeriy），至冬，四星雷元素单手剑角色，皇家近卫军第一团少校、特殊任务营指挥官，称号「雷霆壁垒」，默认服装与默认形态。男性角色，高大宽肩，短黑发，紫色眼睛，深色毛领下穿抛光铠甲并披长白披风，配大型棱角盾牌，雷元素神之眼。官方二维角色立绘语言，中性全身站姿，身体略向三四侧，双臂自然下垂，双脚完整可见；单一浅灰摄影棚背景，无场景道具、无其他角色、无战场背景。干净线稿，柔和赛璐璐上色，1024×1024 方形构图，头顶和鞋底留少量空白。",
+        "official-skill": "A full-body official-style anime character illustration of Valeriy from Genshin Impact, in his default Snezhnayan uniform and default form. He is a tall, broad-shouldered male four-star Electro Sword user, major of the Royal Grenadier Guards First Regiment and commander of the Special Assignments Battalion, titled Fort Fulguration. Show short black hair, violet eyes, polished armor beneath a dark fur collar, a long white cape, and a large angular shield. Neutral standing pose, body angled slightly toward three-quarter view, arms relaxed at his sides, both feet fully visible. Centered on a plain pale gray studio backdrop with no battlefield, props or other characters. Clean linework, soft cel-shaded coloring, faithful official character-sheet proportions, square composition with space above the head and below the shoes.",
+        "text-generate-v2": null
+      },
+      "seed": 2026111204
+    }
+  ]
+}

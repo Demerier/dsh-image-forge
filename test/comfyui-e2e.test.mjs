@@ -234,7 +234,7 @@ test('a fake ComfyUI: port probe, graph injection, poll, /view, byte-exact write
       outputDir,
       timeoutMs: 30_000,
     })
-    const result = await run(tools, 'qwen_image_generate', {
+    const result = await run(tools, 'image_forge_generate', {
       prompt: 'A wide photograph of a harbour at dawn, wooden boats along a stone quay.',
       wh_ratio: '16:9',
       steps: 12,
@@ -328,7 +328,7 @@ test('a ComfyUI without qwen weights is refused before /prompt, naming the file'
       comfyModelsDir: 'D:\\Comfy-Desktop\\ComfyUI-Shared\\models',
       outputDir,
     })
-    const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    const error = await failure(tools, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
     assert.ok(error instanceof Error)
     console.log('missing-weight error message:\n' + error.message)
     assert.match(error.message, /缺模型文件/)
@@ -359,7 +359,7 @@ test('the folder hint joins with the configured path’s own separator style', a
       comfyModelsDir: 'D:\\Comfy-Desktop\\ComfyUI-Shared\\models',
       outputDir,
     })
-    const windowsError = await failure(windows, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    const windowsError = await failure(windows, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
     assert.match(windowsError.message, /放到：D:\\Comfy-Desktop\\ComfyUI-Shared\\models\\clip\\/)
 
     // …and a POSIX path keeps forward slashes, with a trailing separator
@@ -370,7 +370,7 @@ test('the folder hint joins with the configured path’s own separator style', a
       comfyModelsDir: '/opt/ComfyUI/models/',
       outputDir,
     })
-    const posixError = await failure(posix, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    const posixError = await failure(posix, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
     assert.match(posixError.message, /放到：\/opt\/ComfyUI\/models\/clip\//)
     assert.doesNotMatch(posixError.message, /models\\clip/)
   } finally {
@@ -390,7 +390,7 @@ test('with no ComfyUI running the error lists every port probed and how to start
       outputDir,
       timeoutMs: 5000,
     })
-    const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    const error = await failure(tools, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
     assert.ok(error instanceof Error)
     console.log('not-running error message:\n' + error.message)
     assert.match(error.message, /没找到在跑的 ComfyUI/)
@@ -418,7 +418,7 @@ test('a non-loopback endpoint is refused before any socket opens', async () => {
       outputDir,
     })
     for (const endpoint of ['http://192.168.1.5:8188', 'http://localhost.evil.example.com:8188', 'http://[::1]:1']) {
-      const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.' })
+      const error = await failure(tools, 'image_forge_generate', { prompt: 'A cat.' })
       console.log(`endpoint ${endpoint} ->`, error instanceof Error ? error.message.split('\n')[0] : String(error))
       if (endpoint === 'http://[::1]:1') continue // loopback: allowed, so it fails later for a different reason
       assert.match(error.message, /只与\*\*本机回环地址\*\*|只与.*回环/)
@@ -455,7 +455,7 @@ test('node_errors from /prompt are quoted verbatim', async () => {
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-nodeerr-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir })
-    const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.' })
+    const error = await failure(tools, 'image_forge_generate', { prompt: 'A cat.' })
     assert.ok(error instanceof Error)
     console.log('node_errors message:\n' + error.message)
     assert.match(error.message, /HTTP 400/)
@@ -500,7 +500,7 @@ test('an execution error carries the upstream message and traceback', async () =
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-execerr-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir })
-    const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.' })
+    const error = await failure(tools, 'image_forge_generate', { prompt: 'A cat.' })
     assert.ok(error instanceof Error)
     console.log('execution-error message:\n' + error.message)
     assert.match(error.message, /出图失败/)
@@ -519,14 +519,14 @@ test('generation always runs on ComfyUI, and the failure names the remedy', asyn
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-only-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir })
-    const result = await run(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    const result = await run(tools, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
     console.log('generate ->', result.backend, result.comfyui.endpoint)
     assert.equal(result.backend, 'comfyui')
     assert.ok(comfy.seen.some((entry) => entry.path === '/prompt'), 'the generation must reach ComfyUI')
 
     const dead = await deadPort()
     const down = register({ comfyEndpoint: '', comfyPorts: String(dead), timeoutMs: 5000, outputDir })
-    const error = await failure(down, 'qwen_image_generate', { prompt: 'A cat.' })
+    const error = await failure(down, 'image_forge_generate', { prompt: 'A cat.' })
     console.log('generate with ComfyUI down:\n' + error.message)
     assert.match(error.message, /comfyui backend: 没找到在跑的 ComfyUI/)
     // There is no second backend to fall back to, so the message has to point
@@ -539,12 +539,12 @@ test('generation always runs on ComfyUI, and the failure names the remedy', asyn
   }
 })
 
-test('qwen_image_status reports ComfyUI reachability and the weights it can see', async () => {
+test('image_forge_status reports ComfyUI reachability and the weights it can see', async () => {
   const comfy = await startFakeComfy()
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-status-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', apiKey: '', outputDir })
-    const status = await run(tools, 'qwen_image_status', { timeoutMs: 5000 })
+    const status = await run(tools, 'image_forge_status', { timeoutMs: 5000 })
     console.log('status.comfyui:', JSON.stringify(status.comfyui, null, 1))
     assert.equal(status.comfyui.reachable, true)
     assert.equal(status.comfyui.port, comfy.port)
@@ -570,7 +570,7 @@ test('qwen_image_status reports ComfyUI reachability and the weights it can see'
 
     // A second call must not turn the server into something else: the report is
     // passive and reads the same endpoint.
-    const again = await run(tools, 'qwen_image_status', { timeoutMs: 3000 })
+    const again = await run(tools, 'image_forge_status', { timeoutMs: 3000 })
     assert.equal(again.comfyui.reachable, true)
   } finally {
     await comfy.close()
@@ -578,12 +578,12 @@ test('qwen_image_status reports ComfyUI reachability and the weights it can see'
   }
 })
 
-test('qwen_image_status on a machine with nothing running still answers', async () => {
+test('image_forge_status on a machine with nothing running still answers', async () => {
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-comfy-status-down-'))
   const dead = await deadPort()
   try {
     const tools = register({ comfyEndpoint: '', comfyPorts: String(dead), apiKey: '', outputDir })
-    const status = await run(tools, 'qwen_image_status', { timeoutMs: 3000 })
+    const status = await run(tools, 'image_forge_status', { timeoutMs: 3000 })
     console.log('status.comfyui (nothing running):', JSON.stringify(status.comfyui, null, 1))
     assert.equal(status.comfyui.reachable, false)
     assert.deepEqual(status.comfyui.candidatePorts, [dead])
@@ -638,7 +638,7 @@ test('QwenImage21Cache is on for a new server and stripped for an old one', asyn
 
     // 1. New server: base t2i keeps the shim, and the KSampler consumes it.
     const baseTools = register({ comfyEndpoint: modern.endpoint, outputDir, timeoutMs: 30_000 })
-    const base = await run(baseTools, 'qwen_image_generate', args)
+    const base = await run(baseTools, 'image_forge_generate', args)
     const baseCache = cacheNodeOf(modern.state.graph)
     assert.ok(baseCache !== undefined, 'the modern server must receive QwenImage21Cache')
     assert.deepEqual(modern.state.graph['6'].inputs.model, [baseCache[0], 0])
@@ -646,7 +646,7 @@ test('QwenImage21Cache is on for a new server and stripped for an old one', asyn
 
     // 2. New server: turbo t2i keeps it too, and the CFGGuider consumes it.
     const turboTools = register({ comfyEndpoint: modern.endpoint, comfyModel: 'qwen21-turbo', outputDir, timeoutMs: 30_000 })
-    const turbo = await run(turboTools, 'qwen_image_generate', args)
+    const turbo = await run(turboTools, 'image_forge_generate', args)
     const turboCache = cacheNodeOf(modern.state.graph)
     assert.ok(turboCache !== undefined)
     assert.deepEqual(modern.state.graph['7'].inputs.model, [turboCache[0], 0])
@@ -655,7 +655,7 @@ test('QwenImage21Cache is on for a new server and stripped for an old one', asyn
 
     // 3. Old server: the shim is stripped instead of submitting an unknown node.
     const legacyTools = register({ comfyEndpoint: legacy.endpoint, outputDir, timeoutMs: 30_000 })
-    const degraded = await run(legacyTools, 'qwen_image_generate', args)
+    const degraded = await run(legacyTools, 'image_forge_generate', args)
     assert.equal(cacheNodeOf(legacy.state.graph), undefined, 'the old server must not receive the node')
     assert.deepEqual(legacy.state.graph['6'].inputs.model, ['1', 0])
     assert.equal(degraded.comfyui.cache, 'skipped')
@@ -668,17 +668,17 @@ test('QwenImage21Cache is on for a new server and stripped for an old one', asyn
   }
 })
 
-test('qwen_image_status compares the ComfyUI version against the cache requirement', async () => {
+test('image_forge_status compares the ComfyUI version against the cache requirement', async () => {
   const modern = await startFakeComfy({ version: '0.45.3' })
   const old = await startFakeComfy({ version: '0.30.2' })
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-cache-version-'))
   try {
-    const modernStatus = await run(register({ comfyEndpoint: modern.endpoint, outputDir }), 'qwen_image_status', { timeoutMs: 5000 })
+    const modernStatus = await run(register({ comfyEndpoint: modern.endpoint, outputDir }), 'image_forge_status', { timeoutMs: 5000 })
     assert.equal(modernStatus.comfyui.version, '0.45.3')
     assert.equal(modernStatus.comfyui.qwen_cache.version_satisfied, true)
     assert.match(modernStatus.comfyui.qwen_cache.note, /0\.37\.0/)
 
-    const oldStatus = await run(register({ comfyEndpoint: old.endpoint, outputDir }), 'qwen_image_status', { timeoutMs: 5000 })
+    const oldStatus = await run(register({ comfyEndpoint: old.endpoint, outputDir }), 'image_forge_status', { timeoutMs: 5000 })
     assert.equal(oldStatus.comfyui.qwen_cache.version_satisfied, false)
     assert.match(oldStatus.comfyui.qwen_cache.note, /低于 0\.37\.0|自动跳过/)
   } finally {
@@ -701,35 +701,35 @@ test('the sampler tier is opt-in and native-only; turbo/MOSS refuse it', async (
     const sampler = () => comfy.state.graph['6'].inputs
 
     // 1. Default path stays euler/simple.
-    const plain = await run(base({}), 'qwen_image_generate', args)
+    const plain = await run(base({}), 'image_forge_generate', args)
     assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['euler', 'simple'])
     assert.equal(plain.sampling, undefined)
 
     // 2. An explicit pair reaches KSampler and is reported with its evidence level.
-    const custom = await run(base({}), 'qwen_image_generate', { ...args, sampler: 'res_multistep', scheduler: 'beta' })
+    const custom = await run(base({}), 'image_forge_generate', { ...args, sampler: 'res_multistep', scheduler: 'beta' })
     assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['res_multistep', 'beta'])
     assert.equal(custom.sampling.sampler, 'res_multistep')
     assert.equal(custom.sampling.scheduler, 'beta')
     assert.match(custom.sampling.note, /孤证/)
 
     // 3. One half alone keeps the profile's other half.
-    await run(base({}), 'qwen_image_generate', { ...args, sampler: 'er_sde' })
+    await run(base({}), 'image_forge_generate', { ...args, sampler: 'er_sde' })
     assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['er_sde', 'simple'])
-    await run(base({}), 'qwen_image_generate', { ...args, scheduler: 'karras' })
+    await run(base({}), 'image_forge_generate', { ...args, scheduler: 'karras' })
     assert.deepEqual([sampler().sampler_name, sampler().scheduler], ['euler', 'karras'])
 
     // 4. Third-party samplers are refused before any backend call.
     const before = comfy.seen.filter((entry) => entry.path === '/prompt').length
-    const thirdParty = await failure(base({}), 'qwen_image_generate', { ...args, sampler: 'abnorsett_3m' })
+    const thirdParty = await failure(base({}), 'image_forge_generate', { ...args, sampler: 'abnorsett_3m' })
     // The tool schema rejects anything outside the native enum before execute runs.
     assert.match(thirdParty.message, /invalid arguments/)
     assert.match(thirdParty.message, /sampler.*must be one of/)
     assert.ok(!thirdParty.message.includes('abnorsett_3m"'))
 
     // 5. turbo and MOSS refuse the tier (their sampling is not a free KSampler).
-    const turbo = await failure(base({ comfyModel: 'qwen21-turbo' }), 'qwen_image_generate', { ...args, sampler: 'res_multistep' })
+    const turbo = await failure(base({ comfyModel: 'qwen21-turbo' }), 'image_forge_generate', { ...args, sampler: 'res_multistep' })
     assert.match(turbo.message, /只对 Qwen base 生效/)
-    const moss = await failure(base({ comfyModel: 'moss-sft' }), 'qwen_image_generate', { ...args, scheduler: 'beta' })
+    const moss = await failure(base({ comfyModel: 'moss-sft' }), 'image_forge_generate', { ...args, scheduler: 'beta' })
     assert.match(moss.message, /只对 Qwen base 生效/)
     assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, before, 'refusals must not submit')
   } finally {
@@ -759,7 +759,7 @@ test('the Qwen text encoder prefers w4a8 over int8 over bf16', async () => {
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-te-tier-'))
   try {
     const args = { prompt: 'A cat.', wh_ratio: '1:1', seed: 3 }
-    const w4a8 = await run(register({ comfyEndpoint: all.endpoint, outputDir, timeoutMs: 30_000 }), 'qwen_image_generate', args)
+    const w4a8 = await run(register({ comfyEndpoint: all.endpoint, outputDir, timeoutMs: 30_000 }), 'image_forge_generate', args)
     console.log('TE with all tiers:', w4a8.comfyui.models.clip)
     // The 8 GB-friendly encoder must outrank int8_convrot even though the server
     // lists int8 first; the quantisation marker is the tie-breaker.
@@ -771,7 +771,7 @@ test('the Qwen text encoder prefers w4a8 over int8 over bf16', async () => {
 
     const int8 = await run(
       register({ comfyEndpoint: int8Only.endpoint, outputDir, timeoutMs: 30_000 }),
-      'qwen_image_generate',
+      'image_forge_generate',
       args,
     )
     console.log('TE without w4a8:', int8.comfyui.models.clip)
@@ -797,7 +797,7 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
   const args = { prompt: 'A plain ceramic mug on a wooden desk, soft window light.', wh_ratio: '1:1', seed: 7 }
   try {
     const turboTools = register({ comfyEndpoint: turboComfy.endpoint, comfyModel: 'turbo', outputDir, timeoutMs: 30_000 })
-    const turbo = await run(turboTools, 'qwen_image_generate', args)
+    const turbo = await run(turboTools, 'image_forge_generate', args)
     assert.equal(turbo.model, 'qwen_image_2.1_turbo_int8_convrot.safetensors')
     assert.equal(turbo.comfyui.comfyModel, 'turbo')
     // The legacy config value normalises to the canonical profile id, which is
@@ -808,7 +808,7 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
     assert.equal(turboComfy.state.graph['1'].inputs.unet_name, 'qwen_image_2.1_turbo_int8_convrot.safetensors')
 
     const baseTools = register({ comfyEndpoint: baseComfy.endpoint, comfyModel: 'base', outputDir, timeoutMs: 30_000 })
-    const base = await run(baseTools, 'qwen_image_generate', args)
+    const base = await run(baseTools, 'image_forge_generate', args)
     assert.equal(base.model, 'qwen_image_2.1_int8_convrot.safetensors')
     assert.equal(base.comfyui.comfyModel, 'base')
     assert.equal(base.comfyui.profile, 'qwen21-base')
@@ -816,7 +816,7 @@ test('comfyModel: turbo runs the turbo DiT even when the base checkpoint is inst
 
     // Asking for turbo on a base-only install still produces an image, and says why.
     const fallbackTools = register({ comfyEndpoint: fallbackComfy.endpoint, comfyModel: 'turbo', outputDir, timeoutMs: 30_000 })
-    const fallback = await run(fallbackTools, 'qwen_image_generate', args)
+    const fallback = await run(fallbackTools, 'image_forge_generate', args)
     assert.equal(fallback.model, 'qwen_image_2.1_int8_convrot.safetensors')
     assert.equal(fallback.comfyui.comfyModel, 'base')
     assert.match(String(fallback.comfyui.turbo_fallback), /没有 turbo 权重/)
@@ -842,7 +842,7 @@ test('an omitted quality tier renders the byte-identical Qwen base graph', async
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-quality-default-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir, timeoutMs: 30_000 })
-    const result = await run(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', seed: 5 })
+    const result = await run(tools, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1', seed: 5 })
     // cfg 1 / empty negative prompt are the official path: nothing may move when
     // the tier is not asked for.
     assert.equal(comfy.state.graph['6'].inputs.cfg, 1)
@@ -861,7 +861,7 @@ test('the quality tier raises cfg, wires the negative prompt, and reports the co
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-quality-tier-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, outputDir, timeoutMs: 30_000 })
-    const explicit = await run(tools, 'qwen_image_generate', {
+    const explicit = await run(tools, 'image_forge_generate', {
       prompt: 'A cat.',
       wh_ratio: '1:1',
       seed: 5,
@@ -877,7 +877,7 @@ test('the quality tier raises cfg, wires the negative prompt, and reports the co
     assert.equal(explicit.quality.negative_prompt_source, 'caller')
     assert.match(explicit.quality.note, /翻倍/)
 
-    const auto = await run(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', seed: 5, cfg: 3 })
+    const auto = await run(tools, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1', seed: 5, cfg: 3 })
     assert.equal(comfy.state.graph['6'].inputs.cfg, 3)
     assert.equal(comfy.state.graph['4'].inputs.negative_prompt, QUALITY_NEGATIVE_PROMPT)
     assert.equal(auto.quality.negative_prompt_source, 'auto')
@@ -895,26 +895,26 @@ test('the quality tier is refused where CFG is not a free KSampler input', async
     const base = (overrides) => register({ comfyEndpoint: comfy.endpoint, outputDir, timeoutMs: 30_000, ...overrides })
 
     // turbo: fixed ManualSigmas graph, no free cfg.
-    const turbo = await failure(base({ comfyModel: 'qwen21-turbo' }), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 2.5 })
+    const turbo = await failure(base({ comfyModel: 'qwen21-turbo' }), 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 2.5 })
     assert.match(turbo.message, /只对 Qwen base 生效/)
     assert.match(turbo.message, /turbo/)
 
     // MOSS: CFG belongs to the sampling register.
-    const moss = await failure(base({ comfyModel: 'moss-sft' }), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 2.5 })
+    const moss = await failure(base({ comfyModel: 'moss-sft' }), 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 2.5 })
     assert.match(moss.message, /只对 Qwen base 生效/)
     assert.match(moss.message, /mossSampling/)
 
-    const outOfRange = await failure(base({}), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 7 })
+    const outOfRange = await failure(base({}), 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1', cfg: 7 })
     assert.match(outOfRange.message, /between 1 and 5/)
 
     // A negative prompt at cfg 1 would be silently ignored, so it is refused.
-    const inert = await failure(base({}), 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1', negative_prompt: 'blurry' })
+    const inert = await failure(base({}), 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1', negative_prompt: 'blurry' })
     assert.match(inert.message, /cfg > 1/)
 
     // Multi-reference edit + elevated cfg is the documented artifact case.
     const refs = [join(outputDir, 'a.png'), join(outputDir, 'b.png')]
     for (const file of refs) writeFileSync(file, Buffer.from(PNG_1X1, 'base64'))
-    const multi = await failure(base({}), 'qwen_image_edit', { prompt: '换掉标题', images: refs, cfg: 2 })
+    const multi = await failure(base({}), 'image_forge_edit', { prompt: '换掉标题', images: refs, cfg: 2 })
     assert.match(multi.message, /多参考/)
     assert.match(multi.message, /cfg=1/)
 
@@ -1042,7 +1042,7 @@ test('MOSS weights are selected by their own names, not by a "qwen" gate', async
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-select-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000 })
-    const result = await run(tools, 'qwen_image_generate', { prompt: 'A brass compass on slate.', wh_ratio: '1:1' })
+    const result = await run(tools, 'image_forge_generate', { prompt: 'A brass compass on slate.', wh_ratio: '1:1' })
     console.log('MOSS models:', JSON.stringify(result.comfyui.models))
     assert.equal(result.model, 'moss_image_sft_int8_convrot.safetensors')
     assert.equal(result.comfyui.models.unet, 'moss_image_sft_int8_convrot.safetensors')
@@ -1060,7 +1060,7 @@ test('MOSS weights are selected by their own names, not by a "qwen" gate', async
     // Switching back to a Qwen profile over the SAME server picks the Qwen files
     // again: two profiles, one selector.
     const qwenTools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'qwen21-base', outputDir, timeoutMs: 30_000 })
-    const qwen = await run(qwenTools, 'qwen_image_generate', { prompt: 'A brass compass on slate.', wh_ratio: '1:1' })
+    const qwen = await run(qwenTools, 'image_forge_generate', { prompt: 'A brass compass on slate.', wh_ratio: '1:1' })
     assert.equal(qwen.comfyui.models.unet, 'qwen_image_2.1_int8_convrot.safetensors', 'base must not claim the MOSS DiT')
     assert.equal(qwen.comfyui.models.vae, 'qwen_image_2.1_vae_bf16.safetensors')
     assert.equal(qwen.comfyui.models.clipType, 'qwen_image')
@@ -1076,7 +1076,7 @@ test('the MOSS graph on the wire is the official MOSS template, not the Qwen one
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000 })
     const args = { prompt: 'A night street with a MOSS marquee.', wh_ratio: '16:9', seed: 42, steps: 12, count: 1 }
-    const result = await run(tools, 'qwen_image_generate', args)
+    const result = await run(tools, 'image_forge_generate', args)
     const graph = comfy.state.graph
     console.log('MOSS graph node classes:', JSON.stringify(Object.entries(graph).map(([id, node]) => [id, node.class_type])))
     assert.deepEqual(Object.keys(graph).sort((a, b) => Number(a) - Number(b)), ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
@@ -1164,7 +1164,7 @@ test('MOSS sampling: the Agent tool puts the selected register on the wire too',
     const sampler = () => comfy.state.graph['8'].inputs
 
     // 1. The default register is the ComfyUI template's: 25 / 2.5 / er_sde / simple.
-    const shipped = await run(mossTools({}), 'qwen_image_generate', args)
+    const shipped = await run(mossTools({}), 'image_forge_generate', args)
     console.log('Agent MOSS comfy register:', JSON.stringify(sampler()))
     assert.equal(shipped.steps_used, 25)
     assert.equal(shipped.steps_source, 'default')
@@ -1175,7 +1175,7 @@ test('MOSS sampling: the Agent tool puts the selected register on the wire too',
     assert.equal(sampler().scheduler, 'simple')
 
     // 2. The official register is OpenMOSS's own card: 50 / 3 / euler / simple.
-    const official = await run(mossTools({ mossSampling: 'official' }), 'qwen_image_generate', args)
+    const official = await run(mossTools({ mossSampling: 'official' }), 'image_forge_generate', args)
     console.log('Agent MOSS official register:', JSON.stringify(sampler()))
     assert.equal(official.steps_used, 50)
     assert.equal(official.steps_source, 'default')
@@ -1186,7 +1186,7 @@ test('MOSS sampling: the Agent tool puts the selected register on the wire too',
 
     // 3. An explicit `steps` still wins over the register — the count only: the
     // register keeps owning the sampler numbers.
-    const explicit = await run(mossTools({ mossSampling: 'official' }), 'qwen_image_generate', { ...args, steps: 12 })
+    const explicit = await run(mossTools({ mossSampling: 'official' }), 'image_forge_generate', { ...args, steps: 12 })
     assert.equal(explicit.steps_used, 12)
     assert.equal(explicit.steps_source, 'explicit')
     assert.equal(sampler().steps, 12)
@@ -1194,7 +1194,7 @@ test('MOSS sampling: the Agent tool puts the selected register on the wire too',
     assert.equal(sampler().sampler_name, 'euler')
 
     // 4. ...and so does the shared ComfyUI override, which outranks the register.
-    const backend = await run(mossTools({ mossSampling: 'official', comfyuiSteps: 30 }), 'qwen_image_generate', args)
+    const backend = await run(mossTools({ mossSampling: 'official', comfyuiSteps: 30 }), 'image_forge_generate', args)
     assert.equal(backend.steps_used, 30)
     assert.equal(backend.steps_source, 'backend')
     assert.equal(sampler().steps, 30)
@@ -1213,9 +1213,9 @@ test('a MOSS register selected while a Qwen profile runs changes nothing on the 
     const qwenTools = (overrides) =>
       register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'qwen21-base', outputDir, timeoutMs: 30_000, ...overrides })
 
-    const before = await run(qwenTools({}), 'qwen_image_generate', args)
+    const before = await run(qwenTools({}), 'image_forge_generate', args)
     const baseline = structuredClone(comfy.state.graph)
-    const after = await run(qwenTools({ mossSampling: 'official' }), 'qwen_image_generate', args)
+    const after = await run(qwenTools({ mossSampling: 'official' }), 'image_forge_generate', args)
     const withRegister = structuredClone(comfy.state.graph)
 
     // Byte-identical graph: the setting only reaches families that publish
@@ -1239,7 +1239,7 @@ test('a MOSS edit reaches /prompt with the LoRA, the native encode nodes and the
     const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir, timeoutMs: 30_000 })
     const reference = join(outputDir, 'ref.png')
     writeFileSync(reference, Buffer.from(PNG_1X1, 'base64'))
-    const result = await run(tools, 'qwen_image_edit', { prompt: '只把标题换成「夏日特惠」。', images: [reference], seed: 42 })
+    const result = await run(tools, 'image_forge_edit', { prompt: '只把标题换成「夏日特惠」。', images: [reference], seed: 42 })
     const graph = comfy.state.graph
     console.log('MOSS edit node classes:', JSON.stringify(Object.entries(graph).map(([id, node]) => [id, node.class_type])))
 
@@ -1282,7 +1282,7 @@ test('a MOSS profile over Qwen-only weights says exactly which files it needs', 
   const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-missing-'))
   try {
     const tools = register({ comfyEndpoint: comfy.endpoint, comfyModelsDir: 'D:\\models', comfyModel: 'moss-sft', outputDir })
-    const error = await failure(tools, 'qwen_image_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
+    const error = await failure(tools, 'image_forge_generate', { prompt: 'A cat.', wh_ratio: '1:1' })
     console.log('missing MOSS weights:\n' + error.message)
     assert.match(error.message, /缺模型文件/)
     assert.match(error.message, /moss-sft/)

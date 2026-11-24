@@ -676,13 +676,13 @@ test('stop with no launch record reports nothing to stop', async () => {
   assert.ok(result.note.includes('no launch record'))
 })
 
-test('the environment tool is qwen_image_setup, never the retired qwen_image_env', () => {
+test('the environment tool is image_forge_setup, never the retired qwen_image_env', () => {
   let captured = null
   const ctx = { tools: { register: (definition) => { captured = definition } } }
   registerEnvironmentTools(ctx, () => ({ comfyEndpoint: '', comfyPorts: '8188', timeoutMs: 1000 }))
   assert.ok(captured, 'registration must define exactly one tool')
   assert.equal(captured.name, ENVIRONMENT_TOOL_NAME)
-  assert.equal(captured.name, 'qwen_image_setup')
+  assert.equal(captured.name, 'image_forge_setup')
   assert.notEqual(captured.name, 'qwen_image_env')
   const parameters = captured.parameters ?? {}
   const action = parameters.action ?? parameters.properties?.action
@@ -970,7 +970,7 @@ test('the setup tool exposes install/download and keeps the retired name banned'
   let captured = null
   const ctx = { tools: { register: (definition) => { captured = definition } } }
   registerEnvironmentTools(ctx, () => ({ comfyEndpoint: '', comfyPorts: '8188', timeoutMs: 1000, comfyModel: 'qwen21-base' }))
-  assert.equal(captured.name, 'qwen_image_setup')
+  assert.equal(captured.name, 'image_forge_setup')
   assert.notEqual(captured.name, 'qwen_image_env')
   const parameters = captured.parameters ?? {}
   const action = parameters.action ?? parameters.properties?.action

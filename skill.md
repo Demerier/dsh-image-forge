@@ -1,4 +1,4 @@
-# qwen-image-forge —— 生图与提示词契约（Qwen-Image 2.1 / MOSS-Image）
+# image-forge —— 生图与提示词契约（Qwen-Image 2.1 / MOSS-Image）
 
 本技能把「用户的口语需求」变成「底模认的提示词（Qwen-Image 契约）」，并把**同一个契约里的画幅比**直接交给工具参数，一步出图。
 关键词：Qwen-Image、MOSS-Image、千问生图、通义万相出图、`wh_ratio`、提示词改写、改图/融图。
@@ -7,7 +7,7 @@
 
 Qwen-Image 的提示词规范给出的答案不是一段随便的描述，而是一份**结构化契约**：一段描述性散文 + 一个画幅比。
 出图插件通常只收「成品 prompt」，画幅比要靠人再翻译一遍像素宽高——本插件把这一步去掉：
-契约里的 `wh_ratio` 就是 `qwen_image_generate` 的一等参数，原样传过去即可。
+契约里的 `wh_ratio` 就是 `image_forge_generate` 的一等参数，原样传过去即可。
 
 **职责边界**：改写提示词由**你**（模型）完成；工具只负责出图与落盘。工具不会替你润色 prompt。
 
@@ -17,7 +17,7 @@ Qwen-Image 的提示词规范给出的答案不是一段随便的描述，而是
 - 用户给了一段口语需求，需要先按契约改写成提示词再出图
 - 用户要按指定的画幅比出图（横版、竖版、方图、宽屏）
 - 用户要**改图 / 融图**（给了一张或多张参考图）——此时用 Edit 契约，见 `references/edit_rules.md`，
-  并把成品指令与参考图交给 `qwen_image_edit`
+  并把成品指令与参考图交给 `image_forge_edit`
 
 ## 何时不用
 
@@ -33,7 +33,7 @@ Qwen-Image 的提示词规范给出的答案不是一段随便的描述，而是
    - 有 → Edit：照 `references/edit_rules.md` 写「修改指令」，并按规则标注 `<image1>`、`<image2>`…。
 2. **画幅比从哪来？** 用户明说了就用用户的；没说就按被画主体的朝向定（横的主体偏宽、竖的主体偏高）。比例**只出现在 `wh_ratio` 字段里，绝不写进提示词正文**。
 3. **要不要立刻出图？** 用户是在**下订单**（「给我画一张…」「把这张改一下」）→ 改写完直接调工具
-   （无参考图 → `qwen_image_generate`；有参考图 → `qwen_image_edit`）；用户是在**咨询**（「这种需求提示词怎么写」）→
+   （无参考图 → `image_forge_generate`；有参考图 → `image_forge_edit`）；用户是在**咨询**（「这种需求提示词怎么写」）→
    只给契约结果，等用户点头再出图。
 
 ## 输出契约（与工具入参同构）
@@ -54,8 +54,8 @@ Edit：
 用户要 JSON 形态时只输出这一行 JSON（不要代码围栏、不要解释）；日常对话里就直接给出可复制的提示词正文 + 一句画幅比说明，不必非套 JSON。
 
 **把这个契约原样交给工具**：
-- 无参考图 → `rewritten_prompt` 传给 `qwen_image_generate.prompt`，`wh_ratio` 传给它的 `wh_ratio`。
-- 有参考图 → `rewritten_prompt` 传给 `qwen_image_edit.prompt`，参考图按顺序传给它的 `images`（绝对路径或 data URI），
+- 无参考图 → `rewritten_prompt` 传给 `image_forge_generate.prompt`，`wh_ratio` 传给它的 `wh_ratio`。
+- 有参考图 → `rewritten_prompt` 传给 `image_forge_edit.prompt`，参考图按顺序传给它的 `images`（绝对路径或 data URI），
   `ratio_follow` **原样**传给它的 `ratio_follow`（`"<image1>"` 写成 `"image1"`），`wh_ratio` 原样传给它。
   **不要自己把 ratio_follow 换算成比例**：插件会量出那张参考图的实际像素再挑 32 对齐的画布，
   并在返回里给出 `ratio_deviation_percent` / `ratio_follow_image`；你在回复里照着它说一句即可。
@@ -65,9 +65,10 @@ Edit：
 
 | 工具 | 职责 | 什么时候用 |
 |---|---|---|
-| `qwen_image_generate` | 出图主入口。收成品 `prompt`，`wh_ratio` 一等参数（官方 7 档），可选 `width`/`height` 覆盖、`steps`、`seed`、`count`、`preset`、`board`，以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见上） | 用户要**从零出图**时 |
-| `qwen_image_edit` | **参考图编辑（图生图）**。收成品改图 `prompt` + `images`（1–10 张绝对路径或 data URI），`ratio_follow` 让画布跟随某张参考图（与 `wh_ratio` **互斥**，都可省略=跟随第一张），其余参数同上；多参考不传质量档 | 用户给了**一张或多张参考图**、要按它们改图/融图时 |
-| `qwen_image_status` | **只读**体检：本机 ComfyUI 是否在跑（探过哪几个端口、三个权重能不能被它的加载器枚举到、显卡型号与显存余量）、输出目录能不能写。不产图、不写盘、不改配置 | 出图失败、或不确定后端是否就绪时**先跑它** |
+| `image_forge_generate` | 出图主入口。收成品 `prompt`，`wh_ratio` 一等参数（官方 7 档），可选 `width`/`height` 覆盖、`steps`、`seed`、`count`、`preset`、`board`，以及只对 base 生效的 `cfg`/`negative_prompt`（质量档，见上） | 用户要**从零出图**时 |
+| `image_forge_edit` | **参考图编辑（图生图）**。收成品改图 `prompt` + `images`（1–10 张绝对路径或 data URI），`ratio_follow` 让画布跟随某张参考图（与 `wh_ratio` **互斥**，都可省略=跟随第一张），其余参数同上；多参考不传质量档 | 用户给了**一张或多张参考图**、要按它们改图/融图时 |
+| `image_forge_status` | **只读**体检：本机 ComfyUI 是否在跑（探过哪几个端口、当前 model profile 的三个权重能不能被它的加载器枚举到、显卡型号与显存余量）、输出目录能不能写。不产图、不写盘、不改配置 | 出图失败、或不确定后端是否就绪时**先跑它** |
+| `image_forge_setup` | 环境管理：`status`，以及 `start` / `stop` / `install` / `download`。`download` 默认只出计划，`confirm: true` 才真正下载缺失权重；`start` 只拉起可识别的 ComfyUI 安装，`stop` 只停本插件拉起且能证明归属的实例 | 用户要启动/停止 ComfyUI、看安装引导或下载缺失权重时 |
 
 ## 画板：连续出图请复用 board
 
@@ -86,9 +87,8 @@ Edit：
 
 ## 后端：只有本机 ComfyUI 一条路
 
-本插件**不自带任何本地运行时**——不建 venv、不下权重、不拉进程，也不再提供云端 API：
-出图与改图都跑在**用户自己装好的 ComfyUI** 与当前 `comfyModel` 那一档的三个权重上（Qwen-Image 2.1 或 MOSS-Image），零下载、零转换、完全离线。
-没有别的后端档位，工具参数里也没有选后端的入口。
+本插件**不捆绑 ComfyUI、不创建 venv，也不提供云端 API**；出图与改图都跑在用户自己的 ComfyUI 与当前 `comfyModel` 对应的三个权重上（Qwen-Image 2.1 或 MOSS-Image）。
+环境本身可以交给 `image_forge_setup`：`status` 只读探测，`start` / `stop` 管理可证明归属的实例，`install` 给安装引导，`download` 在用户确认后下载缺失权重。其它工具参数里没有选择云后端的入口。
 
 - ComfyUI 没起来或缺权重时，报错会点名缺什么（探测过哪些端口、缺哪个文件、放进哪个目录），
   并指向 `docs/comfyui-deployment.md`。此时**不要重试**，先让用户照文档把环境补齐。
@@ -129,7 +129,7 @@ Edit：
 ## 画幅比与像素
 
 `wh_ratio` 只有官方 7 档，工具按 **~1.5MP 预算**把它们换算成 32 对齐的像素（下表是工具的确定性换算结果，
-也写在 `qwen_image_generate` 的返回里，不要自己另算一套）：
+也写在 `image_forge_generate` 的返回里，不要自己另算一套）：
 
 | `wh_ratio` | 像素 | 情形 |
 |---|---|---|
@@ -158,7 +158,7 @@ Edit：
 - 2K 的像素约为默认档 **2.8 倍**：8GB 卡上耗时与显存压力明显上升，先提醒用户，别默认开。
 - 4K 不是一个档位：官方明确「4K 丢提示词贴合度」，用户要 4K 时按 2K 出并说明这是模型甜点。
 - 用户给了**非官方档**（`21:9`、`18:39`、`5:7`…）：挑最接近的官方档，并在回复里说明你改用了哪一档。
-- **改图且要跟随参考图**（`ratio_follow`）：不要自己挑档，把 `ratio_follow` 原样交给 `qwen_image_edit`；
+- **改图且要跟随参考图**（`ratio_follow`）：不要自己挑档，把 `ratio_follow` 原样交给 `image_forge_edit`；
   它量的是参考图的**实际像素**，所以 `2048×1152` 这类非官方档也能跟随（结果里会给出实际像素与比例偏差）。
 - 用户给了**显式像素**（`1920x1080`）：先换算成比例再挑档；只有用户坚持要具体像素时，才用 `width`/`height` 覆盖（必须是 32 的倍数）。
 - 用户说「4K / 高清」这类词：那是**画质形容**，不是画幅比，不要据此推断比例。
@@ -166,7 +166,7 @@ Edit：
 
 ## 出图后的收尾（必做）
 
-`qwen_image_generate` / `qwen_image_edit` 都会把图落盘并回传 `markdown` 字段。**逐字复制那几行 `![](绝对路径)` 到你的回复正文**——
+`image_forge_generate` / `image_forge_edit` 都会把图落盘并回传 `markdown` 字段。**逐字复制那几行 `![](绝对路径)` 到你的回复正文**——
 客户端的文件路由会把本地绝对路径渲染成真图片，这是图片能在聊天框里显示的唯一可靠路径（工具结果里再贴一遍 JSON 只是给机器读的）。
 
 向用户交代结果时带上画板：`summary` 末尾会写「画板「名字」（新建），id `b…`」。用户想继续改同一组图时，
@@ -180,7 +180,7 @@ Edit：
 - 一次调用里既给 `wh_ratio` 又给 `width`/`height` → 以 `width`/`height` 为准，但请不要自相矛盾地给两者
 - 改图时既给 `wh_ratio` 又给 `ratio_follow` → **工具会直接报错**（官方契约里这两者互斥），请只留一个
 - 把参考图路径写成相对路径 / 把图省掉 → 工具会点名 `images[n]` 报错；参考图必须**绝对路径**或 data URI
-- 出图失败就直接重试同一份参数 → 先 `qwen_image_status` 看清是 ComfyUI 没起来，还是权重没装
+- 出图失败就直接重试同一份参数 → 先 `image_forge_status` 看清是 ComfyUI 没起来，还是权重没装
 - 改图报「ComfyUI 不可用」→ 改图只有本机 ComfyUI 一条路；这不是重试能解决的，
   照 `docs/comfyui-deployment.md` 装好再跑，或如实告诉用户缺什么
 - 8GB 卡上连发 2K 改图 → 显存不够会 CUDA OOM；编辑走 ComfyUI 时它自己按画布缩放参考图，

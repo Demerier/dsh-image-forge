@@ -604,7 +604,7 @@ export async function discoverComfyUi(options: ComfyOptions, signal?: AbortSigna
     `comfyui backend: 没找到在跑的 ComfyUI（已探测 ${probed.length} 个端口）：\n${tried}\n` +
       '  一条命令起来：node scripts/start-comfyui.mjs（仓库自带；不加参数就起+等就绪，--doctor 只体检）。\n' +
       '  不敢用脚本就照旧手动启动，它监听在别的端口时把该端口写进 comfyPorts 或直接写 comfyEndpoint。\n' +
-      '  部署步骤（下载、放权重、校验）见 docs/comfyui-deployment.md；也可以先跑 qwen_image_status 看缺什么。',
+      '  部署步骤（下载、放权重、校验）见 docs/comfyui-deployment.md；也可以先跑 image_forge_status 看缺什么。',
   )
 }
 
@@ -1515,7 +1515,7 @@ export interface ComfySystemStats {
 /**
  * Read `/system_stats` from a ComfyUI that already answered.
  *
- * This exists so `qwen_image_status` can report the GPU and its remaining VRAM
+ * This exists so `image_forge_status` can report the GPU and its remaining VRAM
  * without spawning `nvidia-smi`: the card that matters is the one ComfyUI loaded
  * its weights onto, and ComfyUI is the only party that knows. Every field is
  * optional in practice — an older server, or a CPU-only one, simply yields fewer

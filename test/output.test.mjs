@@ -24,7 +24,7 @@ function image(bytes = [137, 80, 78, 71]) {
 test('sanitizePrefix keeps ASCII names and collapses everything else', () => {
   assert.equal(sanitizePrefix('poster'), 'poster')
   assert.equal(sanitizePrefix('  my poster! '), 'my-poster')
-  assert.equal(sanitizePrefix('夏日特惠'), 'qwen', 'multi-byte-only input collapses to the fallback')
+  assert.equal(sanitizePrefix('夏日特惠'), 'forge', 'multi-byte-only input collapses to the fallback')
   assert.equal(sanitizePrefix(undefined, 'edit'), 'edit')
   assert.equal(sanitizePrefix('x'.repeat(60)), 'x'.repeat(48), 'prefixes are capped at 48 chars')
 })

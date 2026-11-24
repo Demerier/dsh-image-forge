@@ -69,28 +69,31 @@ test('the config schema resolves every documented field', () => {
   }
 })
 
-test('apply registers the four qwen_image_* tools and the skill', () => {
+test('apply registers the four image_forge_* tools and the skill', () => {
   const { ctx, tools, skills } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-surface-')) }))
   assert.deepEqual([...tools.keys()].sort(), [
-    'qwen_image_edit',
-    'qwen_image_generate',
-    'qwen_image_setup',
-    'qwen_image_status',
+    'image_forge_edit',
+    'image_forge_generate',
+    'image_forge_setup',
+    'image_forge_status',
   ])
   assert.equal(skills.length, 1)
-  assert.equal(skills[0].name, 'qwen-image-forge')
+  assert.equal(skills[0].name, 'image-forge')
   assert.equal(skills[0].source, 'runtime')
+  for (const retired of ['qwen_image_generate', 'qwen_image_edit', 'qwen_image_status', 'qwen_image_setup', 'qwen_image_env']) {
+    assert.equal(tools.get(retired), undefined, `the retired tool ${retired} must not be registered`)
+  }
 })
 
-test('qwen_image_edit requires images and carries the ratio pair as plain strings', () => {
+test('image_forge_edit requires images and carries the ratio pair as plain strings', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-edit-schema-')) }))
-  const definition = tools.get('qwen_image_edit')
+  const definition = tools.get('image_forge_edit')
   const parameters = definition.parameters
   const property = (name) => parameters?.properties?.[name] ?? parameters?.[name]
   const images = property('images')
-  console.log('qwen_image_edit.images parameter node:', JSON.stringify(images))
+  console.log('image_forge_edit.images parameter node:', JSON.stringify(images))
   assert.equal(images.type, 'array')
   assert.deepEqual(images.items, { type: 'string' })
   assert.deepEqual(parameters.required ?? [], ['prompt', 'images'])
@@ -105,7 +108,7 @@ test('qwen_image_edit requires images and carries the ratio pair as plain string
 test('wh_ratio is a first-class enum carrying the seven official tiers', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-schema-')) }))
-  const definition = tools.get('qwen_image_generate')
+  const definition = tools.get('image_forge_generate')
   const parameters = definition.parameters
   const node = parameters?.properties?.wh_ratio ?? parameters?.wh_ratio
   assert.ok(node !== undefined, `wh_ratio missing from the parameter schema: ${JSON.stringify(Object.keys(parameters ?? {}))}`)
@@ -134,7 +137,7 @@ const CITABLE_DOCS = ['skill.md', 'references/t2i_rules.md', 'references/edit_ru
 test('the wh_ratio description cites a document that really prints the conversion table', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-pointer-')) }))
-  const parameters = tools.get('qwen_image_generate').parameters
+  const parameters = tools.get('image_forge_generate').parameters
   const description = (parameters?.properties?.wh_ratio ?? parameters?.wh_ratio).description
   console.log('wh_ratio description:', description)
 
@@ -171,7 +174,7 @@ const CONVERSION_TABLE_2K = {
 test('size_tier offers the two documented budgets, and skill.md prints the 2K table', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-tier-schema-')) }))
-  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+  for (const tool of ['image_forge_generate', 'image_forge_edit']) {
     const parameters = tools.get(tool).parameters
     const node = parameters?.properties?.size_tier ?? parameters?.size_tier
     assert.ok(node !== undefined, `${tool} must expose size_tier`)
@@ -194,7 +197,7 @@ test('size_tier offers the two documented budgets, and skill.md prints the 2K ta
 test('the image tools expose the optional quality tier, default-free', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-quality-schema-')) }))
-  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+  for (const tool of ['image_forge_generate', 'image_forge_edit']) {
     const parameters = tools.get(tool).parameters
     const property = (name) => parameters?.properties?.[name] ?? parameters?.[name]
     for (const [name, type] of [
@@ -216,7 +219,7 @@ test('the image tools expose the advanced sampler tier, native-only and default-
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-sampler-schema-')) }))
   const EXPECTED_SAMPLERS = ['euler', 'res_multistep', 'er_sde', 'dpmpp_2m', 'heun']
   const EXPECTED_SCHEDULERS = ['simple', 'normal', 'karras', 'exponential', 'sgm_uniform', 'beta']
-  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+  for (const tool of ['image_forge_generate', 'image_forge_edit']) {
     const parameters = tools.get(tool).parameters
     const property = (name) => parameters?.properties?.[name] ?? parameters?.[name]
     for (const name of ['sampler', 'scheduler']) {
@@ -246,7 +249,7 @@ test('the image tools carry no backend selector, and status needs no parameters'
   // One backend remains (the local ComfyUI), so a per-call `backend` selector
   // would be an always-loaded gun: a caller could ask for a backend that does
   // not exist. Its absence from the schema is the contract.
-  for (const tool of ['qwen_image_generate', 'qwen_image_edit']) {
+  for (const tool of ['image_forge_generate', 'image_forge_edit']) {
     const node = tools.get(tool).parameters
     const property = (name) => node?.properties?.[name] ?? node?.[name]
     assert.equal(property('backend'), undefined, `${tool} must not offer a backend parameter`)
@@ -255,9 +258,9 @@ test('the image tools carry no backend selector, and status needs no parameters'
   // `qwen_image_env` is gone; the surviving status tool is read-only and takes
   // only an optional timeout budget.
   assert.equal(tools.get('qwen_image_env'), undefined, 'the local-runtime tool must not come back')
-  const statusNode = tools.get('qwen_image_status').parameters
+  const statusNode = tools.get('image_forge_status').parameters
   assert.deepEqual(Object.keys(statusNode?.properties ?? statusNode ?? {}), ['timeoutMs'])
-  const genNode = tools.get('qwen_image_generate').parameters
+  const genNode = tools.get('image_forge_generate').parameters
   const required = genNode?.required ?? []
   console.log('required parameters:', JSON.stringify(required))
   assert.ok(required.includes('prompt'), 'prompt must be required')
@@ -284,7 +287,7 @@ test('the composed skill body describes only the two surviving backends', () => 
   const content = skills[0].content
   const mentions = (needle) => content.split(needle).length - 1
   console.log('composed skill body chars:', content.length, JSON.stringify({
-    qwen_image_status: mentions('qwen_image_status'),
+    image_forge_status: mentions('image_forge_status'),
     qwen_image_env: mentions('qwen_image_env'),
     comfyModel: mentions('comfyModel'),
     deploymentDoc: mentions('docs/comfyui-deployment.md'),
@@ -292,7 +295,7 @@ test('the composed skill body describes only the two surviving backends', () => 
 
   // The tool the model is told about must be one that exists, and the retired
   // local-runtime tool must not be described anywhere in the body.
-  assert.ok(mentions('qwen_image_status') >= 1, 'the skill must point at the surviving status tool')
+  assert.ok(mentions('image_forge_status') >= 1, 'the skill must point at the surviving status tool')
   assert.equal(mentions('qwen_image_env'), 0, 'the skill still documents a tool that no longer exists')
 
   // One backend, named as such — the cloud tier must not be offered either.
@@ -324,11 +327,11 @@ test('the composed skill body describes only the two surviving backends', () => 
   assert.match(content, /docs\/comfyui-deployment\.md/)
 })
 
-test('the environment tool is qwen_image_setup with install/download actions; qwen_image_env stays banned', () => {
+test('the environment tool is image_forge_setup with install/download actions; qwen_image_env stays banned', () => {
   const { ctx, tools } = captureContext()
   plugin.apply(ctx, configWith({ outputDir: mkdtempSync(join(tmpdir(), 'forge-surface-setup-')) }))
   assert.equal(tools.get('qwen_image_env'), undefined, 'the retired local-runtime tool must not come back')
-  const setup = tools.get('qwen_image_setup')
+  const setup = tools.get('image_forge_setup')
   assert.ok(setup, 'the managed environment tool must exist')
   const parameters = setup.parameters ?? {}
   const property = (name) => parameters?.properties?.[name] ?? parameters?.[name]
@@ -339,5 +342,5 @@ test('the environment tool is qwen_image_setup with install/download actions; qw
   const description = String(setup.description ?? '')
   assert.match(description, /object_info/)
   assert.match(description, /computer use/)
-  console.log('qwen_image_setup actions:', JSON.stringify(property('action').enum))
+  console.log('image_forge_setup actions:', JSON.stringify(property('action').enum))
 })

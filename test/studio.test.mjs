@@ -2404,7 +2404,7 @@ test('T22: the stepper maps snapshot + live phase onto four steps', () => {
   // Connected but weights missing is a distinct failure (the T14 download step).
   const noWeights = stepperStepsOf({ ready: true, itemCount: 0 })
   assert.equal(noWeights[2].state, 'failed')
-  assert.ok(noWeights[2].detail.includes('qwen_image_setup'), 'the row names the managed download entry')
+  assert.ok(noWeights[2].detail.includes('image_forge_setup'), 'the row names the managed download entry')
 
   // The live SSE phase drives the last step.
   const running = stepperStepsOf({ ready: true, models, itemCount: 0, livePhase: 'running', livePercent: 34 })

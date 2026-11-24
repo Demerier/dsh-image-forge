@@ -1,0 +1,154 @@
+{
+  "briefs": [
+    {
+      "id": "PE-COUNT",
+      "type": "instruction-following",
+      "seeds": [
+        2026112401,
+        2026112402
+      ],
+      "brief": "纯白无缝背景，画面中恰好三颗红苹果，横向等距排列；不得出现叶子、盘子、文字、人物、手或任何其他物体。",
+      "constraints": [
+        "画面中必须恰好三颗红苹果",
+        "三颗苹果横向等距排列",
+        "不得出现叶子、盘子、文字、人物、手或任何其他物体"
+      ],
+      "promptVariants": {
+        "raw": "纯白无缝背景，画面中恰好三颗红苹果，横向等距排列；不得出现叶子、盘子、文字、人物、手或任何其他物体。",
+        "project": "纯白无缝摄影棚背景，画面中央只放三颗成熟红苹果，三颗苹果大小接近，沿水平线从左到右等距排列，完整可见。苹果表面有自然细微高光和真实果皮纹理，但没有任何叶子、果柄之外的多余附着物。画面中不得出现盘子、桌面、阴影装饰、文字、人物、手、道具或其他物体。构图极简，正面略高视角，柔和均匀照明，清晰边界，严格控制为三颗苹果。",
+        "gold": "Three mature red apples only, equal visual size, arranged in a perfectly horizontal row with equal spacing and centered on a seamless pure-white studio background. Natural apple skin texture and restrained soft highlights. No leaves, no plate, no table edge, no other fruit, no text, no people, no hands, no props, no decorative shadows. Clean minimal product photography, frontal slightly elevated view, exact count of three.",
+        "official-skill": "A clean studio photograph on a seamless pure white background showing exactly three mature red apples. The apples are nearly equal in size and arranged in a single horizontal row with even spacing, centered in the frame. Their skin has natural texture and subtle highlights. Nothing else is present: no leaves, no plate, no table, no text, no people, no hands, no props and no other fruit. Minimal composition, soft even lighting, crisp edges, frontal slightly elevated viewpoint.",
+        "text-generate-v2": null
+      },
+      "promptFreeze": {
+        "goldAt": "2026-11-24T14:00:00+08:00",
+        "goldSha256": "dcd70e6d5cf7f1bc40b1eb40c15c5eccc31e3b1475454ab62d23efbac065d13b"
+      }
+    },
+    {
+      "id": "PE-RELATION",
+      "type": "instruction-following",
+      "seeds": [
+        2026112403,
+        2026112404
+      ],
+      "brief": "浅灰背景，一个红色立方体在左、一个蓝色球体在中、一个绿色圆柱体在右，三者位于同一水平线且互不接触；画面只能有这三个物体，无文字。",
+      "constraints": [
+        "红色立方体在左、蓝色球体在中、绿色圆柱体在右",
+        "三个物体位于同一水平线且互不接触",
+        "画面只能有三个物体，不得出现文字"
+      ],
+      "promptVariants": {
+        "raw": "浅灰背景，一个红色立方体在左、一个蓝色球体在中、一个绿色圆柱体在右，三者位于同一水平线且互不接触；画面只能有这三个物体，无文字。",
+        "project": "浅灰色无缝摄影棚背景，画面中恰好三个基础几何体：左侧一个红色立方体，中央一个蓝色球体，右侧一个绿色圆柱体。三个物体大小比例协调，底部落在同一水平线上，彼此之间留有清楚空隙且不接触。使用柔和棚拍光，保留轻微接触阴影和真实材质高光。画面中只能出现这三个物体，不得出现底座、围栏、文字、数字、人物、手、额外装饰或其他几何体。正面平视，居中构图，物体边界和颜色清晰。",
+        "gold": "Exactly three basic geometric solids on a seamless light-gray studio background: a red cube on the left, a blue sphere in the center, and a green cylinder on the right. The three objects share one baseline, have equal visual weight, and remain clearly separated with visible gaps. Soft studio lighting, subtle grounded shadows, clean matte-to-satin materials. No base, no text, no numerals, no people, no hands, no decoration and no fourth object. Frontal eye-level view, centered symmetrical composition.",
+        "official-skill": "A minimalist studio still life on a seamless light-gray background with exactly three objects: one red cube on the left, one blue sphere in the center, and one green cylinder on the right. Place all three on the same horizontal baseline with visible gaps so they do not touch. Use soft even lighting and subtle grounded shadows, keeping the forms and colors crisp. The frame contains only these three objects, with no text, numbers, people, hands, stand, decoration or additional geometry. Frontal eye-level viewpoint and a centered composition.",
+        "text-generate-v2": null
+      },
+      "promptFreeze": {
+        "goldAt": "2026-11-24T14:00:00+08:00",
+        "goldSha256": "8ea3602b0fc27d089063d80493d59c6d6ac66fc4ff9ff5dc31434abfee2b0570"
+      }
+    },
+    {
+      "id": "PE-EXCLUSION",
+      "type": "instruction-following",
+      "seeds": [
+        2026112405,
+        2026112406
+      ],
+      "brief": "极简产品静物：一只无图案的白色陶瓷马克杯放在画面右侧三分之一，左侧留出大面积空白；不得出现杯子以外的物体、人物、手、文字、logo、装饰或倒影。",
+      "constraints": [
+        "只有一只无图案白色陶瓷马克杯",
+        "杯子位于画面右侧三分之一，左侧留出大面积空白",
+        "不得出现杯子以外的物体、人物、手、文字、logo、装饰或倒影"
+      ],
+      "promptVariants": {
+        "raw": "极简产品静物：一只无图案的白色陶瓷马克杯放在画面右侧三分之一，左侧留出大面积空白；不得出现杯子以外的物体、人物、手、文字、logo、装饰或倒影。",
+        "project": "极简产品摄影，单一无图案白色陶瓷马克杯完整放在画面右侧三分之一处，杯口朝上，杯把朝右，杯身留白干净。左侧约三分之二区域保持大面积纯色负空间。使用浅暖灰无缝背景和一层非常克制的柔和接触阴影。画面中不得出现杯子以外的任何物体，不得出现人物、手、托盘、桌面摆件、文字、字母、logo、图案、装饰线或镜面倒影。真实陶瓷质感，柔和棚拍光，构图克制。",
+        "gold": "Minimalist product still life with one plain white ceramic mug placed entirely in the right third of the frame, handle facing right, opening visible. The left two-thirds remain generous clean negative space. Seamless pale warm-gray backdrop, soft studio light, only a restrained contact shadow. No second object, no person, no hand, no saucer, no tabletop props, no text, no letters, no logo, no pattern, no ornament and no mirror reflection. Photorealistic glazed ceramic, precise edges, editorial restraint.",
+        "official-skill": "A minimalist product photograph showing a single plain white ceramic mug positioned inside the right third of the frame, with its handle to the right and the opening visible. The left two-thirds are open negative space. Use a seamless pale warm-gray background, soft studio lighting and only a subtle contact shadow beneath the mug. Nothing else appears in the image: no person, no hand, no saucer, no props, no text, no logo, no decorative pattern and no mirror reflection. Clean glazed ceramic texture and precise editorial composition.",
+        "text-generate-v2": null
+      },
+      "promptFreeze": {
+        "goldAt": "2026-11-24T14:00:00+08:00",
+        "goldSha256": "aaccf591f4922a32ac042863ce0422e28ecda60a4fdc129930687e2084e28964"
+      }
+    },
+    {
+      "id": "PE-GLASS",
+      "type": "product-material",
+      "seeds": [
+        2026112407,
+        2026112408
+      ],
+      "brief": "透明方形香水瓶，淡青色液体，磨砂银色瓶盖，深灰石材台面；瓶身正面仅显示精确英文标签「AQUA 07」；真实折射与焦散，无其他文字。",
+      "constraints": [
+        "透明方形香水瓶，淡青色液体，磨砂银色瓶盖，深灰石材台面",
+        "瓶身正面仅显示精确英文标签「AQUA 07」",
+        "真实折射与焦散，无其他文字"
+      ],
+      "promptVariants": {
+        "raw": "透明方形香水瓶，淡青色液体，磨砂银色瓶盖，深灰石材台面；瓶身正面仅显示精确英文标签「AQUA 07」；真实折射与焦散，无其他文字。",
+        "project": "商业产品摄影，一只透明方形香水瓶置于深灰色石材台面，瓶身比例修长，厚玻璃边缘清晰，内部装满淡青色透明液体，顶部配磨砂银色方形瓶盖。瓶身正面只有一行精确英文标签 “AQUA 07”，无其他文字、数字、logo 或图案。柔和侧逆光穿过玻璃，形成真实折射、亮点和可控焦散，石材纹理清楚。背景为深灰到黑色渐变，无其他物体、手、人物或包装。正面略低视角，瓶身完整，商业广告级清晰度。",
+        "gold": "Luxury commercial still life of a clear square glass perfume bottle on a dark gray stone slab. Pale cyan liquid inside, thick polished glass edges, a frosted silver square cap. The front label contains only the exact English text “AQUA 07”; no other letters, numbers, logos or graphics. Controlled side-back lighting creates believable refraction, sharp highlights and subtle caustics across the stone. Deep charcoal gradient background, no props, no hands, no people, no packaging. Frontal slightly low angle, full bottle, crisp advertising photography.",
+        "official-skill": "A premium product photograph of a transparent square perfume bottle standing on a dark gray stone surface. The bottle is filled with pale cyan liquid and topped with a frosted silver cap. Its thick glass edges catch the light. The bottle front shows only the exact English label “AQUA 07”, with no other text, numerals, logo or decoration. Soft side-back lighting produces realistic refraction, bright highlights and restrained caustics on the stone. The background is a deep charcoal gradient with no other objects, hands or people. Frontal slightly low viewpoint, complete bottle, clean commercial composition.",
+        "text-generate-v2": null
+      },
+      "promptFreeze": {
+        "goldAt": "2026-11-24T14:00:00+08:00",
+        "goldSha256": "9bdf64ec40bac884952ba8fbce5a1c74e0b0f29e7460886309bfdb9c7d213dfb"
+      }
+    },
+    {
+      "id": "PE-METAL",
+      "type": "product-material",
+      "seeds": [
+        2026112409,
+        2026112410
+      ],
+      "brief": "不锈钢机械腕表特写，深蓝表盘，银色指针，表盘正下方仅刻「NOVA」；拉丝金属、蓝宝石玻璃反光、黑色皮革表带，无其他物体和文字。",
+      "constraints": [
+        "不锈钢机械腕表特写，深蓝表盘，银色指针",
+        "表盘正下方仅刻「NOVA」",
+        "拉丝金属、蓝宝石玻璃反光、黑色皮革表带，无其他物体和文字"
+      ],
+      "promptVariants": {
+        "raw": "不锈钢机械腕表特写，深蓝表盘，银色指针，表盘正下方仅刻「NOVA」；拉丝金属、蓝宝石玻璃反光、黑色皮革表带，无其他物体和文字。",
+        "project": "高端腕表微距产品摄影，一只不锈钢机械腕表正面特写，深蓝色放射纹表盘，银色时针、分针和秒针清楚可辨，刻度简洁。表盘正下方只刻有精确大写英文单词 “NOVA”，没有品牌名、数字说明或其他文字。不锈钢表壳和表圈呈细腻拉丝纹理，蓝宝石玻璃有克制而清晰的反光边缘，黑色皮革表带自然延伸。背景为深灰渐变，无其他物体、手、人物、包装或装饰。正面构图，焦点落在表盘与金属细节。",
+        "gold": "High-end macro photograph of a stainless steel mechanical wristwatch, frontal close-up. Deep navy sunburst dial with clear silver hour, minute and second hands and restrained markers. At the exact bottom center of the dial, the only lettering is the uppercase word “NOVA”; no brand, numerals or other text. Fine brushed steel case and bezel, controlled sapphire-crystal reflections along the glass edge, black leather strap extending naturally. Dark gray gradient background, no other objects, hands, people, packaging or decoration. Sharp focus on dial and metal texture.",
+        "official-skill": "A luxurious macro product photograph of a stainless steel mechanical wristwatch viewed from the front. The dial is deep navy with a subtle sunburst finish and clear silver hands and simple hour markers. The only lettering on the dial is the exact uppercase word “NOVA”, centered at the bottom. Show finely brushed steel on the case and bezel, a controlled blue-white reflection on the sapphire crystal, and a black leather strap extending naturally into the background. Deep gray gradient backdrop with no other objects, hands, people or packaging. Front-facing composition with sharp dial and metal detail.",
+        "text-generate-v2": null
+      },
+      "promptFreeze": {
+        "goldAt": "2026-11-24T14:00:00+08:00",
+        "goldSha256": "3d917b94de3c37bbf8407cdccaac28e22e03cd6a6811cd75c36bdbe358f390c1"
+      }
+    },
+    {
+      "id": "PE-LIBRARY",
+      "type": "architecture-space",
+      "seeds": [
+        2026112411,
+        2026112412
+      ],
+      "brief": "现代图书馆中庭室内建筑摄影：右侧通高落地窗，左侧整面书架，中央一张长木桌和四把绿色阅读椅，桌面四盏对称台灯；画面无人物、无文字；一点透视，强调左右对称和纵深。",
+      "constraints": [
+        "右侧通高落地窗，左侧整面书架",
+        "中央一张长木桌和四把绿色阅读椅，桌面四盏对称台灯",
+        "画面无人物、无文字；一点透视，强调左右对称和纵深"
+      ],
+      "promptVariants": {
+        "raw": "现代图书馆中庭室内建筑摄影：右侧通高落地窗，左侧整面书架，中央一张长木桌和四把绿色阅读椅，桌面四盏对称台灯；画面无人物、无文字；一点透视，强调左右对称和纵深。",
+        "project": "现代图书馆中庭的室内建筑摄影，一点透视严格居中，纵深清楚。画面右侧是通高落地窗，冷柔自然光进入；左侧是整面到顶书架，书籍排列整齐但不过度杂乱。中央纵轴上放一张长木桌，桌子左右两侧各两把绿色阅读椅，共四把；桌面沿中线对称摆放四盏台灯。木材、石材、玻璃和金属细节真实，地面有克制反射。画面中无人物、无文字、无标识、无额外家具。对称构图，广角但垂直线条保持笔直。",
+        "gold": "Architectural interior photograph of a modern library atrium in strict one-point perspective. Tall floor-to-ceiling windows occupy the right wall, admitting cool soft daylight; a full-height bookshelf fills the left wall. A single long wooden reading table runs down the center, flanked by exactly four green reading chairs, two per side. Four matching desk lamps sit symmetrically along the tabletop. Real wood, stone, glass and metal materials, restrained floor reflections, perfectly vertical architectural lines. No people, no text, no signs and no extra furniture. Emphasize bilateral symmetry and deep perspective.",
+        "official-skill": "A modern library atrium photographed as architectural interior photography with a strict one-point perspective. The right side is a full-height floor-to-ceiling window wall with soft cool daylight; the left side is a complete floor-to-ceiling bookshelf. A long wooden reading table runs along the central axis, with exactly four green reading chairs arranged two per side. Four matching table lamps are spaced symmetrically along the tabletop. Show realistic wood, stone, glass and metal textures with restrained reflections on the floor. No people, no text, no signs and no additional furniture. Centered symmetrical composition with strong depth and straight vertical lines.",
+        "text-generate-v2": null
+      },
+      "promptFreeze": {
+        "goldAt": "2026-11-24T14:00:00+08:00",
+        "goldSha256": "8eaa01e95d9ed4052db18b4212141c21684aa5f2a321604d0183517e02b51e2b"
+      }
+    }
+  ]
+}

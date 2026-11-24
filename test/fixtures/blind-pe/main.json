@@ -1,0 +1,55 @@
+{
+  "briefs": [
+    {
+      "id": "PE-TEXT",
+      "seed": 2026092301,
+      "brief": "原创科幻电影海报：深空黑背景中，一艘细长的跃迁飞船从画面左下方朝右上方穿过蓝色星门，尾迹拉出冷白色弧线。海报上方居中显示中文主标题「归零之后」，下方居中显示中文副标题「最后一次跃迁」。文字必须清晰、准确、可读，简体中文字形不能出错。",
+      "constraints": [
+        "必须准确显示「归零之后」与「最后一次跃迁」",
+        "主标题位于上方居中，副标题位于下方居中",
+        "同一题材的所有来源共用同一 seed"
+      ],
+      "promptVariants": {
+        "raw": "原创科幻电影海报：深空黑背景中，一艘细长的跃迁飞船从画面左下方朝右上方穿过蓝色星门，尾迹拉出冷白色弧线。海报上方居中显示中文主标题「归零之后」，下方居中显示中文副标题「最后一次跃迁」。文字必须清晰、准确、可读，简体中文字形不能出错。",
+        "project": "原创科幻电影海报，竖版构图，深空背景几乎纯黑，一枚巨大的蓝色环形星门占据画面中部。一艘细长银白色跃迁飞船从左下向右上穿过星门中心，身后拖出冷白色能量尾迹，边缘带少量青蓝色粒子。海报上方居中排布简体中文主标题「归零之后」，使用窄体粗黑或粗宋、白色字、字距紧凑；下方居中排布简体中文副标题「最后一次跃迁」，使用较小字号、较宽字距。文字必须逐字准确，无错字、无繁体替换、无额外文案。电影级侧逆光，克制的蓝白色彩，轻微胶片颗粒，所有元素服务片名识别。",
+        "gold": "Original vertical sci-fi movie poster. Absolute black deep-space field, a monumental cobalt-blue torus stargate centered behind a long, needle-thin silver starship crossing from lower left to upper right; its wake is a razor-thin cold-white arc with a few cyan particles. Top center: the exact Simplified Chinese headline \"归零之后\", bold condensed sans or heavy serif, white, tight tracking, perfectly legible. Lower center: the exact Simplified Chinese subtitle \"最后一次跃迁\", smaller, widely tracked, white. No other copy. Atmospheric rim light, restrained blue-white palette, subtle 35mm grain, premium cinematic key art, precise typography and clean negative space.",
+        "official-skill": "A vertical original science-fiction movie poster set in near-black deep space. A colossal blue circular stargate dominates the middle of the frame, while a slender silver starship cuts diagonally from the lower left toward the upper right, leaving a thin cold-white energy trail scattered with tiny cyan particles. Centered near the top, the exact Simplified Chinese title \"归零之后\" appears in bold condensed white lettering with tight spacing. Centered near the bottom, the exact Simplified Chinese subtitle \"最后一次跃迁\" appears in smaller white lettering with wide spacing. No other text is visible. Cinematic rim lighting, restrained blue and white palette, fine film grain, clean premium poster composition.",
+        "text-generate-v2": null
+      }
+    },
+    {
+      "id": "PE-PORTRAIT",
+      "seed": 2026092302,
+      "brief": "写实人像摄影：七十岁女性陶艺师坐在工作室木凳上，双手正在修整一只青瓷茶壶。画面要看清手部动作、皱纹、指甲边缘、泥料和釉面，暖色侧光照出陶土与青瓷的质感。",
+      "constraints": [
+        "七十岁女性、写实人像",
+        "双手修整青瓷茶壶，手部结构必须自然",
+        "同一题材的所有来源共用同一 seed"
+      ],
+      "promptVariants": {
+        "raw": "写实人像摄影：七十岁女性陶艺师坐在工作室木凳上，双手正在修整一只青瓷茶壶。画面要看清手部动作、皱纹、指甲边缘、泥料和釉面，暖色侧光照出陶土与青瓷的质感。",
+        "project": "写实环境人像，七十岁东亚女性陶艺师坐在旧木凳上，身体略向工作台前倾，灰白短发在耳后别起，脸上有自然皱纹和常年劳累形成的细纹，神情专注平静。她穿着深靛蓝亚麻围裙和卷起袖口的米色衬衫，双手捧着一只未完全修整的青瓷茶壶，右手拇指轻压壶肩，左手托住壶底，指节、指甲边缘和指腹的陶泥都清晰可见。背景是温暖杂乱但有序的陶艺工作室，木架上摆着素坯和釉料罐，左侧窗光斜入，暖色侧光照亮皮肤、陶土和青瓷釉面。真实皮肤纹理、自然手部解剖、浅景深、纪实摄影，无文字、无水印。",
+        "gold": "Photorealistic environmental portrait of a seventy-year-old East Asian female ceramic artist seated on an old wooden stool, leaning slightly toward her workbench. Short silver hair tucked behind her ears, deeply weathered skin, natural wrinkles, calm focused eyes. She wears a dark indigo linen apron over a beige shirt with rolled sleeves. Her hands hold a celadon teapot in progress: right thumb gently presses the shoulder, left palm supports the base. Anatomically correct fingers, visible knuckles, short clean nails, clay slip along the fingertips. Warm late-afternoon window light from camera left, textured skin, wet clay, crackled celadon glaze, wooden tools, blurred shelves of bisque ware and glaze jars, shallow depth of field, editorial documentary photography, no text, no watermark.",
+        "official-skill": "A realistic environmental portrait of a seventy-year-old female ceramic artist in a working pottery studio. She sits on a worn wooden stool, leaning forward with quiet concentration. Her grey hair is pinned loosely behind her ears, and her face has natural deep lines and weathered skin. She wears a dark indigo linen apron over a beige shirt with rolled sleeves. Both hands are visible as she refines a celadon teapot: one palm cradles the base, the other thumb smooths the shoulder. Her knuckles, short nails and clay-stained fingertips are clearly defined. Warm side light enters from a window on the left, revealing wet clay, the teapot's pale green glaze and the grain of the workbench. Shelves of bisque pieces and glaze jars soften in the background. Natural documentary photography, restrained earth tones, shallow depth of field, no text or watermark.",
+        "text-generate-v2": null
+      }
+    },
+    {
+      "id": "PE-COMPLEX",
+      "seed": 2026092303,
+      "brief": "雨夜便利店门口，画面里必须正好有三个人和一条狗。左侧年轻女性穿黄色雨衣、撑透明伞；中间中年男性穿深色风衣，正把购物袋递给她；右侧少年蹲着给一条黑白狗系牵引绳。人物左右位置、互动关系和湿地面霓虹反光都要明确。",
+      "constraints": [
+        "正好三人和一条狗，不能多也不能少",
+        "左侧女性、中间男性、右侧少年；男性把购物袋递给女性；少年给狗系牵引绳",
+        "同一题材的所有来源共用同一 seed"
+      ],
+      "promptVariants": {
+        "raw": "雨夜便利店门口，画面里必须正好有三个人和一条狗。左侧年轻女性穿黄色雨衣、撑透明伞；中间中年男性穿深色风衣，正把购物袋递给她；右侧少年蹲着给一条黑白狗系牵引绳。人物左右位置、互动关系和湿地面霓虹反光都要明确。",
+        "project": "写实电影感街景，雨夜便利店门前。画面正好三个人和一条狗，不出现额外行人。左侧年轻女性穿亮黄色雨衣，右手撑透明塑料伞，左手接住购物袋，面向中间男性；中间中年男性穿深色长风衣，身体朝向左侧，右手把白色购物袋递给她，左手插在口袋里；右侧少年蹲在湿地上，双手为一条黑白花狗系红色牵引绳，狗坐在他身边并看向左侧两人。便利店玻璃门与货架在后方形成暖白光源，青色、洋红和橙色霓虹招牌在积水地面形成拉长倒影。雨丝、衣料高光、呼吸白雾、真实手部解剖、35mm 电影构图、冷暖对比，无文字、无水印。",
+        "gold": "Cinematic 35mm night street photograph outside a convenience store in heavy rain. Exactly three people and one dog. On the left, a young woman in a saturated yellow raincoat holds a clear umbrella with her right hand and receives a white shopping bag with her left, her body angled toward the center. In the center, a middle-aged man in a dark trench coat turns toward her and hands over the bag with his right hand, left hand in his pocket. On the right, a teenager crouches on the wet pavement and fastens a red leash to a seated black-and-white dog; the dog looks toward the other two people. No extra pedestrians. Warm white light spills from the storefront; cyan, magenta and orange neon signs reflect in long streaks across puddles. Visible rain, fabric sheen, breath mist, anatomically correct hands, realistic reflections, shallow cinematic depth.",
+        "official-skill": "A photorealistic cinematic street scene on a rainy night outside a convenience store, with exactly three people and one dog. On the left, a young woman in a bright yellow raincoat holds a clear umbrella in her right hand and reaches with her left to accept a white shopping bag. In the center, a middle-aged man in a long dark trench coat turns toward her and hands her the bag with his right hand. On the right, a teenager crouches on the wet pavement, both hands fastening a red leash to a seated black-and-white dog that looks toward the other two people. No additional people are present. Warm white light comes from the store windows, while cyan, magenta and orange neon signs reflect in long streaks on the puddled ground. Rain threads through the air, breath mist is visible, clothing catches the neon, and the composition uses a shallow cinematic focus.",
+        "text-generate-v2": null
+      }
+    }
+  ]
+}

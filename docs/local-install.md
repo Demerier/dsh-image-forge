@@ -8,7 +8,7 @@
 
 ## 〇、T22 之后的运行时口径（先读）
 
-- **受管环境**：装/起/权重下载由插件环境工具 `qwen_image_setup`（`status` / `start` / `stop` /
+- **受管环境**：装/起/权重下载由插件环境工具 `image_forge_setup`（`status` / `start` / `stop` /
   `install` / `download`）负责，工作台顶部的四步 stepper 只观察进度并给「重新检测」。
 - **双底模**：`qwen21-base`（40 步）/ `qwen21-turbo`（8 步）与 `moss-sft`（MOSS-Image，25 步模板）
   三条 profile；缺 turbo 权重会明确退化到 base（`turbo_fallback`），MOSS 缺权重直接报错。
@@ -101,13 +101,13 @@ node -e "console.log(require('C:/Users/Demeri/.dsh/profiles/desktop/package.json
 
 | 位置 | 应该看到 |
 |---|---|
-| 对话工具列表 | `qwen_image_generate` / `qwen_image_edit` / `qwen_image_status` |
+| 对话工具列表 | `image_forge_generate` / `image_forge_edit` / `image_forge_status` |
 | 设置页左侧一级条目 | 「生图配置」 |
 | 该条目第一个页签 | 工作台（ComfyUI 没开也能打开，顶部会写探测结果） |
 
 ### 3. 功能层面
 
-在对话里说 **「用 qwen_image_status 检查一下环境」**，它会回报：云 API 通不通、ComfyUI 在不在跑（探了哪些端口）、三个权重能否识别、显卡与显存、输出目录能否写。
+在对话里说 **「用 image_forge_status 检查一下环境」**，它会回报：云 API 通不通、ComfyUI 在不在跑（探了哪些端口）、三个权重能否识别、显卡与显存、输出目录能否写。
 
 `next_steps` 字段非空就照那句话做。
 

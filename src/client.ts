@@ -1,5 +1,5 @@
 /**
- * Client half: keyed tool views for every `qwen_image_*` tool, the Studio's
+ * Client half: keyed tool views for every `image_forge_*` tool, the Studio's
  * global-panel seats, and the `dsh-image-forge` first-level settings section.
  *
  * ## Tool views
@@ -88,9 +88,9 @@ export const inject = ['slots', 'configForms']
 
 /** Every tool this plugin registers, in the order the cards are seated. */
 const TOOL_KEYS = [
-  'qwen_image_generate',
-  'qwen_image_edit',
-  'qwen_image_status',
+  'image_forge_generate',
+  'image_forge_edit',
+  'image_forge_status',
 ] as const
 
 /** Minimal shape of the host-provided image loader. */
@@ -254,7 +254,7 @@ function ImageGrid(props: ToolRowProps): ReactNode {
 function ImageResultRow(props: ToolRowProps): ReactNode {
   try {
     const payload = payloadOf(props)
-    const isEdit = toolNameOf(props) === 'qwen_image_edit'
+    const isEdit = toolNameOf(props) === 'image_forge_edit'
     const count = imagePaths(props).length
     const done =
       count > 0
@@ -364,9 +364,9 @@ function StatusRow(props: ToolRowProps): ReactNode {
  * @returns a component that renders that tool's card.
  */
 function createToolRow(toolName: string): (props: ToolRowProps) => ReactNode {
-  return function QwenImageToolRow(props: ToolRowProps): ReactNode {
+  return function ImageForgeToolRow(props: ToolRowProps): ReactNode {
     const bound: ToolRowProps = { ...props, toolName: toolNameOf(props) || toolName }
-    if (toolName === 'qwen_image_status') return StatusRow(bound)
+    if (toolName === 'image_forge_status') return StatusRow(bound)
     return ImageResultRow(bound)
   }
 }
