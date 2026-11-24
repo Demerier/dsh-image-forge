@@ -39,28 +39,16 @@
  * sidebar glyph lives in `./studio-view.ts`. The settings section below is pure
  * configuration.
  */
-import { createElement, useEffect, useState, type ReactNode } from 'react'
+import { createElement, type ReactNode } from 'react'
 import { injectClientStyles } from './client-styles.ts'
 import { studioFileUrl } from './studio-shared.ts'
+import { ImageResultCard } from './image-result-card.ts'
+import { toolPayloadFrom } from './image-result-model.ts'
+import { openImageEditorTab, registerBetterSidebarTab, type BetterSidebarContextLike } from './better-sidebar.ts'
 import { StudioPanelIcon } from './studio-view.ts'
 import { WorkbenchShell } from './workbench-view.ts'
-import {
-  SETTINGS_TABS,
-  advisoryAfterGroup,
-  displayValue,
-  tabFields,
-  type SettingsAdvisory,
-  type SettingsField,
-  type SettingsGroup,
-} from './settings-fields.ts'
-import {
-  registerSettingsSection,
-  registerStudioPanel,
-  saveField,
-  type ConfigFormLike,
-  type SettingsSectionProps,
-} from './settings-section.ts'
-
+import { QwenImageSettingsSection } from './settings-view.ts'
+import { registerSettingsSection, registerStudioPanel } from './settings-section.ts'
 /**
  * Registration name inside the cordis client context.
  *
@@ -128,6 +116,8 @@ interface ToolRowProps {
   readonly toolName?: string
   readonly loadImage?: LoadImage
   readonly block?: ToolResultBlock
+  /** Session owning the conversation row; supplied by the session-scoped tool slot. */
+  readonly sessionId?: string
   /** Legacy/guessed shape kept as a fallback if the Host ever passes it. */
   readonly result?: {
     readonly value?: unknown
@@ -147,35 +137,12 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * @returns the parsed JSON object `execute()` returned, if any.
  */
 function payloadOf(props: ToolRowProps): Record<string, unknown> | undefined {
-  const content = props.block?.content
-  if (Array.isArray(content)) {
-    for (const item of content) {
-      const text = item?.text
-      if (typeof text !== 'string' || text.length === 0) continue
-      try {
-        const parsed: unknown = JSON.parse(text)
-        const record = asRecord(parsed)
-        if (record !== undefined) return record
-      } catch {
-        // Not every text block is JSON; keep looking.
-      }
-    }
-  }
-  return asRecord(props.result?.value)
+  return toolPayloadFrom(props.block?.content, props.result?.value)
 }
 
 /** Wire name of the tool this row is rendering. */
 function toolNameOf(props: ToolRowProps): string {
   return props.toolName ?? props.block?.name ?? ''
-}
-
-/** Pull `images[].path` out of the tool's canonical payload, tolerantly. */
-function imagePaths(props: ToolRowProps): string[] {
-  const images = payloadOf(props)?.['images']
-  if (!Array.isArray(images)) return []
-  return images
-    .map((entry) => asRecord(entry)?.['path'])
-    .filter((path): path is string => typeof path === 'string' && path.length > 0)
 }
 
 /** One meta chip; `tone` maps onto the pill modifiers in the stylesheet. */
@@ -221,74 +188,41 @@ function CardShell(props: {
   ])
 }
 
-/** The image grid both generate and edit render once paths exist. */
-function ImageGrid(props: ToolRowProps): ReactNode {
-  const paths = imagePaths(props)
-  if (paths.length === 0) return null
-  return createElement(
-    'div',
-    { key: 'images', className: 'dsh-image-forge-images' },
-    paths.map((path, index) => {
-      // Prefer the host's loader when it exists and answers with a string; a
-      // Desktop host whose web server mounts late (or omits `loadImage`)
-      // otherwise yields `src: undefined`, which renders as the broken-image
-      // alt box. The plugin's own file route serves the same bytes same-origin.
-      const loaded = typeof props.loadImage === 'function' ? props.loadImage(path) : undefined
-      const src = typeof loaded === 'string' && loaded.length > 0 ? loaded : studioFileUrl(path)
-      return createElement('img', {
-        key: `image-${index}`,
-        src,
-        alt: path,
-        loading: 'lazy',
-      })
-    }),
-  )
-}
-
 /**
  * Generate / edit card: the landed images plus the facts that explain them.
  *
  * @param props - owner props supplied by ui-tool's dispatch.
  * @returns the card, or nothing on a presentation failure.
  */
-function ImageResultRow(props: ToolRowProps): ReactNode {
+function ImageResultRow(props: ToolRowProps, ctx: BetterSidebarContextLike): ReactNode {
   try {
     const payload = payloadOf(props)
-    const isEdit = toolNameOf(props) === 'image_forge_edit'
-    const count = imagePaths(props).length
-    const done =
-      count > 0
-        ? `完成：${count} 张`
-        : isEdit
-          ? '改图结束（未落盘，请看工具结果）'
-          : '出图结束（未落盘，请看工具结果）'
-    const status = phaseLabel(props, done, isEdit ? '正在改图…' : '正在出图…')
-    const pills: ReactNode[] = []
-    const size = sizeChip(payload)
-    if (size !== null) pills.push(size)
-    const backend = payload?.['backend']
-    if (typeof backend === 'string' && backend.length > 0) pills.push(pill('backend', backend))
-    const ratio = payload?.['wh_ratio']
-    if (typeof ratio === 'string' && ratio.length > 0) pills.push(pill('ratio', `wh_ratio ${ratio}`))
-    const follow = payload?.['ratio_follow']
-    if (typeof follow === 'string' && follow.length > 0) pills.push(pill('follow', `← ${follow}`))
-    const stepsUsed = payload?.['steps_used']
-    if (typeof stepsUsed === 'number') pills.push(pill('steps', `${stepsUsed} 步`))
-    const refs = payload?.['references']
-    if (Array.isArray(refs) && refs.length > 0) pills.push(pill('refs', `${refs.length} 张参考`))
-
-    return createElement(CardShell, {
-      title: isEdit ? '参考图编辑' : '文生图',
-      status,
-      pills,
-      children: [createElement(ImageGrid, { key: 'grid', ...props })],
+    const sidebar = ctx.get?.('betterSidebar') as { readonly openTab?: unknown } | undefined
+    const canOpenEditor = typeof sidebar?.openTab === 'function'
+    return createElement(ImageResultCard, {
+      phase: props.phase,
+      toolName: toolNameOf(props) || (props.toolName ?? 'image_forge_generate'),
+      payload,
+      ...(typeof props.loadImage === 'function' ? { loadImage: props.loadImage } : {}),
+      ...(props.sessionId === undefined ? {} : { sessionId: props.sessionId }),
+      ...(canOpenEditor ? {
+        onOpenEditor: (meta: {
+          readonly imagePath: string
+          readonly title: string
+          readonly boardId?: string
+          readonly itemId?: string
+          readonly width?: number
+          readonly height?: number
+        }) => {
+          openImageEditorTab(ctx, props.sessionId, meta)
+        },
+      } : {}),
     })
   } catch {
     // A presentation failure must never take down the conversation row.
     return null
   }
 }
-
 /** One checklist cell: a short label over a one-line verdict. */
 function checkCell(key: string, label: string, text: string, tone: 'ok' | 'warn' | 'bad' | 'neutral'): ReactNode {
   return createElement('div', { key, className: 'dsh-image-forge-check' }, [
@@ -363,427 +297,15 @@ function StatusRow(props: ToolRowProps): ReactNode {
  * @param toolName - the tool's wire name.
  * @returns a component that renders that tool's card.
  */
-function createToolRow(toolName: string): (props: ToolRowProps) => ReactNode {
+function createToolRow(toolName: string, ctx: BetterSidebarContextLike): (props: ToolRowProps) => ReactNode {
   return function ImageForgeToolRow(props: ToolRowProps): ReactNode {
     const bound: ToolRowProps = { ...props, toolName: toolNameOf(props) || toolName }
     if (toolName === 'image_forge_status') return StatusRow(bound)
-    return ImageResultRow(bound)
+    return ImageResultRow(bound, ctx)
   }
 }
 
 // ---------------------------------------------------------------------------
-// Settings section.
-// ---------------------------------------------------------------------------
-
-/** What a control reports back after an attempted write. */
-interface WriteResult {
-  /** True when the value landed. */
-  readonly ok: boolean
-  /** Operator-facing failure text; absent on success. Never contains a value. */
-  readonly message?: string
-}
-
-/** The write callback the section hands each control. */
-type Write = (key: string, value: unknown) => Promise<WriteResult>
-
-/** Shared props every control receives. */
-interface ControlProps {
-  readonly field: SettingsField
-  readonly value: unknown
-  readonly disabled: boolean
-  readonly write: Write
-}
-
-/**
- * Track one control's draft, its save state, and commit through `write`.
- *
- * @param props - the field, its stored value, and the write callback.
- * @returns the control's markup.
- */
-function FieldRow(props: ControlProps): ReactNode {
-  const { field, value, disabled, write } = props
-  const [draft, setDraft] = useState<string | null>(null)
-  const [failure, setFailure] = useState<string | undefined>(undefined)
-  const [saved, setSaved] = useState(false)
-  const controlId = `dsh-image-forge-field-${field.key}`
-
-  const commit = (next: unknown): void => {
-    setFailure(undefined)
-    let answer: Promise<WriteResult>
-    try {
-      answer = write(field.key, next)
-    } catch (error) {
-      setFailure(error instanceof Error ? error.message : String(error))
-      return
-    }
-    Promise.resolve(answer).then(
-      (result) => {
-        if (result.ok) {
-          setSaved(true)
-          setFailure(undefined)
-          return
-        }
-        setSaved(false)
-        setFailure(result.message ?? '保存失败')
-      },
-      (error: unknown) => {
-        setSaved(false)
-        setFailure(error instanceof Error ? error.message : String(error))
-      },
-    )
-  }
-
-  const control = buildControl(field, value, disabled, draft, setDraft, commit, controlId)
-  const status: ReactNode[] = []
-  if (failure !== undefined) {
-    status.push(
-      createElement(
-        'span',
-        { key: 'failure', className: 'dsh-image-forge-setting-failure', role: 'status' },
-        `保存失败：${failure}`,
-      ),
-    )
-  } else if (saved) {
-    status.push(
-      createElement('span', { key: 'saved', className: 'dsh-image-forge-setting-saved', role: 'status' }, '已保存'),
-    )
-  }
-
-  return createElement('div', { className: 'dsh-image-forge-setting' }, [
-    createElement(
-      'label',
-      { key: 'label', className: 'dsh-image-forge-setting-label', htmlFor: controlId },
-      field.label,
-    ),
-    createElement('div', { key: 'control', className: 'dsh-image-forge-setting-control' }, control),
-    // Hints are plain text and may name a directory (`comfyModelsDir` names the
-    // one ComfyUI reads, `outputDir` the one images land in) — they are shown
-    // verbatim, with no token substitution to keep in step.
-    createElement('p', { key: 'hint', className: 'dsh-image-forge-setting-hint' }, field.hint),
-    createElement('div', { key: 'status', className: 'dsh-image-forge-setting-status' }, status),
-  ])
-}
-
-/**
- * Render the control a field's kind calls for.
- *
- * @param field - the field.
- * @param value - the stored value.
- * @param disabled - whether the entry is writable.
- * @param draft - the local text draft, when the user has typed.
- * @param setDraft - draft setter.
- * @param commit - write callback.
- * @param controlId - the input id the label points at.
- * @returns the control element (and the unit suffix, for numbers).
- */
-function buildControl(
-  field: SettingsField,
-  value: unknown,
-  disabled: boolean,
-  draft: string | null,
-  setDraft: (next: string | null) => void,
-  commit: (next: unknown) => void,
-  controlId: string,
-): ReactNode[] {
-  const key = field.key
-  const unit =
-    field.unit === undefined
-      ? []
-      : [createElement('span', { key: 'unit', className: 'dsh-image-forge-setting-unit' }, field.unit)]
-
-  if (field.kind === 'boolean') {
-    return [
-      createElement('input', {
-        key: 'input',
-        id: controlId,
-        type: 'checkbox',
-        checked: value === true,
-        disabled,
-        onChange: (event: { target: { checked: boolean } }) => {
-          commit(event.target.checked)
-        },
-      }),
-      ...unit,
-    ]
-  }
-  if (field.kind === 'enum') {
-    const choices = field.choices ?? []
-    const current = typeof value === 'string' ? value : ''
-    return [
-      createElement(
-        'select',
-        {
-          key: 'input',
-          id: controlId,
-          value: current,
-          disabled,
-          onChange: (event: { target: { value: string } }) => {
-            commit(event.target.value)
-          },
-        },
-        choices.map((choice) => createElement('option', { key: choice.value, value: choice.value }, choice.label)),
-      ),
-      ...unit,
-    ]
-  }
-  if (field.kind === 'number') {
-    // Numbers commit on blur so a half-typed value is never written, and are
-    // range-checked against the field's own bounds before anything is sent. On a
-    // nullable field an emptied box writes `unset` — a real state that means
-    // "fall through to another setting", not the number zero.
-    return [
-      createElement('input', {
-        key: 'input',
-        id: controlId,
-        type: 'number',
-        ...(field.min === undefined ? {} : { min: field.min }),
-        ...(field.max === undefined ? {} : { max: field.max }),
-        value: draft ?? (value === undefined || value === null ? '' : String(value)),
-        disabled,
-        placeholder: field.nullable === true ? '留空 = 用默认步数' : undefined,
-        onChange: (event: { target: { value: string } }) => {
-          setDraft(event.target.value)
-        },
-        onBlur: () => {
-          if (draft === null) return
-          if (draft.trim() === '') {
-            if (field.nullable === true) commit(undefined)
-            setDraft(null)
-            return
-          }
-          const parsed = Number(draft)
-          if (!Number.isFinite(parsed)) {
-            setDraft(null)
-            return
-          }
-          if ((field.min !== undefined && parsed < field.min) || (field.max !== undefined && parsed > field.max)) return
-          commit(parsed)
-          setDraft(null)
-        },
-      }),
-      ...unit,
-    ]
-  }
-  // Text-ish: `string` and `path`.
-  return [
-    createElement('input', {
-      key: 'input',
-      id: controlId,
-      type: 'text',
-      value: draft ?? (typeof value === 'string' ? value : ''),
-      disabled,
-      placeholder: field.placeholder ?? '',
-      onChange: (event: { target: { value: string } }) => {
-        setDraft(event.target.value)
-      },
-      onBlur: () => {
-        if (draft === null) return
-        commit(draft)
-        setDraft(null)
-      },
-    }),
-    ...unit,
-  ]
-}
-
-/**
- * One titled block of fields.
- *
- * @param props - the group and its fields.
- * @returns the block.
- */
-function GroupBlock(props: {
-  group: SettingsGroup
-  fields: readonly SettingsField[]
-  value: Record<string, unknown>
-  disabled: boolean
-  write: Write
-  beforeFields?: ReactNode
-  dense?: boolean
-}): ReactNode {
-  const { group, fields, value, disabled, write, beforeFields, dense } = props
-  return createElement(
-    'section',
-    {
-      className: dense
-        ? 'dsh-image-forge-settings-group dsh-image-forge-settings-group-dense'
-        : 'dsh-image-forge-settings-group',
-      key: group.id,
-      'data-group': group.id,
-      ...(group.advanced === true ? { 'data-advanced': 'true' } : {}),
-    },
-    [
-      createElement('h3', { key: 'title', className: 'dsh-image-forge-settings-group-title' }, group.label),
-      createElement('p', { key: 'hint', className: 'dsh-image-forge-settings-group-hint' }, group.hint),
-      beforeFields ?? null,
-      createElement(
-        'div',
-        {
-          key: 'fields',
-          className: dense
-            ? 'dsh-image-forge-settings-fields dsh-image-forge-settings-fields-grid'
-            : 'dsh-image-forge-settings-fields',
-        },
-        fields.map((field) =>
-          createElement(FieldRow, {
-            key: field.key,
-            field,
-            value: value[field.key],
-            disabled,
-            write,
-          }),
-        ),
-      ),
-    ],
-  )
-}
-
-/**
- * The backend performance advisory block.
- *
- * Two lines, on purpose: the page states the actionable conclusion and the one
- * caveat, and the evidence behind them lives in the shipped prose
- * (`docs/configuration.md`, `docs/usage-reference.md`). The strings render as
- * text nodes, so none of them may carry markdown markers (asserted in the tests),
- * and the block's size is held by a text-budget test.
- *
- * @param props - the advisory.
- * @returns the block.
- */
-function AdvisoryBlock(props: { advisory: SettingsAdvisory }): ReactNode {
-  const { advisory } = props
-  return createElement('section', { className: 'dsh-image-forge-advisory', 'data-dsh-part': advisory.id }, [
-    createElement('h3', { key: 'title', className: 'dsh-image-forge-advisory-title' }, advisory.title),
-    ...advisory.paragraphs.map((text, index) =>
-      createElement('p', { key: `p-${index}`, className: 'dsh-image-forge-advisory-p' }, text),
-    ),
-  ])
-}
-
-/**
- * The settings section component.
- *
- * @param props - supplied by the slot's `inject`: the bound form, or the reason
- *   there is none.
- * @returns the section, or a notice explaining why it cannot render.
- */
-function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): ReactNode {
-  const form = props.form as ConfigFormLike<unknown> | undefined
-  const [tick, setTick] = useState(0)
-  // The page is pure configuration: the workbench lives in its own global panel
-  // (`main` + `sidebar.panellist`), so this section opens on its first config tab.
-  const [tabId, setTabId] = useState<string>(SETTINGS_TABS[0]?.id ?? '')
-
-  useEffect(() => {
-    if (form === undefined) return undefined
-    let off: (() => void) | undefined
-    try {
-      off = form.subscribe(() => {
-        setTick((count) => count + 1)
-      })
-    } catch {
-      off = undefined
-    }
-    return () => {
-      try {
-        off?.()
-      } catch {
-        // The form is already gone during teardown.
-      }
-    }
-  }, [form])
-
-  // A host that serves no config form gets the explanatory notice only: this
-  // section is configuration, and the workbench is its own global panel.
-  if (form === undefined) {
-    return createElement('div', { className: 'dsh-image-forge-settings' }, [
-      createElement(
-        'div',
-        { key: 'notice', className: 'dsh-image-forge-settings-notice' },
-        props.unavailableReason ?? '配置表单不可用：参数请在 profile 里改。',
-      ),
-    ])
-  }
-
-  let snapshot: ReturnType<ConfigFormLike<unknown>['getSnapshot']> | undefined
-  try {
-    snapshot = form.getSnapshot()
-  } catch {
-    snapshot = undefined
-  }
-  if (snapshot === undefined || snapshot.status !== 'ready' || typeof snapshot.value !== 'object' || snapshot.value === null) {
-    return createElement(
-      'div',
-      { className: 'dsh-image-forge-settings-notice', 'data-dsh-tick': tick },
-      `正在读取本插件配置…（状态：${snapshot?.status ?? 'unknown'}）`,
-    )
-  }
-
-  const value = snapshot.value as Record<string, unknown>
-  const disabled = snapshot.writable === false
-  const write: Write = (key, next) =>
-    saveField(form, key, next).then(
-      (outcome) => (outcome.ok ? { ok: true } : { ok: false, message: outcome.message }),
-      (error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }),
-    )
-
-  const activeTab = SETTINGS_TABS.find((tab) => tab.id === tabId) ?? SETTINGS_TABS[0]
-  const panels = activeTab === undefined ? [] : tabFields(activeTab)
-
-  return createElement('div', { className: 'dsh-image-forge-settings', 'data-dsh-tick': tick }, [
-    createElement(
-      'div',
-      { key: 'tabs', className: 'dsh-image-forge-tabs', role: 'tablist' },
-      [
-        ...SETTINGS_TABS.map((tab) =>
-          createElement(
-            'button',
-            {
-              key: tab.id,
-              type: 'button',
-              role: 'tab',
-              className:
-                tab.id === activeTab?.id
-                  ? 'dsh-image-forge-tab dsh-image-forge-tab-active'
-                  : 'dsh-image-forge-tab',
-              'aria-selected': tab.id === activeTab?.id,
-              onClick: () => setTabId(tab.id),
-            },
-            tab.label,
-          ),
-        ),
-      ],
-    ),
-    createElement('div', { key: 'panel', className: 'dsh-image-forge-settings-panel', role: 'tabpanel' }, [
-      createElement(
-        'p',
-        { key: 'lead', className: 'dsh-image-forge-settings-lead' },
-        [
-          activeTab?.hint ?? '',
-          disabled ? ' 当前配置条目为只读。' : ' 改动会立即写入。',
-        ]
-          .filter((part) => part.length > 0)
-          .join(' '),
-      ),
-      ...panels.map(({ group, fields }) => {
-        const block = createElement(GroupBlock, {
-          key: group.id,
-          group,
-          fields,
-          value,
-          disabled,
-          write,
-          dense: true,
-        })
-        const advisory = advisoryAfterGroup(group.id)
-        return advisory === undefined
-          ? [block]
-          : [block, createElement(AdvisoryBlock, { key: advisory.id, advisory })]
-      }),
-    ]),
-  ])
-}
-
 /**
  * Register the keyed tool views, the Studio's global panel, and the
  * first-level settings section.
@@ -796,13 +318,16 @@ export function apply(ctx: {
     register(options: Record<string, unknown>, component: unknown): unknown
   }
   get?(name: string): unknown
+  effect?(fn: () => () => void): unknown
+  sessions?: { scope(sessionId: string): unknown }
 }): void {
   injectClientStyles()
+  registerBetterSidebarTab(ctx)
   // One inject, four keyed seats: each key is a separate toolview dispatch
   // target, and a single component factory keeps the defensive shell shared.
   ctx.slots.inject('tool.call.toolview', () => {
     const seats = TOOL_KEYS.map((toolName) =>
-      ctx.slots.register({ name: 'tool.call.toolview', key: toolName }, createToolRow(toolName)),
+      ctx.slots.register({ name: 'tool.call.toolview', key: toolName }, createToolRow(toolName, ctx)),
     )
     return () => {
       for (const seat of seats) {
@@ -827,3 +352,4 @@ export function apply(ctx: {
   // pointing at the same plugin entry (`test/settings.test.mjs` pins that).
   registerStudioPanel(ctx, { panel: WorkbenchShell, icon: StudioPanelIcon })
 }
+

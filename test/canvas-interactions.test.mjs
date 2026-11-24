@@ -264,6 +264,35 @@ test('CommandStack caps at 100 and drops the oldest step', () => {
   for (const bad of [0, -1, Number.NaN]) assert.equal(new CommandStack(bad).limit, 100)
 })
 
+test('CommandStack exposes a timeline and jumps directly to any retained state', () => {
+  const log = []
+  const stack = new CommandStack()
+  stack.push(command(log, 'a'))
+  stack.push(command(log, 'b'))
+  stack.push(command(log, 'c'))
+  assert.deepEqual(stack.timeline(), {
+    position: 3,
+    entries: [
+      { index: 1, label: 'a', applied: true },
+      { index: 2, label: 'b', applied: true },
+      { index: 3, label: 'c', applied: true },
+    ],
+  })
+  assert.equal(stack.jumpTo(0), true)
+  assert.deepEqual(log, ['revert:c', 'revert:b', 'revert:a'])
+  assert.equal(stack.timeline().position, 0)
+  assert.ok(stack.timeline().entries.every((entry) => entry.applied === false))
+  assert.equal(stack.jumpTo(2), true)
+  assert.deepEqual(log.slice(3), ['apply:a', 'apply:b'])
+  assert.equal(stack.timeline().position, 2)
+  assert.equal(stack.timeline().entries[2].applied, false, 'c remains in the redo tail')
+  assert.equal(stack.jumpTo(2), false, 'jumping to the current state is a no-op')
+  assert.equal(stack.jumpTo(9), false, 'out-of-range positions are ignored')
+  stack.push(command(log, 'd'))
+  assert.deepEqual(stack.timeline().entries.map((entry) => entry.label), ['a', 'b', 'd'])
+  assert.equal(stack.timeline().entries[2].applied, true)
+})
+
 test('CommandStack truncates the abandoned branch on a new push, and clear resets both', () => {
   const log = []
   const stack = new CommandStack()

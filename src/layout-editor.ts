@@ -59,8 +59,36 @@ export const LAYOUT_MIN_BOX_SIZE = 1
 /** Item labels the contract accepts. */
 export const LAYOUT_ITEM_LABELS = ['object', 'character', 'text'] as const
 
+/** Human labels for the three schema item kinds; stored values never change. */
+export const LAYOUT_ITEM_LABEL_TEXT: Readonly<Record<(typeof LAYOUT_ITEM_LABELS)[number], string>> = {
+  object: '主体',
+  character: '人物',
+  text: '文字',
+}
+
+/** Human-readable aspect label for a draft canvas. */
+export function layoutRatioLabel(width: number, height: number): string {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return '—'
+  let a = Math.round(width)
+  let b = Math.round(height)
+  while (b !== 0) {
+    const next = a % b
+    a = b
+    b = next
+  }
+  const divisor = a > 0 ? a : 1
+  return String(Math.round(width / divisor)) + ':' + String(Math.round(height / divisor))
+}
+
 /** summary.canvas values the contract accepts. */
 export const LAYOUT_CANVAS_VALUES = ['single', 'multi_panel', 'collage'] as const
+
+/** Human labels for summary.canvas; compiled values stay unchanged. */
+export const LAYOUT_CANVAS_LABEL_TEXT: Readonly<Record<(typeof LAYOUT_CANVAS_VALUES)[number], string>> = {
+  single: '单幅画面',
+  multi_panel: '多格画面',
+  collage: '拼贴画面',
+}
 
 /** The official seven aspect tiers, at the ~1.5 MP budget (both sides 16-aligned). */
 export const LAYOUT_CANVAS_PRESETS = [
@@ -207,7 +235,7 @@ export function layoutNodeHeight(
  * model treats them as global visual vocabulary.
  */
 export const CAPTION_HINT =
-  'caption 措辞会污染生成语义：item caption 里的视觉语汇（例如 slender spires / intricate architectural detail）会被模型当成全局高频纹理，扩散到 bbox 之外；远景小框宁可写纯自然大块面，不要要求复杂建筑。需要压住某类内容时，把同一句否定语同时写进 summary.caption 与相关 item caption，不要只写一次。'
+  '框描述措辞会污染生成语义：框描述里的视觉语汇（例如“细长尖塔”“复杂建筑细节”）会被模型当成全局高频纹理，扩散到画框范围之外；远景小框宁可写纯自然大块面，不要要求复杂建筑。需要压住某类内容时，把同一句否定语同时写进整图描述与相关框描述，不要只写一次。'
 
 /** One of the three item labels. */
 export type LayoutItemLabel = (typeof LAYOUT_ITEM_LABELS)[number]
@@ -934,6 +962,24 @@ export function screenDeltaToDraft(
 }
 
 /** A box as CSS pixel geometry for the display layer (left/top/width/height). */
+/** Fit a draft rectangle inside the available stage while preserving its ratio. */
+export function fitLayoutCanvasSize(
+  availableWidth: number,
+  availableHeight: number,
+  draftWidth: number,
+  draftHeight: number,
+  padding = 32,
+): { readonly width: number; readonly height: number } {
+  const safePadding = Number.isFinite(padding) && padding >= 0 ? padding : 0
+  const width = Math.max(1, availableWidth - safePadding * 2)
+  const height = Math.max(1, availableHeight - safePadding * 2)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(draftWidth) || !Number.isFinite(draftHeight) || draftWidth <= 0 || draftHeight <= 0) {
+    return { width: 1, height: 1 }
+  }
+  const scale = Math.min(width / draftWidth, height / draftHeight)
+  return { width: Math.max(1, Math.floor(draftWidth * scale)), height: Math.max(1, Math.floor(draftHeight * scale)) }
+}
+
 export function canvasBoxToDisplay(
   box: LayoutBox,
   viewport: LayoutViewport,
@@ -1082,10 +1128,13 @@ const EDITOR_TOLERANT_ISSUES = new Set([
  * showed "布局编辑器加载失败：items[0].caption must be nonempty text" instead of
  * the boxes the user already drew. The requirement is still enforced by
  * `compileLayout`, which is the only place it can actually matter.
+ * A historical text item can likewise predate its literal copy; keeping it editable
+ * lets the user repair it in place while the compiler still refuses to submit it.
  */
 function isTolerableDraftIssue(issue: string): boolean {
   if (EDITOR_TOLERANT_ISSUES.has(issue)) return true
-  return /^items\[\d+\]\.caption must be nonempty text$/.test(issue)
+  if (/^items\[\d+\]\.caption must be nonempty text$/.test(issue)) return true
+  return /^items\[\d+\]: text items require literal text$/.test(issue)
 }
 
 function draftToEditorStateWith(draft: unknown, tolerateDrafting: boolean): LayoutEditorState {
@@ -1403,6 +1452,14 @@ export interface LayoutEditorOptions {
    * the canvas integration leaves it at the default.
    */
   pointerScale?: () => number
+  /** Optional image displayed under the boxes for visual place-and-adjust work. */
+  backgroundImageUrl?: string
+  /** Visual theme for inline hosts; colours remain inherited from the page. */
+  theme?: 'auto' | 'light' | 'dark'
+  /** Render only the interactive canvas; the host owns all surrounding controls. */
+  canvasOnly?: boolean
+  /** A box was activated; the host can open its property editor at the pointer. */
+  onBoxActivate?: (id: string, anchor?: { readonly clientX: number; readonly clientY: number }) => void
   /**
    * Draw only the canvas, in a container that owns the chrome.
    *
@@ -1523,6 +1580,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   }
 
   const toolbar = doc.createElement('div')
+  toolbar.className = 'dsh-image-forge-layout-toolbar'
   toolbar.setAttribute('style', 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;')
   const addButton = makeButton('+ 框')
   const deleteButton = makeButton('删除')
@@ -1532,7 +1590,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   for (const label of LAYOUT_ITEM_LABELS) {
     const option = doc.createElement('option')
     option.value = label
-    option.textContent = label
+    option.textContent = LAYOUT_ITEM_LABEL_TEXT[label]
     labelSelect.appendChild(option)
   }
   toolbar.appendChild(addButton)
@@ -1590,15 +1648,50 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   toolbar.appendChild(templateSelect)
 
   const canvas = doc.createElement('div')
-  canvas.setAttribute('style', 'position:relative;width:100%;background:#12161c;overflow:hidden;touch-action:none;cursor:crosshair;box-sizing:border-box;border:1px solid #3a3a3a;')
+  canvas.className = 'dsh-image-forge-layout-canvas'
+  canvas.setAttribute('style', 'position:relative;width:100%;background:light-dark(#f6f2e9,#12161c);overflow:hidden;touch-action:none;cursor:crosshair;box-sizing:border-box;border:1px solid color-mix(in srgb, currentColor 22%, transparent);color-scheme:light dark;')
+  const background = doc.createElement('div')
+  background.className = 'dsh-image-forge-layout-background'
+  background.setAttribute('style', 'display:none;position:absolute;inset:0;pointer-events:none;background-size:100% 100%;background-position:center;background-repeat:no-repeat;opacity:.36;')
+  if (options.theme === 'light' || options.theme === 'dark') {
+    wrapper.dataset.theme = options.theme
+    wrapper.style.colorScheme = options.theme
+    canvas.style.colorScheme = options.theme
+  }
+  if (typeof options.backgroundImageUrl === 'string' && options.backgroundImageUrl.length > 0) {
+    background.style.display = 'block'
+    background.style.backgroundImage = `url(${JSON.stringify(options.backgroundImageUrl)})`
+  }
   const boxLayer = doc.createElement('div')
   boxLayer.setAttribute('style', 'position:absolute;left:0;top:0;right:0;bottom:0;')
   const preview = doc.createElement('div')
-  preview.setAttribute('style', 'display:none;position:absolute;border:1px dashed #4da3ff;background:rgba(77,163,255,.18);box-sizing:border-box;pointer-events:none;')
+  preview.setAttribute('style', 'display:none;position:absolute;border:1px dashed #e66a3a;background:rgba(230,106,58,.18);box-sizing:border-box;pointer-events:none;')
+  const stage = doc.createElement('div')
+  stage.className = 'dsh-image-forge-layout-stage'
+  stage.setAttribute('style', 'position:relative;display:grid;place-items:center;flex:1 1 auto;min-height:0;overflow:hidden;box-sizing:border-box;background-image:linear-gradient(45deg,color-mix(in srgb,currentColor 4%,transparent) 25%,transparent 25%,transparent 75%,color-mix(in srgb,currentColor 4%,transparent) 75%),linear-gradient(45deg,color-mix(in srgb,currentColor 4%,transparent) 25%,transparent 25%,transparent 75%,color-mix(in srgb,currentColor 4%,transparent) 75%);background-size:18px 18px;background-position:0 0,9px 9px;')
+  const frame = doc.createElement('div')
+  frame.className = 'dsh-image-forge-layout-frame'
+  frame.setAttribute('style', 'position:relative;flex:none;border-radius:12px;box-shadow:0 14px 34px rgba(25,22,18,.13),0 1px 2px rgba(25,22,18,.12);')
+  const frameBadge = doc.createElement('span')
+  frameBadge.className = 'dsh-image-forge-layout-frame-badge'
+  frameBadge.setAttribute('style', 'position:absolute;left:0;bottom:calc(100% + 7px);padding:3px 8px;border:1px solid color-mix(in srgb,currentColor 16%,transparent);border-radius:999px;background:color-mix(in srgb,Canvas 92%,transparent);font-size:10.5px;font-variant-numeric:tabular-nums;white-space:nowrap;pointer-events:none;')
+  frame.appendChild(canvas)
+  frame.appendChild(frameBadge)
+  stage.appendChild(frame)
+  canvas.appendChild(background)
   canvas.appendChild(boxLayer)
   canvas.appendChild(preview)
 
+  function syncCanvasFrame(): void {
+    const rect = stage.getBoundingClientRect()
+    const fitted = fitLayoutCanvasSize(rect.width, rect.height, state.width, state.height, compact ? 28 : 22)
+    frame.style.width = String(fitted.width) + 'px'
+    frame.style.height = String(fitted.height) + 'px'
+    frameBadge.textContent = String(state.width) + ' × ' + String(state.height) + ' · ' + layoutRatioLabel(state.width, state.height)
+  }
+
   const itemRow = doc.createElement('div')
+  itemRow.className = 'dsh-image-forge-layout-item-row'
   itemRow.setAttribute('style', 'display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start;')
   const nameInput = doc.createElement('input')
   nameInput.type = 'text'
@@ -1635,7 +1728,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
 
   const summaryInput = doc.createElement('textarea')
   summaryInput.rows = 2
-  summaryInput.placeholder = 'summary.caption（全局描述，必填）'
+  summaryInput.placeholder = '整图描述（全局描述，必填）'
   summaryInput.setAttribute('style', 'width:100%;box-sizing:border-box;resize:vertical;' + fieldStyle)
 
   // ---- summary optional fields (official: meta / canvas / palette) ----------
@@ -1658,7 +1751,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   canvasSelect.title = 'summary.canvas：单幅 / 多格 / 拼贴'
   const canvasBlank = doc.createElement('option')
   canvasBlank.value = ''
-  canvasBlank.textContent = 'canvas（未指定）'
+  canvasBlank.textContent = '未指定布局类型'
   canvasSelect.appendChild(canvasBlank)
   for (const value of LAYOUT_CANVAS_VALUES) {
     const option = doc.createElement('option')
@@ -1699,12 +1792,14 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   output.placeholder = '导出结果（draft 可再导入，compiled 直接贴进 prompt）'
   output.setAttribute('style', 'width:100%;box-sizing:border-box;resize:vertical;font-family:ui-monospace,monospace;' + fieldStyle)
 
-  const compact = options.compact === true
+  const canvasOnly = options.canvasOnly === true
+  const compact = options.compact === true || canvasOnly
   if (compact) {
     // Canvas-only: the host draws the chrome and the fields elsewhere. Its own
     // height comes from the draft's aspect ratio (`layoutNodeHeight`), which is
     // exactly the box this element is given.
     toolbar.style.display = 'none'
+    if (canvasOnly) itemRow.style.display = 'none'
     // The item row **stays**. A box's caption is required by the model contract
     // (an item is `label` + nonempty `caption` + `bbox`), and the node is where a
     // box gets drawn — so hiding the field that writes its caption made every
@@ -1718,7 +1813,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     importInput.style.display = 'none'
     output.style.display = 'none'
     wrapper.setAttribute('style', 'display:flex;flex-direction:column;gap:0;height:100%;font:12px/1.5 system-ui,sans-serif;color:inherit;')
-    canvas.setAttribute('style', 'position:relative;width:100%;height:100%;flex:1 1 auto;min-height:0;background:#12161c;overflow:hidden;touch-action:none;cursor:crosshair;box-sizing:border-box;border:1px solid #3a3a3a;')
+    canvas.setAttribute('style', 'position:relative;width:100%;height:100%;min-height:0;background:light-dark(#f6f2e9,#12161c);overflow:hidden;touch-action:none;cursor:crosshair;box-sizing:border-box;border:1px solid color-mix(in srgb, currentColor 22%, transparent);border-radius:12px;color-scheme:light dark;')
     // Visibility is not enough: a hidden child still contributes its box to
     // `scrollHeight`, and the node's host must never scroll.
     canvas.style.aspectRatio = ''
@@ -1726,12 +1821,12 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
   // Item row goes **above** the canvas in compact mode: a node is ~320 px of
   // canvas, and a field below it would sit outside the node's own box.
   if (compact) {
-    wrapper.appendChild(itemRow)
+    if (!canvasOnly) wrapper.appendChild(itemRow)
     wrapper.appendChild(toolbar)
-    wrapper.appendChild(canvas)
+    wrapper.appendChild(stage)
   } else {
     wrapper.appendChild(toolbar)
-    wrapper.appendChild(canvas)
+    wrapper.appendChild(stage)
     wrapper.appendChild(itemRow)
   }
   wrapper.appendChild(summaryInput)
@@ -1798,7 +1893,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     )
     const chip = doc.createElement('span')
     chip.setAttribute('style', 'position:absolute;left:-1px;top:-17px;padding:0 4px;border-radius:3px;background:rgba(0,0,0,.72);color:#fff;font-size:11px;line-height:15px;white-space:nowrap;pointer-events:none;')
-    chip.textContent = (item.name === undefined || item.name.length === 0 ? '' : item.name + ' · ') + item.label + ' ' + String(index + 1)
+    chip.textContent = (item.name === undefined || item.name.length === 0 ? '' : item.name + ' · ') + LAYOUT_ITEM_LABEL_TEXT[item.label] + ' ' + String(index + 1)
     element.appendChild(chip)
     // Handles only on the primary box: eight grips × N selected boxes would hide
     // every neighbour box under its own grips.
@@ -1820,6 +1915,7 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
 
   function render(): void {
     canvas.style.aspectRatio = String(state.width) + ' / ' + String(state.height)
+    syncCanvasFrame()
     const selected = selectedLayoutItem(state)
     const multi = state.selectedIds.length
     deleteButton.disabled = state.selectedId === null
@@ -1862,6 +1958,13 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
       boxLayer.appendChild(renderBox(item, index, state.selectedIds.includes(item.id), item.id === state.selectedId))
     })
   }
+
+  const win = doc.defaultView
+  const resizeObserver = win !== null && typeof win.ResizeObserver === 'function'
+    ? new win.ResizeObserver(() => { syncCanvasFrame() })
+    : undefined
+  resizeObserver?.observe(stage)
+  win?.addEventListener('resize', syncCanvasFrame)
 
   /**
    * Editor-local undo, bounded at 50 states.
@@ -2151,6 +2254,21 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
     }
   })
 
+  function activateBoxAtPointer(event: MouseEvent): void {
+    const target = event.target as Element | null
+    const box = target !== null && typeof target.closest === 'function' ? target.closest('[data-box-id]') : null
+    const id = box?.getAttribute('data-box-id')
+    if (id === null || id === undefined || box?.hasAttribute('data-handle') === true) return
+    const item = getLayoutItem(state, id)
+    if (item === undefined) return
+    event.preventDefault()
+    event.stopPropagation()
+    commit(selectBox(state, id))
+    options.onBoxActivate?.(id, { clientX: event.clientX, clientY: event.clientY })
+  }
+
+  canvas.addEventListener('dblclick', (event) => { activateBoxAtPointer(event) })
+  canvas.addEventListener('contextmenu', (event) => { activateBoxAtPointer(event) })
   canvas.addEventListener('pointerdown', onPointerDown)
   canvas.addEventListener('pointermove', onPointerMove)
   canvas.addEventListener('pointerup', onPointerUp)
@@ -2200,6 +2318,8 @@ export function mountLayoutEditor(container: HTMLElement, options: LayoutEditorO
       doImport()
     },
     destroy: () => {
+      resizeObserver?.disconnect()
+      win?.removeEventListener('resize', syncCanvasFrame)
       wrapper.remove()
     },
   }

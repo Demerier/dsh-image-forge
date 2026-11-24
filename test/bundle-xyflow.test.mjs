@@ -179,15 +179,21 @@ test('the artifact stays inside the size budget the pane was measured at', (t) =
   // 218,636 B gzip (the CSS-only step 1a artifact was 409,772 B / 108,342 B).
   // Step 2 (the gestures) adds the marquee, the drag reducer and the keyboard
   // forwarding on top of that.
-  // The ceiling is deliberately loose — roughly +32 % raw and +37 % gzip — because
-  // what it guards against is a *second* canvas library or a stray d3 copy being
-  // pulled into a bundle the client evaluates on every page load, not a byte
-  // budget an upstream patch release should be able to trip.
-  assert.ok(bytes < 1_100_000, `raw bundle grew past the budget: ${bytes} B`)
-  assert.ok(gzipped < 300_000, `gzipped bundle grew past the budget: ${gzipped} B`)
+  // The ceiling remains loose. The 2026-11 interaction upgrade adds the
+  // conversation result card, Better Sidebar tab, annotation editor and
+  // node-anchored canvas editor. Settings 2.0 adds the shared environment and
+  // recent-log console plus transactional drafts; the ceiling still guards against
+  // a second canvas library or a stray d3 copy, not byte-level churn.
+  assert.ok(bytes < 1_340_000, `raw bundle grew past the budget: ${bytes} B`)
+  assert.ok(gzipped < 342_000, `gzipped bundle grew past the budget: ${gzipped} B`)
   // The growth is the pane, not filler: its painters, React Flow's own node
   // wrapper (component code, not just the stylesheet) and the edge builder.
   assert.ok(BUNDLE.includes('dsh-forge-flow-node'), 'the pane’s node painters must ship')
+  assert.ok(BUNDLE.includes('dsh-forge-canvas-tool-dock.is-open'), 'the state-driven hover dock must ship')
+  assert.ok(BUNDLE.includes('dsh-forge-canvas-tool-dock.is-closing'), 'the closing lockout must ship')
+  assert.ok(BUNDLE.includes('onPointerEnter'), 'the hover dock must use pointer hysteresis, not :hover width flapping')
+  assert.ok(BUNDLE.includes('.dsh-forge-flow .react-flow__node.selectable'), 'node wrapper cursor must share the frame cursor')
+  assert.ok(BUNDLE.includes('cursor:grab'), 'node frames and their wrapper must agree on the grab cursor')
   assert.ok(BUNDLE.includes('react-flow__node'), 'React Flow’s node wrapper must ship')
   assert.ok(BUNDLE.includes('getBezierPath'), 'the lineage edge’s path builder must ship')
 })

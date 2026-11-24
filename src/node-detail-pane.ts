@@ -55,6 +55,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
 import {
@@ -69,16 +70,33 @@ import {
   type BoardTaskParams,
 } from './studio-shared.ts'
 import {
+  LAYOUT_CANVAS_LABEL_TEXT,
+  LAYOUT_CANVAS_PRESETS,
+  LAYOUT_CANVAS_VALUES,
+  LAYOUT_ITEM_LABEL_TEXT,
+  LAYOUT_ITEM_LABELS,
   LAYOUT_NODE_DEFAULT_WIDTH,
+  LAYOUT_TEMPLATES,
+  addBox,
   clampLayoutNodeWidth,
   compileLayout,
+  deleteBox,
   draftToEditorState,
   layoutNodeHeight,
   mountLayoutEditor,
+  selectBox,
+  setBoxCaption,
+  setBoxLabel,
+  setBoxName,
+  setCanvasSize,
+  setSummary,
   stateToDraft,
+  updateBox,
+  type LayoutCanvasValue,
   type LayoutDraft,
   type LayoutEditorHandle,
   type LayoutEditorState,
+  type LayoutItemLabel,
 } from './layout-editor.ts'
 import type { NodeDetailKind, TabDescriptor } from './workbench-tabs.ts'
 
@@ -329,7 +347,7 @@ export function layoutGeneratePlan(draft: BoardLayoutDraft | undefined, referenc
   if (caption.length === 0) {
     return {
       ok: false,
-      reason: '布局缺少整图描述（summary.caption）；MOSS 把它当布局 prompt 的语义锚点，先写上。',
+      reason: '布局缺少整图描述；MOSS 把它当布局 prompt 的语义锚点，先写上。',
     }
   }
   let compiled: string
@@ -639,6 +657,11 @@ function noticeCard(copy: string, onClose: () => void, retry?: () => void): Reac
 /* The pane                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/** Comma/space-tolerant list field used by tags, palette and meta. */
+function listValue(text: string): string[] {
+  return text.split(/[,，\n]/u).map((entry) => entry.trim()).filter((entry) => entry.length > 0)
+}
+
 /** What the shell hands a node detail tab. */
 export interface NodeDetailPaneProps {
   /** The project the node lives in. */
@@ -692,12 +715,24 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
   const [note, setNote] = useState<string | undefined>(undefined)
   const [saveError, setSaveError] = useState<string | undefined>(undefined)
   const [mountError, setMountError] = useState<string | undefined>(undefined)
+  const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null)
+  const [boxEditorOpen, setBoxEditorOpen] = useState(false)
+  const [boxFloat, setBoxFloat] = useState({ x: 16, y: 16 })
+  const boxFloatDragRef = useRef<{ readonly startX: number; readonly startY: number; readonly originX: number; readonly originY: number } | undefined>(undefined)
+  const canvasPaneRef = useRef<HTMLDivElement | null>(null)
 
   const view = detailViewOf(props.kind)
   const row = useMemo(
     () => (detail === undefined ? undefined : detail.items.find((entry) => entry.id === props.itemId)),
     [detail, props.itemId],
   )
+
+  const backgroundReference = useMemo(() => {
+    const references = row !== undefined && 'references' in row ? row.references : undefined
+    const id = Array.isArray(references) ? references[0] : undefined
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    return detail?.items.find((entry) => entry.id === id)
+  }, [detail, row])
 
   /* ---- read the node (§8.1: one board read per mount) -------------------- */
   useEffect(() => {
@@ -805,6 +840,33 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     if (pending !== undefined) void persistNow(pending)
   }, [persistNow])
 
+  /** Select one box and open the single non-modal box property window. */
+  const openBoxEditor = useCallback((id: string, anchor?: { readonly clientX: number; readonly clientY: number }) => {
+    const editor = editorRef.current
+    if (editor === undefined) return
+    const next = selectBox(editor.getState(), id)
+    editor.setState(next)
+    setSelectedBoxId(id)
+    const pane = canvasPaneRef.current?.getBoundingClientRect()
+    if (anchor !== undefined && pane !== undefined) {
+      const width = Math.max(300, Math.min(480, pane.width - 16))
+      setBoxFloat({
+        x: Math.max(8, Math.min(anchor.clientX - pane.left + 12, pane.width - width - 8)),
+        y: Math.max(8, Math.min(anchor.clientY - pane.top + 12, pane.height - 180)),
+      })
+    } else {
+      setBoxFloat({ x: 16, y: 16 })
+    }
+    setBoxEditorOpen(true)
+  }, [])
+
+  const closeBoxEditor = useCallback(() => {
+    const editor = editorRef.current
+    if (editor !== undefined) editor.setState(selectBox(editor.getState(), null))
+    setSelectedBoxId(null)
+    setBoxEditorOpen(false)
+  }, [])
+
   /* ---- one editor instance for this node (§8.4) -------------------------- */
   const readyForEditor = view === 'layout' && draft !== undefined
   useEffect(() => {
@@ -825,9 +887,12 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     try {
       editor = mountLayoutEditor(host, {
         draft: initial as unknown as LayoutDraft,
+        canvasOnly: true,
+        ...(backgroundReference === undefined ? {} : { backgroundImageUrl: studioFileUrl(backgroundReference.markdownPath) }),
         // `pointerScale` stays at its default: a tab has no zoomed ancestor, and
         // the editor measures its own box, so passing a scale would double it.
         onChange: (state: LayoutEditorState) => { handlersRef.current.submitEdit(state) },
+        onBoxActivate: openBoxEditor,
       })
       editorRef.current = editor
       setMountError(undefined)
@@ -848,7 +913,7 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
         // A destroy failure must never run as an unhandled throw during unmount.
       }
     }
-  }, [props.boardId, props.itemId, readyForEditor])
+  }, [backgroundReference, openBoxEditor, props.boardId, props.itemId, readyForEditor])
 
   // 撤销 (and a re-read) replaces the draft object; mirror it into the live
   // editor, exactly as the canvas's own mount does.
@@ -866,6 +931,8 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
 
   /** One committed edit from the editor: undo step, canvas-shaped node, save. */
   handlersRef.current.submitEdit = (state: LayoutEditorState): void => {
+    setSelectedBoxId(state.selectedId)
+    if (state.selectedId === null) setBoxEditorOpen(false)
     const next = stateToDraft(state) as unknown as BoardLayoutDraft
     const previous = draftRef.current
     appliedRef.current = next
@@ -874,6 +941,78 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     setDraft(next)
     scheduleSave(next)
   }
+
+  /** Apply a pure layout-editor state change and route it through autosave. */
+  const commitEditorState = (mutate: (state: LayoutEditorState) => LayoutEditorState): void => {
+    const editor = editorRef.current
+    if (editor === undefined) return
+    const next = mutate(editor.getState())
+    editor.setState(next)
+    handlersRef.current.submitEdit(next)
+  }
+
+  const layoutBoxes = useMemo(
+    () => {
+      if (draft === undefined) return []
+      try {
+        return draftToEditorState(draft as unknown as LayoutDraft).items
+      } catch {
+        // The editor effect will surface a precise validation error. The pane
+        // itself must stay readable even when a historical draft is malformed.
+        return []
+      }
+    },
+    [draft],
+  )
+  const selectedBox = selectedBoxId === null
+    ? undefined
+    : layoutBoxes.find((item) => item.id === selectedBoxId)
+
+  const patchSelectedBox = (patch: { label?: LayoutItemLabel; caption?: string; text?: string; tags?: string[]; palette?: string[]; bbox?: { x1: number; y1: number; x2: number; y2: number } }): void => {
+    if (selectedBoxId === null) return
+    commitEditorState((state) => updateBox(state, selectedBoxId, patch))
+  }
+
+  const selectLayoutBox = (id: string): void => {
+    const editor = editorRef.current
+    if (editor === undefined) return
+    editor.setState(selectBox(editor.getState(), id))
+    setSelectedBoxId(id)
+  }
+
+  const beginBoxFloatDrag = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return
+    const target = event.target as Element | null
+    if (target?.closest('button, input, textarea, select') != null) return
+    event.preventDefault()
+    boxFloatDragRef.current = { startX: event.clientX, startY: event.clientY, originX: boxFloat.x, originY: boxFloat.y }
+    const move = (next: PointerEvent): void => {
+      const drag = boxFloatDragRef.current
+      if (drag === undefined) return
+      setBoxFloat({
+        x: Math.max(8, drag.originX + next.clientX - drag.startX),
+        y: Math.max(8, drag.originY + next.clientY - drag.startY),
+      })
+    }
+    const end = (): void => {
+      boxFloatDragRef.current = undefined
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end, { once: true })
+  }
+
+  useEffect(() => {
+    if (!boxEditorOpen) return undefined
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeBoxEditor()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => { window.removeEventListener('keydown', onKey, true) }
+  }, [boxEditorOpen, closeBoxEditor])
 
   /* ---- toolbar actions --------------------------------------------------- */
   const undo = (): void => {
@@ -978,22 +1117,249 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     if (row.kind !== 'layout' || row.draft === undefined) {
       body = noticeCard(NODE_DETAIL_UNKNOWN_COPY, closePane, () => { setReloadToken((current) => current + 1) })
     } else {
-      body = createElement('div', { className: 'dsh-forge-detail-layout' }, [
-        createElement(
-          'div',
-          { key: 'facts', className: 'dsh-forge-detail-facts' },
-          factRow('草稿尺寸', summary.size, 'size'),
-          factRow('画框数量', String(summary.boxes), 'items'),
-          factRow(
-            '映射画幅',
-            summary.mappable ? summary.ratio : `${summary.ratio}（偏差 ${(summary.deviation * 100).toFixed(1)}%，无法生成）`,
-            'ratio',
+      const railSection = (key: string, title: string, children: ReactNode[], collapsed = false): ReactNode => createElement(
+        'details',
+        { key, className: 'dsh-forge-layout-rail-section', open: !collapsed },
+        createElement('summary', { className: 'dsh-forge-layout-rail-title' }, title),
+        ...children,
+      )
+      const boxEditor = boxEditorOpen && selectedBox !== undefined
+        ? createElement(
+          'aside',
+          {
+            className: 'dsh-forge-box-float',
+            'aria-label': '布局框属性',
+            'data-box-editor': selectedBox.id,
+            style: { left: `${String(boxFloat.x)}px`, top: `${String(boxFloat.y)}px` },
+          },
+          createElement(
+            'div',
+            { className: 'dsh-forge-box-float-head', onPointerDown: beginBoxFloatDrag },
+            createElement('strong', {}, `框属性 · ${selectedBox.name ?? selectedBox.id}`),
+            createElement(
+              'button',
+              { type: 'button', className: 'dsh-forge-box-float-close', 'aria-label': '关闭框属性', onClick: closeBoxEditor },
+              '×',
+            ),
           ),
-        ),
+          createElement(
+            'div',
+            { className: 'dsh-forge-box-float-body' },
+            createElement('label', { className: 'dsh-forge-field' },
+              createElement('span', { className: 'dsh-forge-label' }, '框名'),
+              createElement('input', {
+                value: selectedBox.name ?? '',
+                placeholder: '仅面板显示，不进入模型',
+                onChange: (event: { target: { value: string } }) => {
+                  commitEditorState((state) => setBoxName(state, selectedBox.id, event.target.value))
+                },
+              }),
+            ),
+            createElement('label', { className: 'dsh-forge-field' },
+              createElement('span', { className: 'dsh-forge-label' }, '框类型'),
+              createElement('select', {
+                value: selectedBox.label,
+                onChange: (event: { target: { value: string } }) => {
+                  commitEditorState((state) => setBoxLabel(state, selectedBox.id, event.target.value as LayoutItemLabel))
+                },
+              }, ...LAYOUT_ITEM_LABELS.map((label) => createElement('option', { key: label, value: label }, LAYOUT_ITEM_LABEL_TEXT[label]))),
+            ),
+            createElement('label', { className: 'dsh-forge-field' },
+              createElement('span', { className: 'dsh-forge-label' }, '画面描述'),
+              createElement('textarea', {
+                rows: 3,
+                value: selectedBox.caption,
+                placeholder: '框内主体与动作；措辞会影响全图语义',
+                onChange: (event: { target: { value: string } }) => {
+                  commitEditorState((state) => setBoxCaption(state, selectedBox.id, event.target.value))
+                },
+              }),
+            ),
+            createElement('label', { className: 'dsh-forge-field' },
+              createElement('span', { className: 'dsh-forge-label' }, '文字内容'),
+              createElement('textarea', {
+                rows: 2,
+                value: selectedBox.text ?? '',
+                placeholder: 'label=text 时填写要渲染的字',
+                onChange: (event: { target: { value: string } }) => patchSelectedBox({ text: event.target.value }),
+              }),
+            ),
+            createElement('label', { className: 'dsh-forge-field' },
+              createElement('span', { className: 'dsh-forge-label' }, '内容标签'),
+              createElement('input', {
+                value: selectedBox.tags?.join(', ') ?? '',
+                placeholder: '逗号分隔',
+                onChange: (event: { target: { value: string } }) => patchSelectedBox({ tags: listValue(event.target.value) }),
+              }),
+            ),
+            createElement('label', { className: 'dsh-forge-field' },
+              createElement('span', { className: 'dsh-forge-label' }, '配色词'),
+              createElement('input', {
+                value: selectedBox.palette?.join(', ') ?? '',
+                placeholder: '颜色词，逗号分隔',
+                onChange: (event: { target: { value: string } }) => patchSelectedBox({ palette: listValue(event.target.value) }),
+              }),
+            ),
+            createElement('div', { className: 'dsh-forge-box-coordinates' },
+              ...(['x1', 'y1', 'x2', 'y2'] as const).map((edge) => createElement('label', { key: edge, className: 'dsh-forge-field' },
+                createElement('span', { className: 'dsh-forge-label' }, edge),
+                createElement('input', {
+                  type: 'number',
+                  value: String(Math.round(selectedBox.bbox[edge])),
+                  onChange: (event: { target: { value: string } }) => {
+                    const value = Number(event.target.value)
+                    if (!Number.isFinite(value)) return
+                    patchSelectedBox({ bbox: { ...selectedBox.bbox, [edge]: value } })
+                  },
+                }),
+              )),
+            ),
+          ),
+          createElement(
+            'div',
+            { className: 'dsh-forge-box-float-actions' },
+            createElement('button', {
+              type: 'button',
+              className: 'dsh-forge-btn is-danger',
+              onClick: () => {
+                commitEditorState((state) => deleteBox(state, selectedBox.id))
+                setBoxEditorOpen(false)
+                setSelectedBoxId(null)
+              },
+            }, '删除这个框'),
+          ),
+        )
+        : null
+      const canvasPane = createElement('div', { className: 'dsh-forge-layout-canvas-pane', ref: canvasPaneRef }, [
         mountError === undefined
-          ? createElement('div', { key: 'editor', className: 'dsh-forge-detail-editor', 'data-detail-editor': 'layout' }, createElement('div', { ref: hostRef, className: 'dsh-forge-detail-editor-host' }))
+          ? createElement('div', { key: 'editor', className: 'dsh-forge-detail-editor', 'data-detail-editor': 'layout' },
+              createElement('div', { ref: hostRef, className: 'dsh-forge-detail-editor-host' }))
           : createElement('div', { key: 'editor-error', className: 'dsh-forge-detail-error' }, '布局编辑器加载失败：' + mountError),
+        boxEditor,
       ])
+      const rail = createElement('aside', { className: 'dsh-forge-layout-rail' }, [
+        railSection('overview', '布局概览', [
+          createElement('div', { key: 'facts', className: 'dsh-forge-detail-facts' },
+            factRow('草稿尺寸', summary.size, 'size'),
+            factRow('画框数量', String(summary.boxes), 'items'),
+            factRow('映射画幅', summary.mappable ? summary.ratio : `${summary.ratio}（偏差 ${(summary.deviation * 100).toFixed(1)}%，无法生成）`, 'ratio'),
+          ),
+        ]),
+        railSection('summary', '整体描述', [
+          createElement('label', { key: 'caption', className: 'dsh-forge-field' },
+            createElement('span', { className: 'dsh-forge-label' }, '整图描述（必填）'),
+            createElement('textarea', {
+              rows: 4,
+              value: draft.summary.caption ?? '',
+              placeholder: '整张图的统一描述，生成必需',
+              onChange: (event: { target: { value: string } }) => {
+                commitEditorState((state) => setSummary(state, { caption: event.target.value }))
+              },
+            }),
+          ),
+        ]),
+        railSection('canvas', '画布与画幅', [
+          createElement('div', { key: 'size', className: 'dsh-forge-layout-size-row' },
+            createElement('input', {
+              type: 'number', value: String(draft.width), 'aria-label': '布局画布宽度',
+              onChange: (event: { target: { value: string } }) => {
+                const width = Number(event.target.value)
+                if (Number.isFinite(width)) commitEditorState((state) => setCanvasSize(state, Math.round(width), state.height))
+              },
+            }),
+            createElement('span', {}, '×'),
+            createElement('input', {
+              type: 'number', value: String(draft.height), 'aria-label': '布局画布高度',
+              onChange: (event: { target: { value: string } }) => {
+                const height = Number(event.target.value)
+                if (Number.isFinite(height)) commitEditorState((state) => setCanvasSize(state, state.width, Math.round(height)))
+              },
+            }),
+          ),
+          createElement('select', {
+            key: 'preset',
+            value: `${String(draft.width)}x${String(draft.height)}`,
+            'aria-label': '画布比例预设',
+            onChange: (event: { target: { value: string } }) => {
+              const preset = LAYOUT_CANVAS_PRESETS.find((entry) => `${String(entry.width)}x${String(entry.height)}` === event.target.value)
+              if (preset !== undefined) commitEditorState((state) => setCanvasSize(state, preset.width, preset.height))
+            },
+          }, ...LAYOUT_CANVAS_PRESETS.map((preset) => createElement('option', { key: preset.label, value: `${String(preset.width)}x${String(preset.height)}` }, preset.label))),
+          createElement('select', {
+            key: 'canvas-kind',
+            value: draft.summary.canvas ?? '',
+            'aria-label': '布局画布类型',
+            onChange: (event: { target: { value: string } }) => {
+              commitEditorState((state) => setSummary(state, { canvas: event.target.value === '' ? undefined : event.target.value as LayoutCanvasValue }))
+            },
+          }, createElement('option', { value: '' }, '未指定布局类型'), ...LAYOUT_CANVAS_VALUES.map((value) => createElement('option', { key: value, value }, LAYOUT_CANVAS_LABEL_TEXT[value]))),
+        ]),
+        railSection('meta', '元信息与调色', [
+          createElement('label', { key: 'meta', className: 'dsh-forge-field' },
+            createElement('span', { className: 'dsh-forge-label' }, '题材标签'),
+            createElement('input', {
+              value: draft.summary.meta?.join(', ') ?? '', placeholder: '题材标签，逗号分隔',
+              onChange: (event: { target: { value: string } }) => commitEditorState((state) => setSummary(state, { meta: listValue(event.target.value) })),
+            }),
+          ),
+          createElement('label', { key: 'palette', className: 'dsh-forge-field' },
+            createElement('span', { className: 'dsh-forge-label' }, '配色词'),
+            createElement('input', {
+              value: draft.summary.palette?.join(', ') ?? '', placeholder: '颜色词，逗号分隔',
+              onChange: (event: { target: { value: string } }) => commitEditorState((state) => setSummary(state, { palette: listValue(event.target.value) })),
+            }),
+          ),
+        ], true),
+        railSection('template', '版式模板', [
+          createElement('select', {
+            key: 'template', defaultValue: '', 'aria-label': '选择版式模板',
+            onChange: (event: { target: { value: string; selectedIndex: number } }) => {
+              const template = LAYOUT_TEMPLATES.find((entry) => entry.id === event.target.value)
+              if (template !== undefined) {
+                commitEditorState((state) => {
+                  let next = state
+                  for (const box of template.boxes) {
+                    next = addBox(next, {
+                      label: box.label,
+                      caption: '',
+                      bbox: { x1: box.x1 * next.width, y1: box.y1 * next.height, x2: box.x2 * next.width, y2: box.y2 * next.height },
+                    })
+                  }
+                  return next
+                })
+              }
+              event.target.selectedIndex = 0
+            },
+          }, createElement('option', { value: '' }, '选择模板…'), ...LAYOUT_TEMPLATES.map((template) => createElement('option', { key: template.id, value: template.id }, template.label))),
+        ]), true,
+        railSection('boxes', `布局框（共 ${String(layoutBoxes.length)} 个）`, [
+          layoutBoxes.length === 0
+            ? createElement('p', { key: 'empty', className: 'dsh-forge-detail-copy' }, '还没有布局框。在左侧画布拖动创建，或选择一个模板。')
+            : createElement('div', { key: 'list', className: 'dsh-forge-layout-box-list' },
+                ...layoutBoxes.map((item) => createElement('div', {
+                  key: item.id,
+                  className: item.id === selectedBoxId ? 'dsh-forge-layout-box-row is-active' : 'dsh-forge-layout-box-row',
+                  onClick: () => selectLayoutBox(item.id),
+                },
+                createElement('span', { className: 'dsh-forge-layout-box-name' }, item.name ?? (item.caption || item.id)),
+                createElement('span', { className: 'dsh-forge-layout-box-kind' }, LAYOUT_ITEM_LABEL_TEXT[item.label]),
+                createElement('button', {
+                  type: 'button', className: 'dsh-forge-layout-box-edit', title: '编辑这个框的属性',
+                  onClick: (event: { stopPropagation(): void }) => { event.stopPropagation(); openBoxEditor(item.id) },
+                }, '属性'),
+              )),
+          ),
+        ]),
+        backgroundReference === undefined
+          ? null
+          : railSection('background', '背景参考', [
+            createElement('div', { key: 'bg', className: 'dsh-forge-layout-reference' },
+              createElement('img', { src: studioFileUrl(backgroundReference.markdownPath), alt: '布局背景参考' }),
+              createElement('span', {}, backgroundReference.prompt || backgroundReference.markdownPath),
+            ),
+          ], true),
+      ])
+      body = createElement('div', { className: 'dsh-forge-layout-workspace' }, canvasPane, rail)
     }
   } else if (view === 'image') {
     body = createElement('div', { className: 'dsh-forge-detail-image' }, [
@@ -1109,7 +1475,7 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     head,
     createElement(
       'div',
-      { className: 'dsh-forge-detail-body' },
+      { className: view === 'layout' ? 'dsh-forge-detail-body is-layout' : 'dsh-forge-detail-body' },
       body,
       alerts[0] === null ? null : alerts[0],
       alerts[1] === null ? null : alerts[1],

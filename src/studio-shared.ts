@@ -354,6 +354,10 @@ export interface StudioEnvironmentSnapshot {
   waitedMs?: number
   /** True only when the running backend is provably the one this plugin started. */
   owned: boolean
+  /** True when the backend process can be safely stopped from the workbench. */
+  canStop: boolean
+  /** Why stop is unavailable although a launch record may exist. */
+  stopBlockedReason?: string
   /** The argv a launch ran — or would run — with (stage 3 preview). */
   argvPreview?: string[]
   /** What to do next, when the state is not `ready`. */

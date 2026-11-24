@@ -25,7 +25,7 @@
  *
  * @module workbench-projects
  */
-import { createElement, useMemo, useState, type ReactNode } from 'react'
+import { createElement, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { formatBytes, studioFileUrl, type BoardSummary } from './studio-shared.ts'
 
 /** Sort orders the toolbar offers (§5.3). `recent` is the default. */
@@ -238,6 +238,18 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
   const [renaming, setRenaming] = useState<string | undefined>(undefined)
   const [renameValue, setRenameValue] = useState('')
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
+  const [menuFor, setMenuFor] = useState<string | undefined>(undefined)
+  const projectsRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (menuFor === undefined || typeof document === 'undefined') return undefined
+    const close = (event: Event): void => {
+      const target = event.target
+      if (target instanceof Element && target.closest(`[data-project-menu="${menuFor}"]`) !== null) return
+      setMenuFor(undefined)
+    }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [menuFor])
 
   const visible = useMemo(() => sortProjects(filterProjects(boards, query), sort), [boards, query, sort])
   const now = Date.now()
@@ -428,53 +440,71 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
             ]),
           )
         } else {
+          const menuOpen = menuFor === board.id
           cardChildren.push(
-            createElement('div', { key: 'actions', className: 'dsh-forge-workbench-card-actions' }, [
-              createElement(
-                'button',
-                {
-                  key: 'rename',
-                  type: 'button',
-                  className: 'dsh-forge-workbench-action',
-                  'aria-label': `重命名 ${board.name}`,
-                  onClick: () => {
-                    setRenaming(board.id)
-                    setRenameValue(board.name)
-                    setConfirming(undefined)
-                  },
+            createElement('div', {
+              key: 'actions',
+              className: 'dsh-forge-workbench-card-actions',
+              'data-project-menu': board.id,
+            }, [
+              createElement('button', {
+                key: 'menu',
+                type: 'button',
+                className: menuOpen
+                  ? 'dsh-forge-workbench-menu-toggle is-open'
+                  : 'dsh-forge-workbench-menu-toggle',
+                'aria-label': `管理 ${board.name}`,
+                'aria-haspopup': 'menu',
+                'aria-expanded': menuOpen,
+                onClick: (event?: { stopPropagation?(): void }) => {
+                  event?.stopPropagation?.()
+                  setMenuFor(menuOpen ? undefined : board.id)
+                  setConfirming(undefined)
                 },
-                '重命名',
-              ),
-              // U07 §5.3: 复制项目. Rendered only when the shell gave it a handler,
-              // so the pane stays usable (and assertable) without one.
-              onDuplicate === undefined
-                ? null
-                : createElement(
-                    'button',
-                    {
-                      key: 'duplicate',
+              }, '•••'),
+              menuOpen
+                ? createElement('div', { key: 'menu', className: 'dsh-forge-workbench-card-menu', role: 'menu' }, [
+                    createElement('button', {
+                      key: 'rename',
                       type: 'button',
+                      role: 'menuitem',
                       className: 'dsh-forge-workbench-action',
-                      'aria-label': `复制 ${board.name}`,
-                      title: '复制一份：条目、位置与血缘都复制，图片文件不复制',
+                      'aria-label': `重命名 ${board.name}`,
                       onClick: () => {
+                        setRenaming(board.id)
+                        setRenameValue(board.name)
                         setConfirming(undefined)
-                        void onDuplicate(board.id)
+                        setMenuFor(undefined)
                       },
-                    },
-                    PROJECT_DUPLICATE_LABEL,
-                  ),
-              createElement(
-                'button',
-                {
-                  key: 'delete',
-                  type: 'button',
-                  className: 'dsh-forge-workbench-action is-danger',
-                  'aria-label': `删除 ${board.name}`,
-                  onClick: () => setConfirming(confirmingThis ? undefined : board.id),
-                },
-                '删除',
-              ),
+                    }, '重命名'),
+                    onDuplicate === undefined
+                      ? null
+                      : createElement('button', {
+                          key: 'duplicate',
+                          type: 'button',
+                          role: 'menuitem',
+                          className: 'dsh-forge-workbench-action',
+                          'aria-label': `复制 ${board.name}`,
+                          title: '复制一份：条目、位置与血缘都复制，图片文件不复制',
+                          onClick: () => {
+                            setConfirming(undefined)
+                            setMenuFor(undefined)
+                            void onDuplicate(board.id)
+                          },
+                        }, PROJECT_DUPLICATE_LABEL),
+                    createElement('button', {
+                      key: 'delete',
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'dsh-forge-workbench-action is-danger',
+                      'aria-label': `删除 ${board.name}`,
+                      onClick: () => {
+                        setMenuFor(undefined)
+                        setConfirming(board.id)
+                      },
+                    }, '删除'),
+                  ])
+                : null,
             ]),
           )
         }
@@ -574,7 +604,16 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
       ? null
       : createElement('div', { key: 'error', className: 'dsh-forge-workbench-error', role: 'alert' }, error)
 
-  return createElement('div', { className: 'dsh-forge-workbench-projects' }, [
+  const hero = createElement('section', { key: 'hero', className: 'dsh-forge-workbench-hero' }, [
+    createElement('div', { key: 'copy', className: 'dsh-forge-workbench-hero-copy' }, [
+      createElement('span', { key: 'eyebrow', className: 'dsh-forge-workbench-hero-eyebrow' }, 'FORGE · 创作工作台'),
+      createElement('h2', { key: 'title', className: 'dsh-forge-workbench-hero-title' }, '把想法放上画布，继续把它做深。'),
+      createElement('p', { key: 'body', className: 'dsh-forge-workbench-hero-body' }, '一张图、一组版式、一次修改都留在同一个无限画板里。'),
+    ]),
+    createElement('span', { key: 'badge', className: 'dsh-forge-workbench-hero-badge' }, `${String(visible.length)} 个项目`),
+  ])
+  return createElement('div', { ref: projectsRef, className: 'dsh-forge-workbench-projects' }, [
+    hero,
     toolbar,
     environmentHint,
     refusal,

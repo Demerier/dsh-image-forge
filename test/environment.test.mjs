@@ -525,9 +525,11 @@ test('a child that never answers is a timeout, and is not retried', async () => 
     installTimeoutMs: 400,
     waitIntervalMs: 20,
   }
-  const status = await ensureEnvironment(options, depsOf(machine, { spawn }))
+  const status = await ensureEnvironment(options, depsOf(machine, { spawn, kill: () => true, commandLineOf: () => ownedCommandLine(machine) }))
   assert.equal(status.state, 'timeout')
   assert.equal(spawns, 1, 'a timeout must not become a retry loop')
+  assert.equal(status.owned, true, 'a timed-out process that is still admissibly ours stays owned')
+  assert.equal(status.canStop, true, 'a timed-out but live owned process remains stoppable')
   assert.ok((status.waitedMs ?? 0) >= 300)
   assert.ok(status.note.includes('没有就绪'))
 })

@@ -707,7 +707,7 @@ test('the weight-profile control states the trade and the fallback', () => {
   const byKey = Object.fromEntries(SETTINGS_FIELDS.map((field) => [field.key, field]))
   const field = byKey.comfyModel
   console.log('comfyModel control:', JSON.stringify(field))
-  assert.equal(field.group, 'steps')
+  assert.equal(field.group, 'generation')
   assert.equal(field.kind, 'enum')
   // Three model profiles, one control. The two legacy values (`base` / `turbo`)
   // are still *accepted* by the schema, but they are not offered: a new save
@@ -746,7 +746,7 @@ test('the MOSS sampling register is one select with the two published registers'
   const field = fieldByKey('mossSampling')
   console.log('mossSampling control:', JSON.stringify(field))
   assert.ok(field, 'mossSampling must have a control')
-  assert.equal(field.group, 'steps')
+  assert.equal(field.group, 'overrides')
   assert.equal(field.kind, 'enum')
   // Two registers, by value: `comfy` is the ComfyUI template's faster settings
   // (the one the verified sample ran), `official` is OpenMOSS's own card. There
@@ -773,11 +773,11 @@ test('the step controls state the tradeoff and mark the two overrides nullable',
     comfyuiSteps: byKey.comfyuiSteps.hint,
     turboSteps: byKey.turboSteps.hint,
   }, null, 2))
-  assert.equal(byKey.defaultSteps.group, 'steps')
+  assert.equal(byKey.defaultSteps.group, 'generation')
   assert.equal(byKey.defaultSteps.kind, 'number')
   assert.equal(byKey.defaultSteps.nullable, undefined, 'the shared default is not nullable')
   for (const key of ['comfyuiSteps', 'turboSteps']) {
-    assert.equal(byKey[key].group, 'steps')
+    assert.equal(byKey[key].group, 'overrides')
     assert.equal(byKey[key].kind, 'number')
     assert.equal(byKey[key].nullable, true, `${key} must be clearable back to unset`)
     assert.equal(byKey[key].min, 1)
@@ -813,16 +813,16 @@ test('the settings tabs cover every visible group exactly once', () => {
   )
 })
 
-test('the ComfyUI tab points at the deployment document', () => {
-  // A user who has no ComfyUI yet lands on this tab first; the one thing it must
-  // not do is leave them to guess. The document is asserted to exist below.
-  const tab = SETTINGS_TABS.find((candidate) => candidate.id === 'comfyui')
-  assert.ok(tab, 'the ComfyUI tab must exist')
-  assert.match(tab.hint, /docs\/comfyui-deployment\.md/)
-  const root = fileURLToPath(new URL('..', import.meta.url))
-  assert.ok(existsSync(join(root, 'docs', 'comfyui-deployment.md')), 'the cited deployment document must ship')
+test('the two settings tabs are the intended basic and advanced split', () => {
+  assert.deepEqual(SETTINGS_TABS.map((tab) => [tab.id, tab.label]), [['basic', '常用'], ['advanced', '高级']])
+  const basic = SETTINGS_TABS.find((tab) => tab.id === 'basic')
+  const advanced = SETTINGS_TABS.find((tab) => tab.id === 'advanced')
+  assert.ok(basic && advanced)
+  const basicFields = tabFields(basic).flatMap(({ fields }) => fields.map((field) => field.key))
+  const advancedFields = tabFields(advanced).flatMap(({ fields }) => fields.map((field) => field.key))
+  assert.deepEqual(basicFields, ['comfyEndpoint', 'comfyPorts', 'comfyModelsDir', 'comfyModel', 'defaultSteps', 'outputDir', 'timeoutMs'])
+  assert.deepEqual(advancedFields, ['comfyuiSteps', 'mossSampling', 'turboSteps', 'executionBackend', 'comfyMcpBin', 'comfyBin', 'backendTimeoutMs', 'mcpDebug', 'backendTmpDir'])
 })
-
 test('the section groups every visible field exactly once and every group is non-empty', () => {
   const buckets = groupedFields()
   const seen = buckets.flatMap(({ fields }) => fields.map((field) => field.key))
@@ -1000,7 +1000,7 @@ const README_SOURCE = [
 test('the advisory states the turbo/base conclusion and the numbers, in two lines', () => {
   console.log('--- advisory as rendered ---\n' + ADVISORY_TEXT + '\n--- end ---')
   assert.equal(BACKEND_PERF_ADVISORY.id, 'turbo-vs-base')
-  assert.equal(BACKEND_PERF_ADVISORY.placedAfterGroup, 'steps')
+  assert.equal(BACKEND_PERF_ADVISORY.placedAfterGroup, 'generation')
   // The recommendation the user asked to keep on the page.
   assert.match(BACKEND_PERF_ADVISORY.title, /turbo/)
   assert.match(BACKEND_PERF_ADVISORY.title, /8 步/)
@@ -1224,26 +1224,29 @@ test('the client ships the presentation CSS and the settings ergonomics', () => 
   // has) and are pinned here so a silent drop cannot ship as "unchanged".
   assert.match(CLIENT_SOURCE, /dsh-image-forge-client-styles/, 'the style tag id must be in the bundle')
   assert.match(CLIENT_SOURCE, /injectClientStyles/, 'the style injection must be wired into apply')
-  assert.match(CLIENT_SOURCE, /dsh-image-forge-setting-unit/, 'numeric fields must render a unit suffix')
+  assert.match(CLIENT_SOURCE, /dsh-settings-unit/, 'numeric fields must render a unit suffix')
   // Container query is the one that matters: a wide Host window with a narrow
   // settings pane must still stack, which a viewport `@media` cannot see.
   assert.match(CLIENT_SOURCE, /@container forge-settings/, 'the settings column must container-query its own width')
   assert.match(CLIENT_SOURCE, /container-type: inline-size/, 'the settings root must be a size container')
-  assert.match(CLIENT_SOURCE, /max-width: 560px/, 'the narrow breakpoint must stay at 560px')
+  assert.match(CLIENT_SOURCE, /max-width: 760px/, 'the narrow breakpoint must follow the settings column')
   assert.match(CLIENT_SOURCE, /overflow-wrap: anywhere/, 'long path hints must wrap instead of clipping')
-  assert.match(CLIENT_SOURCE, /dsh-image-forge-images/, 'generate/edit cards must use the image grid')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-result-card/, 'generate/edit cards use the interactive batch result card')
   assert.match(CLIENT_SOURCE, /dsh-image-forge-checklist/, 'the status card must use the health checklist')
   assert.match(CLIENT_SOURCE, /data-advanced/, 'the advanced marker must stay available for a future group')
-  assert.match(CLIENT_SOURCE, /htmlFor: controlId/, 'labels must point at their controls')
+  assert.match(CLIENT_SOURCE, /htmlFor: id/, 'labels must point at their controls')
   // The Host hands the view a tool-result block, not `result.value`. Reading the
   // wrong shape made every card fall back to empty-state text on a real client.
   assert.match(CLIENT_SOURCE, /tool-result|block\?\.content/, 'the card must read the Host tool-result block')
   assert.match(CLIENT_SOURCE, /JSON\.parse/, 'the block text must be parsed as JSON')
   // Tabbed settings page: a strip of tabs, one active panel, denser field grid.
   assert.match(CLIENT_SOURCE, /dsh-image-forge-tabs/, 'the tab strip must be in the bundle')
-  assert.match(CLIENT_SOURCE, /dsh-image-forge-tab-active/, 'the active tab must be styled')
+  assert.match(CLIENT_SOURCE, /dsh-image-forge-tab\.is-active/, 'the active tab must be styled')
   assert.match(CLIENT_SOURCE, /dsh-image-forge-settings-panel/, 'the active panel must be in the bundle')
-  assert.match(CLIENT_SOURCE, /dsh-image-forge-settings-fields-grid/, 'the dense field grid must be in the bundle')
+  assert.match(CLIENT_SOURCE, /dsh-settings-environment/, 'the live environment card must be in the bundle')
+  assert.match(CLIENT_SOURCE, /dsh-settings-log-output/, 'the recent log console must be in the bundle')
+  assert.match(CLIENT_SOURCE, /dsh-settings-savebar/, 'the unified save bar must be in the bundle')
+  assert.match(CLIENT_SOURCE, /commitSettingsDraft/, 'batch save and rollback must be in the bundle')
   assert.match(CLIENT_SOURCE, /role: ['"]tab['"]/, 'tabs must be exposed as tabs')
   assert.match(CLIENT_SOURCE, /role: ['"]tabpanel['"]/, 'the panel must be exposed as a tabpanel')
   assert.match(CLIENT_SOURCE, /SETTINGS_TABS|tabFields/, 'the tab model must drive the page')

@@ -273,6 +273,7 @@ test('the image payload carries a 512-px thumbnail and the original separately',
   assert.match(node.data.thumbUrl, /w=512$/u, 'a node asks for the node-width thumbnail')
   assert.doesNotMatch(node.data.originalUrl, /w=/u, 'the lightbox asks for the original')
   assert.equal(node.data.meta, '1024×1024 · 512 KB')
+  assert.equal(node.data.title, '一只橘猫趴在窗台上', 'the node title is the prompt, not a file name')
 })
 
 test('the task payload carries everything its painter prints', () => {
@@ -933,6 +934,15 @@ test('居中揭示 moves the engine’s camera, and the DOM camera only when tha
   const plan = planReveal({ rect, canvas: 'dom', zoom: 1 })
   const camera = centerOn(plan.center, viewport, plan.zoom)
   assert.deepEqual(worldToScreen(camera, plan.center), { x: 400, y: 300 })
+})
+
+test('the creation highlight marks exactly one node without changing geometry', () => {
+  const plain = toFlowModel([imageNode('a'), taskNode('t')])
+  const focused = toFlowModel([imageNode('a'), taskNode('t')], { highlighted: 't' })
+  assert.notEqual(plain.nodes[0]?.data.highlighted, true)
+  assert.equal(focused.nodes[0]?.data.highlighted, undefined)
+  assert.equal(focused.nodes[1]?.data.highlighted, true)
+  assert.deepEqual(focused.nodes.map((node) => node.position), plain.nodes.map((node) => node.position))
 })
 
 test('a task node’s buttons are decided by its state, and every state is decided', () => {

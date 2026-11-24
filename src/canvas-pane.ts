@@ -230,7 +230,7 @@ export interface FlowCanvasApi {
    * 1b React Flow owns the viewport, so "居中揭示" is a call on the instance and
    * nothing else. `revealNodeId` reaches this through the handle.
    */
-  readonly reveal: (center: Point, zoom: number) => void
+  readonly reveal: (center: Point, zoom: number, duration?: number) => void
   /** The camera React Flow is currently using, in the studio's convention. */
   readonly camera: () => Camera
   /** A viewport-relative point in world space. */
@@ -243,6 +243,8 @@ export interface FlowCanvasProps {
   readonly nodes: readonly FlowSourceNode[]
   /** Ids the caller paints as selected. */
   readonly selection?: ReadonlySet<string>
+  /** Which node plays the one-shot creation highlight. */
+  readonly highlightedNodeId?: string
   /** Called with the ids React Flow reports selected; `[]` when cleared. */
   readonly onSelect?: (ids: readonly string[]) => void
   /** A layout node's draft changed in its embedded editor. */
@@ -595,8 +597,12 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
   const selection = props.selection
   const locked = props.locked
   const model = useMemo(
-    () => toFlowModel(props.nodes, selection === undefined ? {} : { selected: selection, locked }),
-    [props.nodes, selection, locked],
+    () => toFlowModel(props.nodes, {
+      ...(selection === undefined ? {} : { selected: selection }),
+      ...(locked === undefined ? {} : { locked }),
+      ...(props.highlightedNodeId === undefined ? {} : { highlighted: props.highlightedNodeId }),
+    }),
+    [props.nodes, selection, locked, props.highlightedNodeId],
   )
 
   const interaction = useMemo(
@@ -720,12 +726,12 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
         latest.current.onCameraChange?.(cameraFromFlow(instance.getViewport()))
       },
       camera: () => cameraFromFlow(instance.getViewport()),
-      reveal: (center: Point, zoom: number) => {
+      reveal: (center: Point, zoom: number, duration = 0) => {
         // `setCenter` is the engine's own "put this world point in the middle".
         // The zoom is the caller's (the camera's current one), because a reveal
         // that also zoomed would land the node at a scale nobody asked for.
         const target = Number.isFinite(zoom) && zoom > 0 ? clampZoom(zoom) : clampZoom(instance.getZoom())
-        void instance.setCenter(center.x, center.y, { zoom: target, duration: 0 })
+        void instance.setCenter(center.x, center.y, { zoom: target, duration })
         latest.current.onCameraChange?.(cameraFromFlow(instance.getViewport()))
       },
       screenToWorld: (point: Point) => instance.screenToFlowPosition({ x: point.x, y: point.y }),
@@ -1223,8 +1229,8 @@ function actionsOf(data: Record<string, unknown>): FlowNodeActions {
 }
 
 /** Class list for one node's frame. */
-function nodeClassName(kind: string, selected: boolean): string {
-  return ['dsh-forge-flow-node', `is-${kind}`, selected ? 'is-selected' : ''].filter((part) => part.length > 0).join(' ')
+function nodeClassName(kind: string, selected: boolean, highlighted = false): string {
+  return ['dsh-forge-flow-node', `is-${kind}`, selected ? 'is-selected' : '', highlighted ? 'is-created-focus' : ''].filter((part) => part.length > 0).join(' ')
 }
 
 /**
@@ -1290,7 +1296,7 @@ export function ImageFlowNode(props: NodeProps): ReactNode {
   return createElement(
     'div',
     {
-      className: nodeClassName('image', selected),
+      className: nodeClassName('image', selected, data['highlighted'] === true),
       'data-node-kind': 'image',
       'data-node-id': nodeId,
       style: { '--dsh-forge-zoom': String(zoom) },
@@ -1370,7 +1376,7 @@ export function TaskFlowNode(props: NodeProps): ReactNode {
   return createElement(
     'div',
     {
-      className: nodeClassName('task', props.selected === true),
+      className: nodeClassName('task', props.selected === true, data['highlighted'] === true),
       'data-node-kind': 'task',
       'data-node-id': nodeId,
       'data-task-status': status,
@@ -1529,7 +1535,7 @@ function LayoutThumb(props: {
         'data-detail-action': 'open-detail',
         onClick: () => { props.onOpenDetail?.() },
       },
-      '在详情页编辑',
+      '编辑布局',
     ),
   )
 }
@@ -1557,7 +1563,7 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
   return createElement(
     'div',
     {
-      className: nodeClassName('layout', props.selected === true),
+      className: nodeClassName('layout', props.selected === true, data['highlighted'] === true),
       'data-node-kind': 'layout',
       'data-node-id': nodeId,
       'data-detail-locked': detailOpen ? 'true' : 'false',
@@ -1567,47 +1573,45 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
       'div',
       { className: 'dsh-forge-flow-layout-head' },
       createElement('span', { className: 'dsh-forge-flow-layout-title' }, 'MOSS 布局'),
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: 'dsh-forge-flow-btn',
-          title: '按布局生成：compiled 作为 MOSS 正向编码文本（仅 moss-sft）',
-          onClick: () => { actions.onGenerateLayout?.(nodeId) },
-        },
-        '生成',
+      createElement('div', { className: 'dsh-forge-flow-layout-head-actions' },
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-forge-flow-btn',
+            title: '打开布局详情页编辑画框与整体参数',
+            'data-detail-action': 'open-detail',
+            onClick: () => { actions.onOpenDetail?.(nodeId) },
+          },
+          '编辑',
+        ),
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-forge-flow-btn',
+            title: '按布局生成：compiled 作为 MOSS 正向编码文本（仅 moss-sft）',
+            onClick: () => { actions.onGenerateLayout?.(nodeId) },
+          },
+          '生成',
+        ),
       ),
     ),
-    // The whole-image sentence is the *one field* a layout cannot generate
-    // without (T21 takes it as the prompt), so it belongs on the node itself and
-    // not only in the detail tab: without it the 生成 button above can only fail.
     createElement(
       'div',
-      { className: 'dsh-forge-flow-layout-caption' },
-      createElement('input', {
-        type: 'text',
-        className: 'dsh-forge-flow-layout-caption-input nodrag nopan',
-        placeholder: 'summary.caption：整图描述（生成必需）',
-        value: typeof data['caption'] === 'string' ? data['caption'] : '',
-        'aria-label': '布局整图描述',
-        onPointerDown: (event: ReactPointerEvent<HTMLInputElement>) => { event.stopPropagation() },
-        onChange: (event: ReactChangeEvent<HTMLInputElement>) => {
-          actions.onLayoutCaption?.(nodeId, event.target.value)
-        },
-      }),
+      { className: 'dsh-forge-flow-layout-caption', title: typeof data['caption'] === 'string' ? data['caption'] : '' },
+      typeof data['caption'] === 'string' && data['caption'].length > 0 ? data['caption'] : '尚未填写整图描述',
     ),
     createElement(
       'div',
       { className: 'dsh-forge-flow-layout-body nodrag nopan nowheel' },
       draft === undefined
         ? createElement('div', { className: 'dsh-forge-flow-layout-error' }, '草稿缺失')
-        : detailOpen
-          ? createElement(LayoutThumb, {
-            nodeId,
-            draft,
-            onOpenDetail: () => { actions.onOpenDetail?.(nodeId) },
-          })
-          : createElement(LayoutEditorSlot, { nodeId, draft, onDraft: actions.onDraft }),
+        : createElement(LayoutThumb, {
+          nodeId,
+          draft,
+          onOpenDetail: () => { actions.onOpenDetail?.(nodeId) },
+        }),
     ),
     createElement(
       'div',
@@ -1626,7 +1630,7 @@ export function DraftFlowNode(props: NodeProps): ReactNode {
   return createElement(
     'div',
     {
-      className: nodeClassName('draft', props.selected === true),
+      className: nodeClassName('draft', props.selected === true, data['highlighted'] === true),
       'data-node-kind': 'draft',
       'data-node-id': String(data['nodeId'] ?? props.id),
       style: { '--dsh-forge-zoom': String(zoom) },

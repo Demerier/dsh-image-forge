@@ -228,6 +228,7 @@ import {
   type StudioProgressEvent,
   type StudioReferencePayload,
 } from './studio-shared.ts'
+import { refreshStudioEnvironment, runStudioEnvironmentAction, setEnvironmentClientError, useEnvironmentClient } from './environment-client.ts'
 
 /** One reference image held in the form, with its preview URL and wire payload. */
 interface HeldReference {
@@ -267,6 +268,8 @@ interface ImageCanvasNode extends CanvasNodeBase {
   readonly kind: 'image'
   readonly image: StudioImage
   readonly batchId: string
+  /** Prompt that produced the picture; absent for an imported file. */
+  readonly prompt?: string
 }
 
 /**
@@ -516,6 +519,77 @@ const ALIGN_LABELS: Record<AlignMode, string> = {
 /** The §6.2 distribute buttons, one per axis. */
 const DISTRIBUTE_LABELS: Record<DistributeAxis, string> = { x: '水平等距', y: '垂直等距' }
 
+/** Friendly labels for the session-scoped command timeline. */
+function historyCommandLabel(label: string): string {
+  if (label.startsWith('align-')) {
+    const mode = label.slice('align-'.length) as AlignMode
+    return ALIGN_LABELS[mode] ?? '对齐节点'
+  }
+  if (label.startsWith('distribute-')) {
+    const axis = label.slice('distribute-'.length) as DistributeAxis
+    return DISTRIBUTE_LABELS[axis] ?? '等距分布'
+  }
+  return ({
+    drag: '拖动画布节点',
+    move: '移动节点',
+    nudge: '微移节点',
+    remove: '移除节点',
+    'connect-edge': '建立连线',
+    'layout-resize': '调整布局节点尺寸',
+    'drag-in': '拖入画面',
+    'place-asset': '放入素材',
+    'layout-draft': '编辑布局',
+    'add-layout': '新建布局节点',
+    'add-draft': '新建生成节点',
+  } as Record<string, string>)[label] ?? '画布操作'
+}
+
+
+/** requestAnimationFrame with a Node-test fallback. */
+function scheduleFrame(callback: () => void): number {
+  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback)
+  return Number(setTimeout(callback, 0))
+}
+
+function cancelScheduledFrame(id: number): void {
+  if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id)
+  else clearTimeout(id)
+}
+
+/** Arrow/Home/End navigation shared by every canvas popup menu. */
+function canvasMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  const menu = event.currentTarget
+  const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')]
+  if (items.length === 0) return
+  event.preventDefault()
+  const active = document.activeElement
+  const current = items.findIndex((item) => item === active)
+  const next = event.key === 'Home'
+    ? 0
+    : event.key === 'End'
+      ? items.length - 1
+      : event.key === 'ArrowDown'
+        ? (current + 1) % items.length
+        : (current <= 0 ? items.length : current) - 1
+  items[next]?.focus()
+}
+
+/** Small stroke icons for the grouped canvas dock. */
+function toolIcon(kind: 'select' | 'hand' | 'image' | 'layout'): ReturnType<typeof createElement> {
+  const paths: Readonly<Record<typeof kind, readonly string[]>> = {
+    select: ['M5 3l7 16 2.2-6.2L20 11z'],
+    hand: ['M8 11V6.5a1.5 1.5 0 0 1 3 0V10', 'M11 10V5.5a1.5 1.5 0 0 1 3 0V10', 'M14 10V6.5a1.5 1.5 0 0 1 3 0V11', 'M17 11V8.5a1.5 1.5 0 0 1 3 0v6.2c0 3.4-2.4 6.3-6.2 6.3H12c-2 0-3.4-.8-4.8-2.3L4.4 15a1.7 1.7 0 0 1 2.4-2.4L9 15'],
+    image: ['M4 5h16v14H4z', 'M8 10a1.5 1.5 0 1 0 0.01 0', 'M4 16l5-5 4 4 2-2 5 5'],
+    layout: ['M4 4h7v7H4z', 'M13 4h7v4h-7z', 'M13 10h7v10h-7z', 'M4 13h7v7H4z'],
+  }
+  return createElement(
+    'svg',
+    { className: 'dsh-forge-canvas-tool-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', focusable: 'false' },
+    ...paths[kind].map((d, index) => createElement('path', { key: `${kind}-${String(index)}`, d })),
+  )
+}
+
 /**
  * World-space rectangle a node occupies.
  *
@@ -678,6 +752,7 @@ function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
         mediaType: item.mediaType,
       },
       batchId: item.batchId,
+      ...(item.prompt.length === 0 ? {} : { prompt: item.prompt }),
       x: item.x ?? spot.x,
       y: item.y ?? spot.y,
       parents: item.parents,
@@ -1419,7 +1494,7 @@ export interface CanvasEngine {
    * the engine is only a mirror — the reveal did nothing on screen. The point is
    * decided by `planReveal`; this is the call that makes it visible.
    */
-  reveal(center: Point, zoom: number): void
+  reveal(center: Point, zoom: number, duration?: number): void
 }
 
 /**
@@ -1520,10 +1595,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // separate from the capability snapshot: the capability probe answers "can this
   // workbench generate", while the environment answers "which process is running
   // and is it mine to stop".
-  const [environment, setEnvironment] = useState<StudioEnvironmentSnapshot | undefined>(undefined)
-  const [environmentBusy, setEnvironmentBusy] = useState<'start' | 'stop' | undefined>(undefined)
-  const [environmentError, setEnvironmentError] = useState<string | undefined>(undefined)
-  const [environmentNote, setEnvironmentNote] = useState<string | undefined>(undefined)
+  const environmentClient = useEnvironmentClient()
+  const environment = environmentClient.environment
+  const environmentBusy = environmentClient.busy
+  const environmentError = environmentClient.error
+  const environmentNote = environmentClient.note
   // Weights: the dry-run plan from `status`, the per-file byte progress while a
   // download runs, and the report it ended with.
   const [weights, setWeights] = useState<StudioWeightsReport | undefined>(undefined)
@@ -1552,7 +1628,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // across optimise clicks, because trying both on the same idea is the point.
   const [promptStyle, setPromptStyle] = useState<StudioPromptStyle>('prose')
   // Canvas state: which view, the results placed on it, and the camera.
-  const [view, setView] = useState<'canvas' | 'list' | 'assets'>('canvas')
+  const [view, setView] = useState<'canvas' | 'gallery'>('canvas')
   const [nodes, setNodes] = useState<CanvasNode[]>([])
   const [camera, setCamera] = useState<Camera>({ x: -28, y: -28, zoom: 1 })
   // U04 step 4: the view the board itself stored, and whether a read has
@@ -1565,6 +1641,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // "single selected node" a special case of it (`singleSelection`). Every
   // component that used to read one id reads the set instead.
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set())
+  const [highlightedNodeId, setHighlightedNodeId] = useState<string | undefined>(undefined)
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const gestureRef = useRef<Gesture | undefined>(undefined)
   // Latest pointer position and the one queued frame that will apply it (§10.3).
@@ -1591,6 +1669,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // (§6.1: its border must not zoom).
   const [marquee, setMarquee] = useState<MarqueeBox | undefined>(undefined)
   // Right-click menu (§6.4): where it is, what it offers, and what it acts on.
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [environmentOpen, setEnvironmentOpen] = useState(false)
   const [menu, setMenu] = useState<{
     readonly x: number
     readonly y: number
@@ -1636,6 +1716,60 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     /** The node the wire came from, which becomes the picked node's parent. */
     readonly sourceId: string
   } | undefined>(undefined)
+  // Every canvas popup is temporary. A document-level capture listener is the
+  // one place that can see React Flow's pane, toolbar, composer and wheel events;
+  // the old canvas-only pointer handler never ran for the Flow engine.
+  useEffect(() => {
+    if (menu === undefined && transfer === undefined && wireMenu === undefined && assetPick === undefined && !historyOpen && !environmentOpen) return undefined
+    const closeOverlays = (): void => {
+      setMenu(undefined)
+      setTransfer(undefined)
+      setWireMenu(undefined)
+      setAssetPick(undefined)
+      setHistoryOpen(false)
+      setEnvironmentOpen(false)
+      scheduleFrame(() => { canvasRef.current?.focus() })
+    }
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target
+      if (target instanceof Element && target.closest('.dsh-forge-context, .dsh-forge-transfer, .dsh-forge-history-popover, .dsh-forge-history-trigger, .dsh-forge-environment-popover, .dsh-forge-environment-trigger') !== null) return
+      closeOverlays()
+    }
+    const onWheel = (): void => { closeOverlays() }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeOverlays()
+    }
+    const win = typeof window === 'undefined' ? undefined : window
+    const doc = typeof document === 'undefined' ? undefined : document
+    if (typeof win?.addEventListener === 'function') {
+      win.addEventListener('pointerdown', onPointerDown, true)
+      win.addEventListener('wheel', onWheel, { capture: true, passive: true })
+      win.addEventListener('keydown', onKeyDown, true)
+    }
+    if (typeof doc?.addEventListener === 'function') doc.addEventListener('scroll', onWheel, true)
+    return () => {
+      if (typeof win?.removeEventListener === 'function') {
+        win.removeEventListener('pointerdown', onPointerDown, true)
+        win.removeEventListener('wheel', onWheel, true)
+        win.removeEventListener('keydown', onKeyDown, true)
+      }
+      if (typeof doc?.removeEventListener === 'function') doc.removeEventListener('scroll', onWheel, true)
+    }
+  }, [menu, transfer, wireMenu, assetPick, historyOpen, environmentOpen])
+
+  // Focus the first actionable item when a popup opens; arrows then move within
+  // the menu and Escape is handled by the document capture listener above.
+  useEffect(() => {
+    if (menu === undefined && transfer === undefined && wireMenu === undefined && assetPick === undefined && !historyOpen && !environmentOpen) return undefined
+    const frame = scheduleFrame(() => {
+      const first = document.querySelector<HTMLElement>('.dsh-forge-context [role="menuitem"]:not(:disabled), .dsh-forge-transfer button:not(:disabled), .dsh-forge-history-popover [role="menuitem"]:not(:disabled)')
+      first?.focus()
+    })
+    return () => { cancelScheduledFrame(frame) }
+  }, [menu, wireMenu, assetPick, transfer, historyOpen])
+
   // Space is a *held* state, so it lives in a ref the pointer handler can read at
   // pointer-down and in state only for the cursor affordance (§6.3, §6.6).
   const panRef = useRef(false)
@@ -1643,8 +1777,38 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // The third pan entry (§6.6 keeps three): a toolbar toggle for users who would
   // rather not hold a key at all. It is sticky, unlike Space.
   const [handMode, setHandMode] = useState(false)
+  // The dock is a two-state pointer surface: open on enter, close immediately
+  // on leave, and make it non-hit-testable for the whole closing transition.
+  // Otherwise the shrinking geometry stays under the pointer and fires a new
+  // pointerenter, which shows up as an expansion/collapse flicker.
+  const [toolDockOpen, setToolDockOpen] = useState(false)
+  const [toolDockClosing, setToolDockClosing] = useState(false)
+  const toolDockClosingRef = useRef(false)
+  const openToolDock = (): void => {
+    if (toolDockClosingRef.current) return
+    setToolDockOpen(true)
+  }
+  const closeToolDock = (event?: { currentTarget: EventTarget }): void => {
+    if (!toolDockOpen || toolDockClosingRef.current) return
+    const active = typeof document === 'undefined' ? null : document.activeElement
+    if (active !== null && event?.currentTarget instanceof Node && event.currentTarget.contains(active)) return
+    toolDockClosingRef.current = true
+    setToolDockClosing(true)
+    setToolDockOpen(false)
+  }
+  const closeToolDockOnBlur = (event: { currentTarget: HTMLDivElement; relatedTarget: EventTarget | null }): void => {
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+    closeToolDock(event)
+  }
+  const finishToolDockClose = (event: { target: EventTarget; currentTarget: EventTarget; propertyName: string }): void => {
+    if (event.target !== event.currentTarget || event.propertyName !== 'width') return
+    toolDockClosingRef.current = false
+    setToolDockClosing(false)
+  }
+
   // Undo history (§6.5, DD9): in memory, session-scoped, capped by the stack.
   const historyRef = useRef<CommandStack>(new CommandStack())
+  const [historyRevision, setHistoryRevision] = useState(0)
   // U04 step 2: the mounted canvas engine's imperative handle, when the shell
   // supplies one. The toolbar's 适应 / + / − go through it, because React Flow
   // owns the camera and this component's `camera` state is only a mirror of it.
@@ -1704,6 +1868,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const cameraRef = useRef<Camera>(camera)
   cameraRef.current = camera
   const layoutTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const historyTimeline = useMemo(() => historyRef.current.timeline(), [historyRevision, boardId])
 
   /** Read one board off the host and make it the canvas. */
   const openBoard = useCallback(async (id: string | undefined, signal?: AbortSignal) => {
@@ -1726,6 +1891,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       // The undo history is per board (§6.5: "session-scoped" and the stack holds
       // ids this board no longer has once another one is open).
       historyRef.current.clear()
+      setHistoryRevision((value) => value + 1)
+      setHistoryOpen(false)
       nudgeRef.current = undefined
       // No board is a finished read with nothing to restore: the canvas may
       // mount and frame itself.
@@ -1773,6 +1940,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       setSelection(new Set())
       setMenu(undefined)
       historyRef.current.clear()
+      setHistoryRevision((value) => value + 1)
+      setHistoryOpen(false)
       nudgeRef.current = undefined
       setCamera(board.camera ?? { x: -28, y: -28, zoom: 1 })
       // U04 step 4: and the *engine* is told the same thing, once, so it opens
@@ -1798,13 +1967,10 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * because that is the one the user asked for and can act on.
    */
   const loadEnvironment = useCallback(async () => {
-    const result = await postEnvironment('status')
-    if (result.error !== undefined || result.environment === undefined) return
-    setEnvironment(result.environment)
-    setEnvironmentError(undefined)
+    const result = await refreshStudioEnvironment()
     // The status read carries the weight plan; keeping it is what lets the
     // stepper name the missing files and their total size before a download.
-    if (result.weights !== undefined) setWeights(result.weights)
+    if (result?.weights !== undefined) setWeights(result.weights)
   }, [])
 
   /** Load (or reload) the capability snapshot, and the board library with it. */
@@ -1860,37 +2026,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * false would show every control disabled next to a running renderer.
    */
   const runEnvironmentAction = useCallback(async (action: 'start' | 'stop') => {
-    setEnvironmentBusy(action)
-    setEnvironmentError(undefined)
-    setEnvironmentNote(undefined)
-    try {
-      const result = await postEnvironment(action)
-      if (result.environment !== undefined) setEnvironment(result.environment)
-      if (result.error !== undefined) {
-        setEnvironmentError(result.error)
-        return
-      }
-      // Compose the message here, from the action's *own* response: the snapshot
-      // `loadConfig` fetches next describes what is left afterwards, and its
-      // logPath may already be gone. A stop's note explains what it did; a
-      // start's note is the snapshot's.
-      // A *successful* start needs no banner: the status line already turns
-      // green with the endpoint and pid, and the one thing a start note adds is
-      // the log path — which now has its own 看日志 button. A start that did NOT
-      // end ready is the opposite case: its note is the whole answer (port taken,
-      // renderer exited, timed out) and it names the log to read.
-      const env = result.environment
-      const note = result.stopNote !== undefined
-        ? result.stopNote
-        : env !== undefined && env.state !== 'ready' && env.note !== undefined
-          ? (env.logPath !== undefined && !env.note.includes(env.logPath) ? `${env.note} 日志：${env.logPath}` : env.note)
-          : undefined
-      setEnvironmentNote(note)
-      const controller = new AbortController()
-      await loadConfig(controller.signal)
-    } finally {
-      setEnvironmentBusy(undefined)
-    }
+    await runStudioEnvironmentAction(action)
+    const controller = new AbortController()
+    await loadConfig(controller.signal)
   }, [loadConfig])
 
   /**
@@ -1905,7 +2043,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     setWeightBusy(true)
     setWeightsOpen(true)
     setWeightsGoal(confirm)
-    setEnvironmentError(undefined)
+    setEnvironmentClientError(undefined)
     if (confirm) setWeightProgress({})
     try {
       const result = await postEnvironment('download', {
@@ -1918,7 +2056,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         },
       })
       if (result.weights !== undefined) setWeights(result.weights)
-      if (result.error !== undefined) setEnvironmentError(result.error)
+      if (result.error !== undefined) setEnvironmentClientError(result.error)
     } finally {
       setWeightBusy(false)
       setWeightsGoal(false)
@@ -2158,7 +2296,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   useEffect(() => {
     // G28: the asset page and the wire menu's picker are the same list, so both
     // keep it loaded with the same scope and filter — one reader, two surfaces.
-    if (view !== 'assets' && assetPick === undefined) return undefined
+    if (!(view === 'gallery' && assetScope === 'all') && assetPick === undefined) return undefined
     const controller = new AbortController()
     // Typing in the filter should not fire one request per keystroke.
     const timer = setTimeout(() => { void loadAssets(controller.signal) }, 220)
@@ -2495,6 +2633,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         // stored per item, so a node has to carry the identity the host knows.
         id: image.id,
         image,
+        prompt: result.prompt,
         batchId: batch.id,
         x: spot.x,
         y: spot.y,
@@ -2916,6 +3055,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // of its own instead of silently widening the previous one.
     nudgeRef.current = undefined
     historyRef.current.push(command)
+    setHistoryRevision((value) => value + 1)
   }, [])
 
   /** One undoable coordinate change, for a batch of nodes. */
@@ -3008,6 +3148,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     const command = snapshotCommand('nudge', before, after, (positions) => { applyPositions(positions) })
     nudgeRef.current = { at: now, signature, before, after, command }
     historyRef.current.push(command)
+    setHistoryRevision((value) => value + 1)
     applyPositions(after)
     scheduleLayout()
   }, [applyPositions, positionsOf, scheduleLayout, selection])
@@ -3017,12 +3158,22 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // that has just moved into the redo tail.
     nudgeRef.current = undefined
     if (!historyRef.current.undo()) return
+    setHistoryRevision((value) => value + 1)
     scheduleLayout()
   }, [scheduleLayout])
 
   const redoHistory = useCallback(() => {
     nudgeRef.current = undefined
     if (!historyRef.current.redo()) return
+    setHistoryRevision((value) => value + 1)
+    scheduleLayout()
+  }, [scheduleLayout])
+
+  /** Jump directly to one state in the current board's command timeline. */
+  const jumpHistory = useCallback((position: number) => {
+    nudgeRef.current = undefined
+    if (!historyRef.current.jumpTo(position)) return
+    setHistoryRevision((value) => value + 1)
     scheduleLayout()
   }, [scheduleLayout])
 
@@ -3578,7 +3729,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
    * same world centre to both — the engine's viewport via its handle, the DOM
    * fallback via its own camera maths, which is unchanged.
    */
-  const revealNodeId = useCallback((id: string) => {
+  const revealNodeId = useCallback((id: string, options: { readonly duration?: number; readonly zoom?: number } = {}) => {
     const node = nodesRef.current.find((entry) => entry.id === id)
     // The engine is the camera whenever it is mounted; the DOM canvas only when
     // its element exists; otherwise there is nothing to move and the request
@@ -3589,7 +3740,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     const plan = planReveal({
       ...(node === undefined ? {} : { rect: nodeRect(node) }),
       canvas,
-      zoom: cameraRef.current.zoom,
+      zoom: options.zoom ?? cameraRef.current.zoom,
     })
     if (plan.kind === 'pending') {
       pendingRevealRef.current = id
@@ -3597,7 +3748,13 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     }
     pendingRevealRef.current = undefined
     if (plan.kind === 'flow') {
-      flowEngineRef.current?.reveal(plan.center, plan.zoom)
+      const engine = flowEngineRef.current
+      if (engine === undefined) {
+        pendingRevealRef.current = id
+        return
+      }
+      if (options.duration !== undefined && options.duration > 0) engine.reveal(plan.center, plan.zoom, options.duration)
+      else engine.reveal(plan.center, plan.zoom)
       return
     }
     const element = canvasRef.current
@@ -3611,6 +3768,45 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       { width: box.width, height: box.height },
       plan.zoom,
     ))
+  }, [])
+
+  /**
+   * Highlight a freshly created node and move the camera only when it landed
+   * outside the comfortable centre of the visible canvas.
+   */
+  const markCreatedNode = useCallback((id: string) => {
+    setHighlightedNodeId(id)
+    if (highlightTimerRef.current !== undefined) clearTimeout(highlightTimerRef.current)
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightedNodeId(undefined)
+      highlightTimerRef.current = undefined
+    }, 700)
+    scheduleFrame(() => {
+      const node = nodesRef.current.find((entry) => entry.id === id)
+      const element = canvasRef.current
+      if (node === undefined || element === null) return
+      const rect = nodeRect(node)
+      const screen = worldToScreen(cameraRef.current, {
+        x: rect.x + rect.width / 2,
+        y: rect.y + rect.height / 2,
+      })
+      const box = element.getBoundingClientRect()
+      const centered = screen.x > box.width * 0.25
+        && screen.x < box.width * 0.75
+        && screen.y > box.height * 0.25
+        && screen.y < box.height * 0.75
+      if (centered) return
+      const reduced = typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      revealNodeId(id, {
+        duration: reduced ? 0 : 260,
+        zoom: Math.min(1.15, Math.max(0.85, cameraRef.current.zoom)),
+      })
+    })
+  }, [revealNodeId])
+
+  useEffect(() => () => {
+    if (highlightTimerRef.current !== undefined) clearTimeout(highlightTimerRef.current)
   }, [])
 
   useEffect(() => {
@@ -3647,6 +3843,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         mediaType: item.mediaType,
       },
       batchId: item.batchId,
+      ...(item.prompt.length === 0 ? {} : { prompt: item.prompt }),
       x: item.x ?? fallback.x,
       y: item.y ?? fallback.y,
       parents: parents === undefined ? item.parents : [...parents],
@@ -4192,13 +4389,13 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // revert (the draft was never persisted), so it goes on the stack.
     pushCommand(snapshotCommand('add-layout', before, after, (list) => { writeNodes([...list]) }))
     setSelection(new Set([node.id]))
-    revealNodeId(node.id)
-    setNote('已新建布局节点：在里面拖动画框、写 summary.caption，然后点标题栏「生成」。')
+    markCreatedNode(node.id)
+    setNote('已新建布局节点：打开「编辑布局」写整图描述和画框，然后生成。')
     scheduleLayout()
     // A new node is a board entry (§8.1); the debounce coalesces the first
     // burst of drawing into one write.
     scheduleLayoutPersist(node.id)
-  }, [pushCommand, revealNodeId, scheduleLayout, scheduleLayoutPersist, writeNodes])
+  }, [markCreatedNode, pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes])
 
   /**
    * Start dragging a layout node's resize handle (§8.3).
@@ -4322,8 +4519,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // less to revert than a layout node: nothing was ever written.
     pushCommand(snapshotCommand('add-draft', before, after, (list) => { writeNodes([...list]) }))
     setSelection(new Set([node.id]))
+    markCreatedNode(node.id)
     return node
-  }, [pushCommand, writeNodes])
+  }, [markCreatedNode, pushCommand, writeNodes])
 
   /* ------------------------------------------------------------------------ */
   /* U05: the node property drawer                                            */
@@ -4585,7 +4783,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     }
     if (target === 'layout') {
       addLayoutNode({ spot: open.world, parents: [open.sourceId] })
-      setNote('已在这里建布局节点，血缘指向来源节点；在里面拖画框、写 summary.caption 再点「生成」。')
+      setNote('已在这里建布局节点，血缘指向来源节点；在里面拖画框、写整图描述再点「生成」。')
       return
     }
   }, [addDraftNode, addLayoutNode, focusPrompt, referenceOf, wireMenu])
@@ -4670,12 +4868,15 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     ...(typeof config?.defaultSteps !== 'number' ? {} : { defaultSteps: config.defaultSteps }),
     editing: inspectorEditing,
   }
-  /** The drawer, or the line that says how to get one (§U05-4). */
-  const inspectorPane = createElement(
-    'aside',
-    { className: inspectorVisible(selection) && inspectorNode !== undefined ? 'dsh-forge-canvas-side' : 'dsh-forge-canvas-side is-empty' },
-    inspectorVisible(selection) && inspectorNode !== undefined
-      ? createElement(NodeInspector, {
+  /** The selected node's context panel is an in-flow right column. */
+  const inspectorOpen = inspectorVisible(selection) && inspectorNode !== undefined
+  const inspectorPane = inspectorOpen && inspectorNode !== undefined
+    ? createElement('aside', {
+        className: 'dsh-forge-context-panel',
+        'data-context-node': inspectorNode.id,
+        'data-context-kind': inspectorNode.kind,
+        'aria-label': '节点属性',
+      }, createElement(NodeInspector, {
         node: inspectorNode,
         options: inspectorOptions,
         busy,
@@ -4688,9 +4889,125 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
           setSelection(new Set())
           setTaskEditId(undefined)
         },
-      })
-      : createElement('div', { className: 'dsh-forge-inspector is-empty' }, INSPECTOR_EMPTY_HINT),
-  )
+      }))
+    : null
+
+  /** Grouped canvas tools: modes and creation are separate jobs. */
+  const canvasToolDock = createElement('div', {
+    className: ['dsh-forge-canvas-tool-dock', toolDockOpen ? 'is-open' : '', toolDockClosing ? 'is-closing' : ''].filter(Boolean).join(' '),
+    'aria-label': '画布工具',
+    'data-open': toolDockOpen ? 'true' : 'false',
+    'data-closing': toolDockClosing ? 'true' : 'false',
+    onPointerEnter: openToolDock,
+    onPointerLeave: closeToolDock,
+    onFocusCapture: openToolDock,
+    onBlurCapture: closeToolDockOnBlur,
+    onTransitionEnd: finishToolDockClose,
+  }, [
+    createElement('span', { key: 'browse-label', className: 'dsh-forge-canvas-tool-group-label' }, '浏览'),
+    createElement('button', {
+      key: 'select',
+      type: 'button',
+      className: handMode ? 'dsh-forge-canvas-tool' : 'dsh-forge-canvas-tool is-active',
+      'aria-label': '选择与框选',
+      title: '选择与框选',
+      'aria-pressed': !handMode,
+      onClick: () => { setHandMode(false) },
+    }, toolIcon('select'), createElement('span', { className: 'dsh-forge-canvas-tool-label' }, '选择')),
+    createElement('button', {
+      key: 'hand',
+      type: 'button',
+      className: handMode ? 'dsh-forge-canvas-tool is-active' : 'dsh-forge-canvas-tool',
+      'aria-label': '平移画布',
+      title: '平移画布',
+      'aria-pressed': handMode,
+      onClick: () => { setHandMode(true) },
+    }, toolIcon('hand'), createElement('span', { className: 'dsh-forge-canvas-tool-label' }, '平移')),
+    createElement('span', { key: 'create-label', className: 'dsh-forge-canvas-tool-group-label is-create' }, '创建'),
+    createElement('button', {
+      key: 'generate',
+      type: 'button',
+      className: 'dsh-forge-canvas-tool is-create-action',
+      'aria-label': '新建生成节点',
+      title: '新建生成节点',
+      onClick: addDraftNodeAt,
+    }, toolIcon('image'), createElement('span', { className: 'dsh-forge-canvas-tool-label' }, '生成节点')),
+    createElement('button', {
+      key: 'layout',
+      type: 'button',
+      className: 'dsh-forge-canvas-tool is-create-action',
+      'aria-label': '新建 MOSS 布局节点',
+      title: '新建 MOSS 布局节点',
+      onClick: () => { addLayoutNode() },
+    }, toolIcon('layout'), createElement('span', { className: 'dsh-forge-canvas-tool-label' }, '布局节点')),
+  ])
+
+  /** Zoom and the composer are one bottom chrome layer, never separate islands. */
+  const canvasZoomDock = createElement('div', {
+    className: 'dsh-forge-canvas-zoom-dock',
+    'aria-label': '画布缩放',
+  }, [
+    createElement('button', { key: 'out', type: 'button', 'aria-label': '缩小', title: '缩小', onClick: () => { zoomBy(1 / 1.25) } }, '−'),
+    createElement('span', { key: 'label', className: 'dsh-forge-zoom-label' }, zoomLabel(camera.zoom)),
+    createElement('button', { key: 'in', type: 'button', 'aria-label': '放大', title: '放大', onClick: () => { zoomBy(1.25) } }, '+'),
+    createElement('button', { key: 'fit', type: 'button', title: '适应全部节点', onClick: fitView }, '适应'),
+  ])
+  /** Bottom canvas composer: the always-available first sentence of the next run. */
+  const canvasComposer = createElement('div', {
+    className: 'dsh-forge-canvas-composer',
+    'data-canvas-composer': 'true',
+  }, [
+    createElement('textarea', {
+      key: 'prompt',
+      rows: 2,
+      value: prompt,
+      placeholder: references.length > 0 ? '描述你希望这张图怎么改…' : '描述下一张画面…',
+      'aria-label': '画布提示词',
+      onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setPrompt(event.target.value),
+      onKeyDown: (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+          event.preventDefault()
+          void generate()
+        }
+      },
+    }),
+    createElement('div', { key: 'controls', className: 'dsh-forge-canvas-composer-controls' }, [
+      createElement('select', {
+        key: 'ratio',
+        value: ratio,
+        'aria-label': '画幅比例',
+        onChange: (event: ChangeEvent<HTMLSelectElement>) => setRatio(event.target.value),
+      }, ...STUDIO_RATIOS.map((choice) => createElement('option', { key: choice, value: choice }, choice))),
+      createElement('select', {
+        key: 'count',
+        value: String(count),
+        'aria-label': '出图张数',
+        onChange: (event: ChangeEvent<HTMLSelectElement>) => setCount(Number(event.target.value)),
+      }, ...Array.from({ length: STUDIO_MAX_COUNT }, (_unused, index) => createElement('option', { key: String(index + 1), value: String(index + 1) }, `${String(index + 1)} 张`))),
+      createElement('input', {
+        key: 'steps',
+        type: 'number',
+        min: 1,
+        max: 200,
+        placeholder: '步数',
+        'aria-label': '采样步数',
+        value: steps,
+        onChange: (event: ChangeEvent<HTMLInputElement>) => setSteps(event.target.value),
+      }),
+      createElement('button', {
+        key: 'generate',
+        type: 'button',
+        className: 'dsh-forge-canvas-composer-primary',
+        disabled: busy || config?.ready !== true,
+        onClick: () => { void generate() },
+      }, busy ? '生成中…' : references.length > 0 ? '改这张' : '生成'),
+    ]),
+  ])
+
+  const canvasBottomChrome = createElement('div', {
+    className: 'dsh-forge-canvas-bottom-chrome',
+    'data-canvas-bottom-chrome': 'true',
+  }, [canvasZoomDock, canvasComposer])
 
   /** The panel's own last word, kept above the canvas now that the form is gone. */
   const canvasStatus = error === undefined && note === undefined
@@ -4980,7 +5297,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         setPrompt(caption)
         if (plan.ok) setRatio(plan.params.ratio)
         setNote(caption.length === 0
-          ? '这个布局还没有 summary.caption；正文已清空，先写整图描述。'
+          ? '这个布局还没有整图描述；正文已清空，先写整图描述。'
           : '已把布局的整图描述送进提示词框；改完点「生成」即可。')
         focusPrompt()
         break
@@ -5169,51 +5486,271 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // the button says what it is doing. `owned` comes from the host's launch
   // record, never from the panel's optimism: a stop button that would have to
   // guess which process to kill is worse than no button.
-  const environmentOwned = ready && environment?.owned === true
-  const environmentStatusText = ready
-    ? `ComfyUI ${config?.endpoint ?? ''}${environmentOwned && environment?.pid !== undefined ? ` · 本次由插件拉起 · pid ${String(environment.pid)}` : ''}`
-    : 'ComfyUI 未就绪'
+  const resultsViewToggle = createElement(
+    'div',
+    { className: 'dsh-forge-view-toggle', role: 'group', 'aria-label': '工作台模式' },
+    ...([
+      ['canvas', '画布'],
+      ['gallery', '画廊'],
+    ] as const).map(([value, label]) => createElement(
+      'button',
+      {
+        key: value,
+        type: 'button',
+        className: view === value ? 'dsh-forge-view-item is-active' : 'dsh-forge-view-item',
+        'aria-pressed': view === value,
+        onClick: () => {
+          setMenu(undefined)
+          setTransfer(undefined)
+          setWireMenu(undefined)
+          setAssetPick(undefined)
+          setHistoryOpen(false)
+          setEnvironmentOpen(false)
+          setSelection(new Set())
+          setView(value)
+        },
+      },
+      label,
+    )),
+  )
+  const canvasAlignment = selection.size >= 2
+    ? createElement(
+      'div',
+      { className: 'dsh-forge-align', role: 'group', 'aria-label': '对齐与分布' },
+      ...ALIGN_MODES.map((mode) => createElement(
+        'button',
+        {
+          key: mode,
+          type: 'button',
+          className: 'dsh-forge-align-btn',
+          title: ALIGN_LABELS[mode],
+          onClick: () => { alignSelection(mode) },
+        },
+        ALIGN_LABELS[mode],
+      )),
+      ...(selection.size >= 3
+        ? DISTRIBUTE_AXES.map((axis) => createElement(
+          'button',
+          {
+            key: `distribute-${axis}`,
+            type: 'button',
+            className: 'dsh-forge-align-btn is-distribute',
+            title: DISTRIBUTE_LABELS[axis],
+            onClick: () => { distributeSelection(axis) },
+          },
+          DISTRIBUTE_LABELS[axis],
+        ))
+        : []),
+    )
+    : null
+  const environmentOwned = environment?.canStop === true || (environment?.canStop === undefined && environment?.owned === true)
+  const environmentOnline = environment?.state === 'ready'
+  const environmentStateLabel = environmentBusy === 'start'
+    ? '启动中…'
+    : environmentBusy === 'stop'
+      ? '停止中…'
+      : environmentBusy === 'status'
+        ? '检测中…'
+        : environment?.state === 'launch-failed'
+          ? '启动失败'
+          : environment?.state === 'timeout'
+            ? '启动超时'
+            : environment?.state === 'not-installed'
+              ? '未安装'
+              : environmentOnline
+                ? ready ? 'ComfyUI 在线' : '进程在线 · 模型未就绪'
+                : 'ComfyUI 未运行'
+  const environmentStatusText = environmentOnline
+    ? `ComfyUI ${config?.endpoint ?? environment?.endpoint ?? ''}${environmentOwned && environment?.pid !== undefined ? ` · 本次由插件拉起 · pid ${String(environment.pid)}` : ''}`
+    : environmentStateLabel
+  const environmentActionBusy = environmentBusy === 'start' || environmentBusy === 'stop'
   const environmentArgvTitle = environment?.argvPreview === undefined || environment.argvPreview.length === 0
     ? undefined
     : environment.argvPreview.join(' ')
+  const environmentControl = createElement('div', { className: 'dsh-forge-environment-control' }, [
+    createElement('button', {
+      key: 'trigger',
+      type: 'button',
+      className: environmentOnline
+        ? 'dsh-forge-canvas-env-pill is-ready dsh-forge-environment-trigger'
+        : 'dsh-forge-canvas-env-pill is-offline dsh-forge-environment-trigger',
+      'data-env-state': environment?.state ?? 'unknown',
+      'aria-haspopup': 'dialog',
+      'aria-expanded': environmentOpen,
+      title: ready || config?.reason === undefined ? environmentStatusText : environmentStatusText + ' · ' + config.reason,
+      onClick: (event: { stopPropagation(): void }) => {
+        event.stopPropagation()
+        setMenu(undefined)
+        setTransfer(undefined)
+        setWireMenu(undefined)
+        setAssetPick(undefined)
+        setHistoryOpen(false)
+        setEnvironmentOpen((value) => !value)
+      },
+    },
+    createElement('span', { className: environmentOnline ? 'dsh-forge-dot is-ok' : 'dsh-forge-dot is-bad' }),
+    environmentStateLabel),
+    environmentOpen
+      ? createElement('div', { key: 'popover', className: 'dsh-forge-environment-popover', role: 'dialog', 'aria-label': 'ComfyUI 环境控制' }, [
+          createElement('div', { key: 'head', className: 'dsh-forge-environment-head' },
+            createElement('strong', {}, 'ComfyUI 环境'),
+            createElement('span', { className: 'dsh-forge-environment-state' }, environmentStateLabel),
+          ),
+          createElement('dl', { key: 'facts', className: 'dsh-forge-environment-facts' },
+            createElement('dt', {}, '进程'),
+            createElement('dd', {}, environmentOnline ? '已运行' : environmentStateLabel),
+            createElement('dt', {}, '生成能力'),
+            createElement('dd', { title: config?.reason }, ready ? '模型与权重已就绪' : '生成能力未就绪'),
+            createElement('dt', {}, '端点'),
+            createElement('dd', {}, config?.endpoint ?? environment?.endpoint ?? '—'),
+            createElement('dt', {}, '进程归属'),
+            createElement('dd', {}, environmentOwned && environment?.pid !== undefined ? `本插件拉起 · pid ${String(environment.pid)}` : environmentOnline ? '由其他程序启动，插件不提供停止' : '无'),
+          ),
+          environmentError === undefined ? null : createElement('p', { key: 'error', className: 'dsh-forge-environment-error', role: 'alert' }, environmentError),
+          environmentNote === undefined ? null : createElement('p', { key: 'note', className: 'dsh-forge-environment-note' }, environmentNote),
+          environment?.stopBlockedReason === undefined ? null : createElement('p', { key: 'stop-block', className: 'dsh-forge-environment-note' }, environment.stopBlockedReason),
+          environment?.logPath === undefined ? null : createElement('code', { key: 'log', className: 'dsh-forge-environment-log', title: environment.logPath }, environment.logPath),
+          createElement('details', { key: 'details', className: 'dsh-forge-environment-details' },
+            createElement('summary', {}, '诊断详情'),
+            config?.reason === undefined ? null : createElement('p', { key: 'reason', className: 'dsh-forge-environment-note' }, config.reason),
+            environment?.hint === undefined ? null : createElement('p', { key: 'hint', className: 'dsh-forge-environment-note' }, environment.hint),
+            environmentArgvTitle === undefined ? null : createElement('p', { key: 'argv', className: 'dsh-forge-environment-argv', title: environmentArgvTitle }, environmentArgvTitle),
+          ),
+          createElement('div', { key: 'actions', className: 'dsh-forge-environment-actions' },
+            environmentOwned
+              ? createElement('button', {
+                  key: 'stop', type: 'button', className: 'dsh-forge-btn is-danger', disabled: environmentActionBusy,
+                  onClick: () => {
+                    if (!window.confirm('停止本次由插件拉起的 ComfyUI？正在跑的任务会中断。')) return
+                    void runEnvironmentAction('stop')
+                  },
+                }, environmentBusy === 'stop' ? '停止中…' : '停止')
+              : environmentOnline
+                ? null
+                : createElement('button', {
+                    key: 'start', type: 'button', className: 'dsh-forge-btn is-primary', disabled: environmentActionBusy,
+                    onClick: () => { void runEnvironmentAction('start') },
+                  }, environmentBusy === 'start' ? '启动中…' : '启动'),
+            createElement('button', {
+              key: 'recheck', type: 'button', className: 'dsh-forge-btn is-ghost', disabled: environmentBusy !== undefined,
+              onClick: () => { void loadConfig() },
+            }, environmentBusy === 'status' ? '检测中…' : '重新检测'),
+          ),
+        ])
+      : null,
+  ])
+  const historyRows = [...historyTimeline.entries].reverse()
+  const historyPopover = historyOpen
+    ? createElement('div', {
+      className: 'dsh-forge-history-popover',
+      role: 'menu',
+      'aria-label': '当前画板操作历史',
+      onKeyDown: canvasMenuKeyDown,
+    }, [
+      createElement('div', { key: 'head', className: 'dsh-forge-history-head' },
+        createElement('strong', {}, '操作历史'),
+        createElement('span', {}, '当前画板 · 本次会话'),
+      ),
+      historyRows.length === 0
+        ? createElement('div', { key: 'empty', className: 'dsh-forge-history-empty' }, '还没有可撤销的画布操作。')
+        : createElement('div', { key: 'list', className: 'dsh-forge-history-list' },
+            ...historyRows.map((entry) => createElement('button', {
+              key: `${String(entry.index)}:${entry.label}`,
+              type: 'button',
+              role: 'menuitem',
+              className: entry.index === historyTimeline.position
+                ? 'dsh-forge-history-item is-current'
+                : entry.applied ? 'dsh-forge-history-item is-applied' : 'dsh-forge-history-item is-future',
+              disabled: entry.index === historyTimeline.position,
+              onClick: () => { jumpHistory(entry.index) },
+            },
+            createElement('span', { className: 'dsh-forge-history-marker', 'aria-hidden': 'true' }, entry.index === historyTimeline.position ? '●' : String(entry.index)),
+            createElement('span', { className: 'dsh-forge-history-label' }, historyCommandLabel(entry.label)),
+            createElement('span', { className: 'dsh-forge-history-state' }, entry.index === historyTimeline.position ? '当前' : entry.applied ? '可撤销' : '可重做'),
+            )),
+          ),
+      historyTimeline.position < historyTimeline.entries.length
+        ? createElement('button', {
+            key: 'latest',
+            type: 'button',
+            role: 'menuitem',
+            className: 'dsh-forge-history-latest',
+            onClick: () => { jumpHistory(historyTimeline.entries.length) },
+          }, '回到最新状态')
+        : null,
+    ])
+    : null
 
-  /**
-   * The asset page: one grid over every image the plugin has recorded, with the
-   * three actions that matter after the fact — reuse it as a reference, jump to
-   * it on its canvas, or take it out of the library.
-   */
-  const assetsPanel = createElement(
+  const canvasResultsHead = createElement(
     'div',
-    { className: 'dsh-forge-assets' },
+    { className: 'dsh-forge-results-head is-canvas' },
+    canvasAlignment,
     createElement(
       'div',
-      { className: 'dsh-forge-assets-bar' },
-      createElement(
-        'div',
-        { className: 'dsh-forge-view-toggle', role: 'group', 'aria-label': '素材范围' },
-        ...([
-          ['board', '本画板'],
-          ['all', '全部画板'],
-        ] as const).map(([value, label]) => createElement(
-          'button',
-          {
-            key: value,
-            type: 'button',
-            className: assetScope === value ? 'dsh-forge-view-item is-active' : 'dsh-forge-view-item',
-            'aria-pressed': assetScope === value,
-            onClick: () => { setAssetScope(value) },
-          },
-          label,
-        )),
-      ),
-      createElement('input', {
-        className: 'dsh-forge-assets-search',
-        value: assetQuery,
-        placeholder: '搜提示词、文件名或画板名',
-        onChange: (event: ChangeEvent<HTMLInputElement>) => { setAssetQuery(event.target.value) },
-      }),
-      createElement('span', { className: 'dsh-forge-batch-meta' }, `${String(assetsTotal)} 张`),
-      createElement(
+      { className: 'dsh-forge-canvas-top-actions' },
+      createElement('button', { key: 'undo', type: 'button', className: 'dsh-forge-canvas-top-btn', 'aria-label': '撤销', title: '撤销（Ctrl/⌘+Z）', onClick: undoHistory }, '↶'),
+      createElement('button', { key: 'redo', type: 'button', className: 'dsh-forge-canvas-top-btn', 'aria-label': '重做', title: '重做（Ctrl/⌘+Shift+Z）', onClick: redoHistory }, '↷'),
+      createElement('button', {
+        key: 'history',
+        type: 'button',
+        className: 'dsh-forge-canvas-top-btn is-label dsh-forge-history-trigger',
+        'aria-label': '操作历史',
+        'aria-haspopup': 'menu',
+        'aria-expanded': historyOpen,
+        title: '查看并跳转到当前画板的操作历史',
+        onClick: (event: { stopPropagation(): void }) => {
+          event.stopPropagation()
+          setMenu(undefined)
+          setTransfer(undefined)
+          setWireMenu(undefined)
+          setAssetPick(undefined)
+          setHistoryOpen((value) => !value)
+        },
+      }, '历史', createElement('span', { className: 'dsh-forge-history-count' }, String(historyTimeline.entries.length))),
+      createElement('button', { key: 'export', type: 'button', className: 'dsh-forge-canvas-top-btn is-label', title: '导出当前画板 JSON（v2，含布局草稿与失败任务）', onClick: () => { exportBoardJson() } }, '导出'),
+    ),
+    historyPopover,
+  )
+  const visibleBatches = useMemo(() => {
+    const query = assetQuery.trim().toLocaleLowerCase()
+    if (query.length === 0) return batches
+    return batches.filter((batch) => batch.response.prompt.toLocaleLowerCase().includes(query))
+  }, [assetQuery, batches])
+  const galleryResultsHead = createElement(
+    'div',
+    { className: 'dsh-forge-results-head is-gallery' },
+    createElement(
+      'div',
+      { className: 'dsh-forge-gallery-scope', role: 'group', 'aria-label': '画廊范围' },
+      ...([
+        ['board', '当前画板'],
+        ['all', '全部素材'],
+      ] as const).map(([value, label]) => createElement(
+        'button',
+        {
+          key: value,
+          type: 'button',
+          className: assetScope === value ? 'dsh-forge-gallery-scope-item is-active' : 'dsh-forge-gallery-scope-item',
+          'aria-pressed': assetScope === value,
+          onClick: () => { setAssetScope(value) },
+        },
+        label,
+      )),
+    ),
+    createElement('input', {
+      className: 'dsh-forge-gallery-search',
+      value: assetQuery,
+      placeholder: assetScope === 'all' ? '搜提示词、文件名或画板名' : '搜本画板的提示词',
+      'aria-label': '搜索画廊',
+      onChange: (event: ChangeEvent<HTMLInputElement>) => { setAssetQuery(event.target.value) },
+    }),
+    createElement(
+      'span',
+      { className: 'dsh-forge-batch-meta' },
+      assetScope === 'all' ? `${String(assetsTotal)} 张素材` : `${String(visibleBatches.length)} 批`,
+    ),
+    assetScope === 'all'
+      ? createElement(
         'button',
         {
           type: 'button',
@@ -5224,118 +5761,16 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
           },
         },
         '刷新',
-      ),
-    ),
-    assets.length === 0
-      ? createElement(
-        'div',
-        { className: 'dsh-forge-studio-empty' },
-        assetsBusy
-          ? '读取中…'
-          : assetQuery.trim().length > 0
-            ? '没有匹配的素材'
-            : assetScope === 'board'
-              ? '这个画板还没有素材。生成后会按画板自动记录。'
-              : '还没有素材。对话或工作台出的图都会记进画板。',
       )
-      : createElement(
-        'div',
-        { className: 'dsh-forge-assets-grid' },
-        ...assets.map((asset) => createElement(
-          'div',
-          {
-            key: `${asset.boardId}:${asset.id}`,
-            className: 'dsh-forge-asset',
-            // §7.1: the card itself is the drag handle; the thumbnail is a link,
-            // so it must not steal the drag with its own default behaviour.
-            draggable: true,
-            'data-asset-board': asset.boardId,
-            'data-asset-id': asset.id,
-            onDragStart: (event: ReactDragEvent<HTMLDivElement>) => { startAssetDrag(event, asset) },
-          },
-          createElement(
-            'a',
-            {
-              className: 'dsh-forge-asset-thumb',
-              href: studioFileUrl(asset.markdownPath),
-              target: '_blank',
-              rel: 'noreferrer',
-              title: asset.path,
-              draggable: false,
-            },
-            // G20: the asset grid is the densest image surface in the panel, so
-            // it asks for the smallest thumbnail the route caches.
-            createElement('img', {
-              src: studioFileUrl(asset.markdownPath, 256),
-              alt: '素材',
-              loading: 'lazy',
-              decoding: 'async',
-            }),
-          ),
-          createElement(
-            'div',
-            { className: 'dsh-forge-asset-meta' },
-            `${String(asset.width)}×${String(asset.height)} · ${String(Math.round(asset.bytes / 1024))} KB · ${asset.mode === 'edit' ? '改图' : '文生图'}`,
-          ),
-          createElement(
-            'div',
-            { className: 'dsh-forge-asset-meta', title: `${asset.boardName} · ${asset.createdAt}` },
-            `${asset.boardName} · ${asset.createdAt.slice(0, 16).replace('T', ' ')}`,
-          ),
-          asset.prompt.length === 0
-            ? null
-            : createElement('div', { className: 'dsh-forge-asset-prompt', title: asset.prompt }, asset.prompt),
-          createElement(
-            'div',
-            { className: 'dsh-forge-asset-actions' },
-            createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-forge-asset-btn',
-                title: '放进参考图，下一轮按它改',
-                onClick: () => { referenceAsset(asset) },
-              },
-              '用作参考',
-            ),
-            createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-forge-asset-btn',
-                title: '切到它所在的画板并选中',
-                onClick: () => { void showOnCanvas(asset) },
-              },
-              '定位',
-            ),
-            createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-forge-asset-btn',
-                title: '只从画板移除，文件留在磁盘',
-                onClick: () => { void removeAsset(asset, false) },
-              },
-              '移除',
-            ),
-            createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-forge-asset-btn is-danger',
-                title: '从画板移除并删除 PNG 文件',
-                onClick: () => {
-                  if (!window.confirm('同时删除磁盘上的这个 PNG？此操作不可撤销。')) return
-                  void removeAsset(asset, true)
-                },
-              },
-              '删文件',
-            ),
-          ),
-        )),
-      ),
+      : null,
   )
-
+  const resultsHead = view === 'canvas' ? canvasResultsHead : galleryResultsHead
+  const workspaceModeBar = createElement(
+    'div',
+    { className: 'dsh-forge-workspace-mode-bar' },
+    resultsViewToggle,
+    createElement('div', { className: 'dsh-forge-workspace-mode-env' }, environmentControl),
+  )
   // G26: the wire's `<path d>`, computed once per frame instead of twice. It is
   // `undefined` while the gesture is armed — a click on a handle must not paint a
   // zero-length path, which is what an empty `d` attribute would be.
@@ -5343,15 +5778,17 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
 
   return createElement(
     'div',
-    { className: props?.workspaceMode === true ? 'dsh-image-forge-studio is-workbench' : 'dsh-image-forge-studio' },
-    createElement(
-      'div',
-      { className: 'dsh-forge-studio-head' },
+    { className: [props?.workspaceMode === true ? 'dsh-image-forge-studio is-workbench' : 'dsh-image-forge-studio', view === 'canvas' ? 'is-canvas-view' : ''].filter((part) => part.length > 0).join(' ') },
+    props?.workspaceMode === true
+      ? null
+      : createElement(
+        'div',
+        { className: 'dsh-forge-studio-head' },
       createElement('h2', { className: 'dsh-forge-studio-title' }, '图像工作台'),
       createElement(
         'div',
         { className: 'dsh-forge-studio-status', 'data-env-state': environment?.state ?? 'unknown', 'data-env-owned': environmentOwned ? 'yes' : 'no' },
-        createElement('span', { className: ready ? 'dsh-forge-dot is-ok' : 'dsh-forge-dot is-bad' }),
+        createElement('span', { className: environmentOnline ? 'dsh-forge-dot is-ok' : 'dsh-forge-dot is-bad' }),
         createElement(
           'span',
           { className: 'dsh-forge-studio-endpoint' },
@@ -5369,7 +5806,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               disabled: true,
               'data-env-action': environmentBusy,
             },
-            environmentBusy === 'start' ? '启动中…' : '停止中…',
+            environmentBusy === 'start' ? '启动中…' : environmentBusy === 'stop' ? '停止中…' : '检测中…',
           )
           : ready
             ? createElement(
@@ -5403,7 +5840,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               },
               '启动',
             ),
-        ready && !environmentOwned && environment?.ownershipNote === undefined
+        environmentOnline && !environmentOwned && environment?.ownershipNote === undefined
           ? createElement('span', { className: 'dsh-forge-studio-hint' }, '由你自己启动的实例，插件不提供停止')
           : null,
         createElement(
@@ -5417,6 +5854,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         ),
       ),
     ),
+
+    workspaceModeBar,
 
     // A start/stop failure is the one environment message worth a banner: it is
     // what the user just asked for, and its `note` names the log to read.
@@ -5496,7 +5935,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // is already the status line above (ComfyUI running · three weights · the
     // canvas full of pictures). A permanently-green checklist is 100 px of a
     // workbench whose whole point is the canvas — the user's own note.
-    stepperVisible
+    stepperVisible && props?.workspaceMode !== true
       ? createElement(
       'section',
       { className: 'dsh-forge-stepper', role: 'list', 'aria-label': '从安装到出图' },
@@ -5676,7 +6115,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       // U05: on the canvas the body is one column — the canvas plus its drawer.
       // The left form lives only with the list and asset views now, so a
       // two-column grid there would leave half the body empty.
-      { className: view === 'canvas' ? 'dsh-forge-studio-body is-canvas' : 'dsh-forge-studio-body' },
+      { className: view === 'canvas' ? 'dsh-forge-studio-body is-canvas' : 'dsh-forge-studio-body is-gallery' },
 
       // ---- form (list and asset views only; U05 moved the canvas tab's ----)
       // ---- editor into the node drawer ------------------------------------
@@ -5873,151 +6312,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       createElement(
         'div',
         { className: 'dsh-forge-studio-results' },
-        createElement(
-          'div',
-          { className: 'dsh-forge-results-head' },
-          createElement(
-            'div',
-            { className: 'dsh-forge-view-toggle', role: 'group', 'aria-label': '结果视图' },
-            ...([
-              ['canvas', '画布'],
-              ['list', '列表'],
-              ['assets', '素材'],
-            ] as const).map(([value, label]) => createElement(
-              'button',
-              {
-                key: value,
-                type: 'button',
-                className: view === value ? 'dsh-forge-view-item is-active' : 'dsh-forge-view-item',
-                'aria-pressed': view === value,
-                onClick: () => { setView(value) },
-              },
-              label,
-            )),
-          ),
-          view === 'canvas' && selection.size >= 2
-            ? createElement(
-              'div',
-              { className: 'dsh-forge-align', role: 'group', 'aria-label': '对齐与分布' },
-              ...ALIGN_MODES.map((mode) => createElement(
-                'button',
-                {
-                  key: mode,
-                  type: 'button',
-                  className: 'dsh-forge-align-btn',
-                  title: ALIGN_LABELS[mode],
-                  onClick: () => { alignSelection(mode) },
-                },
-                ALIGN_LABELS[mode],
-              )),
-              // §6.2: distribution needs a middle node to space out.
-              ...(selection.size >= 3
-                ? DISTRIBUTE_AXES.map((axis) => createElement(
-                  'button',
-                  {
-                    key: `distribute-${axis}`,
-                    type: 'button',
-                    className: 'dsh-forge-align-btn is-distribute',
-                    title: DISTRIBUTE_LABELS[axis],
-                    onClick: () => { distributeSelection(axis) },
-                  },
-                  DISTRIBUTE_LABELS[axis],
-                ))
-                : []),
-            )
-            : null,
-          view === 'canvas'
-            ? createElement(
-              'div',
-              { className: 'dsh-forge-zoom' },
-              createElement(
-                'button',
-                { type: 'button', className: 'dsh-forge-btn is-ghost', 'aria-label': '缩小', onClick: () => { zoomBy(1 / 1.25) } },
-                '−',
-              ),
-              createElement('span', { className: 'dsh-forge-zoom-label' }, zoomLabel(camera.zoom)),
-              createElement(
-                'button',
-                { type: 'button', className: 'dsh-forge-btn is-ghost', 'aria-label': '放大', onClick: () => { zoomBy(1.25) } },
-                '+',
-              ),
-              createElement(
-                'button',
-                { type: 'button', className: 'dsh-forge-btn is-ghost', onClick: fitView },
-                '适应',
-              ),
-              // §6.6 keeps three pan entries; this is the one that needs no key
-              // held and no extra mouse button (Space+drag and middle-drag are
-              // the other two). Sticky, unlike Space.
-              createElement(
-                'button',
-                {
-                  type: 'button',
-                  className: handMode ? 'dsh-forge-btn is-ghost is-active' : 'dsh-forge-btn is-ghost',
-                  title: handMode
-                    ? '平移模式：拖空白处移动相机（点击回到框选）'
-                    : '切到平移模式：拖空白处移动相机',
-                  'aria-pressed': handMode,
-                  onClick: () => { setHandMode((current) => !current) },
-                },
-                '平移',
-              ),
-              // U05: the canvas tab's own creation entry. The list/asset form was
-              // the only way to start a generation before; on the canvas the
-              // equivalent is a draft node whose parameters the drawer edits.
-              createElement(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-forge-btn is-ghost',
-                  title: '新建一个待生成节点，在右侧抽屉里写参数',
-                  onClick: () => { addDraftNodeAt() },
-                },
-                '新建生成',
-              ),
-              // §8.1's creation entry. The blank right-click menu item that
-              // §13 C13 step 5 names lives in the frozen C09 menu table
-              // (canvas-interactions.ts, outside C13's write scope), so the
-              // toolbar is the shipped entry; reported to the lead.
-              createElement(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-forge-btn is-ghost',
-                  title: '新建 MOSS 布局节点（1536×1024 默认 draft）',
-                  onClick: () => { addLayoutNode() },
-                },
-                '新建布局',
-              ),
-              // C15/DD14: the two export entries live here as well as in the
-              // blank right-click menu (§9.6 asks for both entry points).
-              createElement(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-forge-btn is-ghost',
-                  title: '导出当前画板 JSON（v2，含布局草稿与失败任务）',
-                  onClick: () => { exportBoardJson() },
-                },
-                '导出',
-              ),
-              createElement(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-forge-btn is-ghost',
-                  title: '把画板里的图片拼成一张 PNG（≤200 张，256px 缩略图）',
-                  onClick: () => { void exportContactSheet() },
-                },
-                '拼版',
-              ),
-            )
-            : createElement(
-              'span',
-              { className: 'dsh-forge-batch-meta' },
-              view === 'assets' ? `${String(assetsTotal)} 张素材` : `${String(batches.length)} 批`,
-            ),
-        ),
+        resultsHead,
         // U05: the panel's own note/error, above the canvas. It used to live in
         // the left form; with the form gone from this view it is the canvas's
         // own line, so it is visible whatever is selected (or nothing is).
@@ -6044,7 +6339,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
             // node the user is trying to click; the narrow-panel media query in
             // `client-styles.ts` turns the drawer into an overlay only when there
             // is no room for both.
-            { className: 'dsh-forge-canvas-shell' },
+            { className: inspectorOpen ? 'dsh-forge-canvas-shell has-context-panel' : 'dsh-forge-canvas-shell' },
             createElement(
             'div',
             canvasSlot === undefined
@@ -6074,6 +6369,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               }
               : {
                 className: panHeld || handMode ? 'dsh-forge-canvas is-flow is-pan' : 'dsh-forge-canvas is-flow',
+                ref: canvasRef,
               },
             canvasSlot === undefined
               ? (nodes.length === 0 && view === 'canvas'
@@ -6089,6 +6385,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 boardId,
                 nodes,
                 selection,
+                ...(highlightedNodeId === undefined ? {} : { highlightedNodeId }),
                 onSelect: (ids: readonly string[]) => { setSelection(new Set(ids)) },
                 onDraft: updateLayoutDraft,
                 onRetry: retryTask,
@@ -6237,8 +6534,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                     }),
                     createElement(
                       'div',
-                      { className: 'dsh-forge-node-meta' },
-                      `${String(node.image.width)}×${String(node.image.height)} · ${String(Math.round(node.image.bytes / 1024))} KB`,
+                      {
+                        className: 'dsh-forge-node-meta dsh-forge-node-caption',
+                        title: node.image.prompt.length > 0 ? node.image.prompt : '这张图没有记录提示词',
+                      },
+                      firstLine(node.image.prompt, '未记录提示词'),
                     ),
                     sole
                       ? createElement(
@@ -6451,6 +6751,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                   className: 'dsh-forge-context',
                   role: 'menu',
                   style: { left: `${String(menu.x)}px`, top: `${String(menu.y)}px` },
+                  onKeyDown: canvasMenuKeyDown,
                   // The menu is part of the canvas element, so its own clicks must
                   // not be mistaken for a blank-canvas click that dismisses it.
                   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { event.stopPropagation() },
@@ -6485,6 +6786,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                   className: 'dsh-forge-context',
                   role: 'menu',
                   'data-connect-menu': 'open',
+                  onKeyDown: canvasMenuKeyDown,
                   'aria-label': '在这里新建',
                   style: { left: `${String(wireMenu.x)}px`, top: `${String(wireMenu.y)}px` },
                   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { event.stopPropagation() },
@@ -6597,6 +6899,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                   className: 'dsh-forge-transfer',
                   role: 'dialog',
                   'aria-label': transfer.mode === 'copy' ? '复制到画板' : '移动到画板',
+                  onKeyDown: canvasMenuKeyDown,
                   style: { left: `${String(transfer.x)}px`, top: `${String(transfer.y)}px` },
                   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => { event.stopPropagation() },
                   onContextMenu: (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -6748,26 +7051,25 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
               'div',
               { className: 'dsh-forge-canvas-foot' },
               references.length === 0
-                ? '点一个节点，右侧抽屉就是它的属性；选中图片后按「按这张继续」会从它拉一条线出来。'
+                ? '点一个节点，编辑层会贴着它展开；点空白或按 Esc 收起。选中图片后按「按这张继续」会从它拉一条线出来。'
                 : `已选 ${String(references.length)} 张参考图，下一轮将是改图。`,
               // G01: the one-line hint the new wheel split needs. Not a toast and
               // not a modal — the corner of the canvas is where the gesture is.
               createElement('span', { className: 'dsh-forge-canvas-foot-hint' }, '滚轮平移 · Ctrl/⌘+滚轮缩放'),
             ),
             ),
-            // U05: the drawer sits beside the canvas, and is the whole editor of
-            // the canvas tab now (a draft node's parameters, a task's retry/edit,
-            // a picture's history). With nothing selected it is the hint line.
+            canvasToolDock,
+            canvasBottomChrome,
             inspectorPane,
           )
-          : view === 'assets'
+          : assetScope === 'all'
             ? assetsPanel
-            : batches.length === 0
-              ? createElement('div', { className: 'dsh-forge-studio-empty' }, busy ? '正在生成…' : '还没有结果')
+            : visibleBatches.length === 0
+              ? createElement('div', { className: 'dsh-forge-studio-empty' }, busy ? '正在生成…' : assetQuery.trim().length > 0 ? '没有匹配的生成批次' : '还没有结果')
               : createElement(
               'div',
               { className: 'dsh-forge-list' },
-              ...batches.map((batch) => createElement(
+              ...visibleBatches.map((batch) => createElement(
                 'div',
                 {
                   key: batch.id,

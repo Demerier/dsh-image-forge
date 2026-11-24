@@ -1865,6 +1865,17 @@ function keyEvent(key, modifiers = {}, targetFlags = {}) {
   return event
 }
 
+/** Open the shared ComfyUI environment popover in a mounted panel. */
+async function openEnvironmentPopover(panel) {
+  const trigger = findAll(panel.tree, (entry) => (
+    typeof entry.props.className === 'string'
+    && entry.props.className.includes('dsh-forge-environment-trigger')
+  ))[0]
+  assert.ok(trigger !== undefined, 'the environment trigger must render')
+  trigger.props.onClick({ stopPropagation() {} })
+  await settle(panel)
+}
+
 /** The first button whose text is exactly `text`. */
 function buttonWithText(panel, text) {
   let found
@@ -1891,6 +1902,15 @@ function weightRowLabels(panel) {
 }
 
 /** Find a button whose label *starts with* `prefix` (labels that carry a size). */
+/** The first button whose accessible label matches exactly. */
+function buttonByLabel(panel, label) {
+  let found
+  fakeVisit(panel.tree, (entry) => {
+    if (found !== undefined || entry.type !== 'button') return
+    if (entry.props['aria-label'] === label) found = entry
+  })
+  return found
+}
 function buttonStartingWith(panel, prefix) {
   let found
   fakeVisit(panel.tree, (entry) => {
@@ -2416,56 +2436,20 @@ test('T22: the stepper maps snapshot + live phase onto four steps', () => {
   assert.equal(stepperStepsOf({ ready: true, models, itemCount: 2 }).at(-1).state, 'done', 'an existing picture finishes the ladder')
 })
 
-test('T22: the panel renders the stepper, and 重新检测 re-reads the snapshot', async () => {
-  // The ladder is a *not-ready* explanation now, so this case mounts a workbench
-  // whose weights are missing: that is a step the user has to act on.
-  const { network, panel } = await mountWorkbench({ configOverrides: { models: undefined } })
+test('T22: a not-ready snapshot puts its reason on the compact status', async () => {
+  const { network, panel } = await mountWorkbench({
+    configOverrides: { ready: false, reason: 'ComfyUI 未连接：探了 8188 等端口', models: undefined },
+  })
   try {
     const steps = []
     fakeVisit(panel.tree, (entry) => {
       if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps.push(entry)
     })
-    assert.deepEqual(steps.map((step) => step.props['data-step']), ['runtime', 'install', 'weights', 'first-run'])
-    assert.deepEqual(steps.map((step) => step.props['data-step-state']), ['done', 'done', 'failed', 'pending'])
-
-    const configCalls = () => network.calls.filter((call) => call.url.indexOf(STUDIO_CONFIG_ROUTE) === 0).length
-    const before = configCalls()
-    const retry = buttonWithText(panel, '重新检测')
-    assert.ok(retry !== undefined, 'the stepper must offer a recheck entry')
-    retry.props.onClick()
-    await settle(panel)
-    assert.ok(configCalls() > before, '重新检测 re-reads the capability snapshot')
-
-    // The live stream advances the last step to active with its percent.
-    const source = network.open()
-    source.emit('message', { type: 'start', promptId: 'p-stepper' })
-    source.emit('message', { type: 'progress', promptId: 'p-stepper', value: 17, max: 50, percent: 34, label: '17/50' })
-    await settle(panel)
-    let firstRun
-    fakeVisit(panel.tree, (entry) => {
-      if (entry.props['data-step'] === 'first-run') firstRun = entry
-    })
-    assert.equal(firstRun.props['data-step-state'], 'active')
-    assert.ok(fakeText(firstRun).includes('34%'))
-  } finally {
-    network.restore()
-  }
-})
-
-test('T22: a not-ready snapshot puts its reason on the failed step', async () => {
-  const { network, panel } = await mountWorkbench({
-    configOverrides: { ready: false, reason: 'ComfyUI 未连接：探了 8188 等端口', models: undefined },
-  })
-  try {
-    let runtime
-    let weights
-    fakeVisit(panel.tree, (entry) => {
-      if (entry.props['data-step'] === 'runtime') runtime = entry
-      if (entry.props['data-step'] === 'weights') weights = entry
-    })
-    assert.equal(runtime.props['data-step-state'], 'failed')
-    assert.ok(fakeText(runtime).includes('ComfyUI 未连接'))
-    assert.equal(weights.props['data-step-state'], 'pending', 'weights cannot be checked before the runtime is up')
+    assert.equal(steps.length, 0, 'a broken runtime is explained by the pill and the log page, not a canvas checklist')
+    const pill = findAll(panel.tree, (entry) => typeof entry.props.className === 'string' && entry.props.className.includes('dsh-forge-environment-trigger'))[0]
+    assert.ok(pill !== undefined, 'the compact status remains the one always-visible connectivity cue')
+    assert.match(fakeText(pill), /未运行|未就绪/)
+    assert.match(pill.props.title, /ComfyUI 未连接/)
   } finally {
     network.restore()
   }
@@ -3358,23 +3342,22 @@ test('P2: a not-ready panel offers one background start, and clicking it posts t
   const { network, panel } = await mountWorkbench({
     configOverrides: { ready: false, reason: 'ComfyUI 没在跑（connect ECONNREFUSED）' },
     environment: (body) => (body.action === 'start'
-      ? { environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: '已后台拉起 ComfyUI' } }
-      : { environment: { state: 'not-running', owned: false, note: '找到安装，可以启动' } }),
+      ? { environment: { state: 'ready', owned: true, canStop: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: '已后台拉起 ComfyUI' } }
+      : { environment: { state: 'not-running', owned: false, canStop: false, note: '找到安装，可以启动' } }),
   })
   try {
+    await openEnvironmentPopover(panel)
     const start = buttonWithText(panel, '启动')
-    assert.ok(start !== undefined, 'a not-ready status line must offer 启动')
+    assert.ok(start !== undefined, 'a not-ready popover must offer 启动')
     assert.equal(buttonWithText(panel, '启动并看日志'), undefined, 'no external-window log mode')
-    assert.equal(start.props.disabled, undefined, 'the start button is enabled')
+    assert.notEqual(start.props.disabled, true, 'the start button is enabled')
 
     start.props.onClick()
     await settle(panel)
 
     const posts = network.calls.filter((call) => call.url.indexOf(STUDIO_ENVIRONMENT_ROUTE) === 0 && call.method === 'POST')
-    // The mount already posted one `status`; the click must add a `start`.
     const starts = posts.filter((call) => call.body === JSON.stringify({ action: 'start' }))
     assert.equal(starts.length, 1, 'the click must post exactly one start')
-    // `loadConfig` re-reads the snapshot afterwards, so the line follows the host.
     assert.ok(
       posts.slice(posts.indexOf(starts[0]) + 1).some((call) => String(call.body).includes('"status"')),
       'a start is followed by a status re-read',
@@ -3388,16 +3371,18 @@ test('P2: a failed start prints the host note and the log path verbatim', async 
   const { network, panel } = await mountWorkbench({
     configOverrides: { ready: false, reason: '未就绪' },
     environment: (body) => (body.action === 'start'
-      ? { environment: { state: 'launch-failed', owned: false, note: '端口被占：18188 上已有进程在监听', logPath: 'C:/logs/launch-x.log' } }
-      : { environment: { state: 'not-running', owned: false } }),
+      ? { environment: { state: 'launch-failed', owned: false, canStop: false, note: '端口被占：18188 上已有进程在监听', logPath: 'C:/logs/launch-x.log' } }
+      : { environment: { state: 'not-running', owned: false, canStop: false } }),
   })
   try {
+    await openEnvironmentPopover(panel)
     const start = buttonWithText(panel, '启动')
     assert.ok(start !== undefined)
     start.props.onClick()
     await settle(panel)
 
-    const hints = noteText(panel)
+    const popover = findAll(panel.tree, (entry) => typeof entry.props.className === 'string' && entry.props.className.includes('dsh-forge-environment-popover'))[0]
+    const hints = fakeText(popover)
     assert.ok(hints.includes('端口被占'), 'the host note must be shown: ' + hints)
     assert.ok(hints.includes('C:/logs/launch-x.log'), 'the log path is what makes a failure actionable')
   } finally {
@@ -3413,16 +3398,20 @@ test('P2: a running instance the plugin started offers 停止, and confirm gates
     environment: (body) => {
       answers.push(body.action)
       return body.action === 'stop'
-        ? { environment: { state: 'not-running', owned: false }, stop: { stopped: true, pid: 4242, exitCode: 0, note: '已停止本插件拉起的 pid 4242' } }
-        : { environment: { state: 'ready', owned: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: 'ComfyUI 在跑' } }
+        ? { environment: { state: 'not-running', owned: false, canStop: false }, stop: { stopped: true, pid: 4242, exitCode: 0, note: '已停止本插件拉起的 pid 4242' } }
+        : { environment: { state: 'ready', owned: true, canStop: true, pid: 4242, endpoint: 'http://127.0.0.1:8188', note: 'ComfyUI 在跑' } }
     },
   })
   try {
-    const endpointLine = fakeElementWithClass(panel.tree, 'dsh-forge-studio-endpoint')
-    assert.ok(endpointLine !== undefined)
-    assert.ok(fakeText(endpointLine).includes('本次由插件拉起'), 'the panel must say the process outlives it')
-    assert.ok(fakeText(endpointLine).includes('pid 4242'))
+    const trigger = findAll(panel.tree, (entry) => (
+      typeof entry.props.className === 'string'
+      && entry.props.className.includes('dsh-forge-environment-trigger')
+    ))[0]
+    assert.ok(trigger !== undefined)
+    assert.ok(String(trigger.props.title).includes('本次由插件拉起'), 'the trigger must say the process outlives it')
+    assert.ok(String(trigger.props.title).includes('pid 4242'))
 
+    await openEnvironmentPopover(panel)
     const stop = buttonWithText(panel, '停止')
     assert.ok(stop !== undefined, 'an owned instance offers 停止')
     assert.notEqual(stop.props.disabled, true)
@@ -3444,15 +3433,15 @@ test('P2: a running instance the plugin started offers 停止, and confirm gates
   }
 })
 
-test('P2: an instance the user started is not offered a stop button', async () => {
+test('P2: an instance the user started never offers stop and explains why', async () => {
   const { network, panel } = await mountWorkbench({
-    environment: () => ({ environment: { state: 'ready', owned: false, pid: 9001, endpoint: 'http://127.0.0.1:8188' } }),
+    environment: () => ({ environment: { state: 'ready', owned: false, canStop: false, pid: 9001, endpoint: 'http://127.0.0.1:8188' } }),
   })
   try {
-    const stop = buttonWithText(panel, '停止')
-    assert.ok(stop !== undefined, 'the button stays visible, so the absence of an action is explicit')
-    assert.equal(stop.props.disabled, true, 'the plugin never offers to kill a process it cannot claim')
-    assert.ok(noteText(panel).includes('由你自己启动的实例'), 'the reason is printed next to it')
+    await openEnvironmentPopover(panel)
+    assert.equal(buttonWithText(panel, '停止'), undefined, 'the plugin never offers to kill a process it cannot claim')
+    const popover = findAll(panel.tree, (entry) => typeof entry.props.className === 'string' && entry.props.className.includes('dsh-forge-environment-popover'))[0]
+    assert.ok(fakeText(popover).includes('由其他程序启动'), 'the reason is printed in the popover')
   } finally {
     network.restore()
   }
@@ -3480,6 +3469,23 @@ function flowContainer(panel) {
 function byClassNow(panel, className) {
   return fakeElementWithClass(panel.tree, className)
 }
+
+test('P2: an owned running backend remains stoppable when model weights are not ready', async () => {
+  const { network, panel } = await mountWorkbench({
+    configOverrides: { ready: false, reason: '权重未就绪' },
+    environment: () => ({ environment: { state: 'ready', owned: true, canStop: true, pid: 4242, endpoint: 'http://127.0.0.1:8188' } }),
+  })
+  try {
+    const trigger = findAll(panel.tree, (entry) => typeof entry.props.className === 'string' && entry.props.className.includes('dsh-forge-environment-trigger'))[0]
+    assert.ok(fakeText(trigger).includes('进程在线 · 模型未就绪'))
+    await openEnvironmentPopover(panel)
+    const stop = buttonWithText(panel, '停止')
+    assert.ok(stop !== undefined, 'process lifecycle does not depend on generation readiness')
+    assert.notEqual(stop.props.disabled, true)
+  } finally {
+    network.restore()
+  }
+})
 
 test('U04 S2: the flow canvas takes the canvas’ keyboard, and the studio acts on it', async () => {
   const mounted = await mountCanvasWorkbench()
@@ -3718,7 +3724,16 @@ test('U04 S4: 居中揭示 moves the mounted engine’s viewport, and still fall
   assert.ok(reveal.includes('setCamera('), '…as a camera, not a viewport')
   // And the handle's implementation is a real camera move on the engine.
   assert.ok(CLIENT_SOURCE.includes('setCenter('), 'the engine must call React Flow’s setCenter')
-  assert.ok(CLIENT_SOURCE.includes('reveal: (center, zoom)'), 'with the zoom the caller kept')
+  assert.ok(CLIENT_SOURCE.includes('reveal: (center, zoom, duration = 0)'), 'with the zoom and optional camera duration')
+})
+
+test('Canvas 2.1: menus dismiss globally and new nodes receive one-shot focus', () => {
+  assert.ok(CLIENT_SOURCE.includes('addEventListener("pointerdown", onPointerDown, true)'), 'outside pointer presses close canvas popups')
+  assert.ok(CLIENT_SOURCE.includes('addEventListener("wheel", onWheel'), 'wheel/pan closes them too')
+  assert.ok(CLIENT_SOURCE.includes('canvasMenuKeyDown'), 'popup menus support arrow/Home/End navigation')
+  assert.ok(CLIENT_SOURCE.includes('markCreatedNode'), 'node creation has one shared focus path')
+  assert.ok(CLIENT_SOURCE.includes('is-created-focus'), 'the new node gets a visible creation highlight')
+  assert.ok(CLIENT_SOURCE.includes('prefers-reduced-motion: reduce'), 'camera emphasis respects reduced motion')
 })
 
 test('U04 S4: a task node’s buttons reach the studio callbacks that own them', () => {
@@ -3994,25 +4009,29 @@ test('U05: the drawer’s values are the generate body, key for key', () => {
   assert.equal(canGenerateFromDrawer({ ...EMPTY_DRAFT_VALUES, prompt: '猫' }, 11), false, 'over the reference cap')
 })
 
-test('U05: the canvas tab has no left form, and the drawer stands in for it', async () => {
+test('U05: the canvas tab has no permanent drawer and uses a selected-node context panel', async () => {
   const { network, panel } = await mountWorkbench({ board: U05_BOARD })
   try {
-    // §U05-1: the form is *gone* from this view, not hidden by CSS. Its textarea
-    // has a different class too, so a selector cannot accidentally match.
     assert.equal(byClassNow(panel, 'dsh-forge-studio-form'), undefined, 'the canvas tab has no left form')
-    assert.equal(byClassNow(panel, 'dsh-forge-textarea'), undefined, 'and no prompt box of its own')
+    const modes = findAll(panel.tree, (element) => typeof element.props.className === 'string' && element.props.className.split(' ').includes('dsh-forge-view-item') && element.type === 'button').map(fakeText)
+    assert.deepEqual(modes.slice(0, 2), ['画布', '画廊'], 'canvas and gallery are the only top-level modes')
+    assert.equal(byClassNow(panel, 'dsh-forge-textarea'), undefined, 'and no duplicate form prompt box')
     assert.ok(byClassNow(panel, 'dsh-forge-canvas-shell') !== undefined, 'the canvas keeps its box')
-    const drawer = inspectorElement(panel)
-    assert.ok(drawer !== undefined, 'the drawer is a standing part of the canvas tab')
-    assert.ok(drawer.props.className.split(' ').includes('is-empty'), 'with nothing selected it is only the hint')
-    assert.ok(fakeText(drawer).includes(INSPECTOR_EMPTY_HINT), 'and the hint says what to do')
+    assert.ok(byClassNow(panel, 'dsh-forge-canvas-composer') !== undefined, 'the bottom composer is the canvas entry')
+    assert.equal(inspectorElement(panel), undefined, 'nothing selected means no drawer and no empty placeholder')
 
-    // §U05-2: the other two views are untouched — they still own the old form.
-    buttonWithText(panel, '列表').props.onClick()
+    buttonByLabel(panel, '新建生成节点').props.onClick()
     await settle(panel)
-    assert.ok(byClassNow(panel, 'dsh-forge-studio-form') !== undefined, '列表 keeps the form')
+    assert.ok(byClassNow(panel, 'dsh-forge-context-panel') !== undefined, 'a selected node gets an in-flow context panel')
+    assert.ok(inspectorElement(panel) !== undefined)
+
+    buttonWithText(panel, '画廊').props.onClick()
+    await settle(panel)
+    assert.ok(byClassNow(panel, 'dsh-forge-studio-form') !== undefined, '画廊 keeps the form')
+    const scope = findAll(panel.tree, (element) => typeof element.props.className === 'string' && element.props.className.includes('dsh-forge-gallery-scope-item')).map(fakeText)
+    assert.deepEqual(scope, ['当前画板', '全部素材'], 'asset scope is a gallery filter, not a third mode')
     assert.ok(byClassNow(panel, 'dsh-forge-textarea') !== undefined)
-    assert.equal(inspectorElement(panel), undefined, 'and the drawer belongs to the canvas tab alone')
+    assert.equal(inspectorElement(panel), undefined, 'and the node editor belongs to the canvas tab alone')
   } finally {
     network.restore()
   }
@@ -4028,7 +4047,7 @@ test('U05: 新建生成 → draw in the drawer → 生成 sends exactly those va
     },
   })
   try {
-    buttonWithText(panel, '新建生成').props.onClick()
+    buttonByLabel(panel, '新建生成节点').props.onClick()
     await settle(panel)
     assert.equal(inspectorElement(panel).props['data-inspector-kind'], 'draft', 'the new node is the subject')
     assert.equal(inspectorAction(panel, 'generate').props.disabled, true, 'an empty prompt cannot be submitted')
@@ -4080,12 +4099,7 @@ test('U05: a multi-selection puts the drawer away again', async () => {
   try {
     flowContainer(mounted.panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
     await settle(mounted.panel)
-    const drawer = inspectorElement(mounted.panel)
-    assert.ok(drawer !== undefined, 'the drawer slot stays')
-    assert.ok(
-      drawer.props.className.split(' ').includes('is-empty'),
-      'but three selected nodes are not one node’s properties',
-    )
+    assert.equal(inspectorElement(mounted.panel), undefined, 'three selected nodes do not open one node editor')
   } finally {
     mounted.restoreFrames()
     mounted.network.restore()
@@ -4354,7 +4368,7 @@ test('U06: a draft is read out, and becomes the MOSS request or a stated refusal
   assert.match(noBoxes.reason, /画框/)
   const noCaption = layoutGeneratePlan({ ...U06_DRAFT, summary: { caption: '   ' } })
   assert.equal(noCaption.ok, false)
-  assert.match(noCaption.reason, /summary\.caption/)
+  assert.match(noCaption.reason, /整图描述/)
   const stretched = layoutGeneratePlan({
     width: 1024,
     height: 640,
@@ -4472,11 +4486,15 @@ test('U06: 生成 in the detail tab runs the canvas’s own layout request', asy
   try {
     flowContainer(panel).props.onKeyDown(keyEvent('a', { ctrl: true }))
     await settle(panel)
-    assert.equal(inspectorElement(panel).props['data-inspector-kind'], 'layout')
+    assert.equal(inspectorElement(panel).props['data-inspector-kind'], 'layout', 'layout gets a read-only summary panel')
     await openDetailOf(panel)
 
     // The pane is the layout's, and the primary action is the one §8.2 gives it.
     assert.equal(detailPane(panel).props['data-detail-kind'], 'layout')
+    assert.ok(byClassNow(panel, 'dsh-forge-layout-workspace') !== undefined, 'layout detail is an in-page split workspace')
+    assert.ok(byClassNow(panel, 'dsh-forge-layout-rail') !== undefined, 'overall layout fields stay in the page')
+    assert.ok(byClassNow(panel, 'dsh-forge-layout-box-edit') !== undefined, 'each box has an explicit property editor entry')
+    assert.ok(CLIENT_SOURCE.includes('dsh-forge-box-float'), 'box properties render in one floating editor')
     const generate = detailAction(panel, 'intent')
     assert.ok(generate !== undefined, 'the detail toolbar has the primary action')
     assert.equal(generate.props.disabled, false, 'a valid draft can generate from here')
@@ -4700,36 +4718,31 @@ test('P2b: a partial dry run still labels the on-disk row 已在盘 and the rest
 // Redundancy: a working panel should look like a canvas, not a checklist.
 // ---------------------------------------------------------------------------
 
-test('T22: the stepper appears only while a step is not done', async () => {
-  // All-green is already the status line's story (running · weights · pictures),
-  // so the four-step checklist must not hold 100 px of canvas forever.
+test('T22: the health stepper stays off the canvas in every environment state', async () => {
   const done = await mountWorkbench()
   try {
-    const steps = []
+    let steps = 0
     fakeVisit(done.panel.tree, (entry) => {
-      if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps.push(entry)
+      if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps++
     })
-    assert.equal(steps.length, 0, 'nothing to explain means nothing to render')
+    assert.equal(steps, 0, 'a ready canvas has no health checklist')
   } finally {
     done.network.restore()
   }
 
-  // A not-ready snapshot flips it back on, with the reason on the failed step.
   const broken = await mountWorkbench({
     configOverrides: { ready: false, reason: 'ComfyUI 未连接', models: undefined },
   })
   try {
-    const steps = []
+    let steps = 0
     fakeVisit(broken.panel.tree, (entry) => {
-      if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps.push(entry)
+      if (typeof entry.props.className === 'string' && entry.props.className.split(' ')[0] === 'dsh-forge-step') steps++
     })
-    assert.equal(steps.length, 4, 'a failure is exactly when the ladder is worth its height')
-    assert.equal(steps[0].props['data-step-state'], 'failed')
+    assert.equal(steps, 0, 'a broken runtime is a compact status plus a log-page action')
   } finally {
     broken.network.restore()
   }
 })
-
 test('the live-progress line is collapsed until a run reports something', async () => {
   // It stays in the DOM (role=status must exist before the first announcement),
   // but an idle workbench used to print '等待生成 · 实时进度已连接' under the canvas.

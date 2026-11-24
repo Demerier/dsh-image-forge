@@ -44,7 +44,9 @@ import {
   LAYOUT_DRAFT_BBOX_COORD_SPACE,
   LAYOUT_DRAFT_BBOX_FORMAT,
   LAYOUT_CANVAS_MULTIPLE,
+  LAYOUT_CANVAS_LABEL_TEXT,
   LAYOUT_CANVAS_PRESETS,
+  LAYOUT_ITEM_LABEL_TEXT,
   LAYOUT_NODE_CHROME,
   LAYOUT_NODE_DEFAULT_WIDTH,
   LAYOUT_NODE_MAX_WIDTH,
@@ -65,10 +67,12 @@ import {
   draftToState,
   exportCompiled,
   exportDraft,
+  fitLayoutCanvasSize,
   formatDraft,
   fromCompiledBox,
   getLayoutItem,
   layoutNodeHeight,
+  layoutRatioLabel,
   moveBox,
   parseDraft,
   pointToCanvas,
@@ -471,7 +475,7 @@ test('the editor draws, moves, resizes, captions and deletes in canvas pixels', 
 
 test('the caption hint carries the semantic-pollution rule', () => {
   assert.equal(typeof CAPTION_HINT, 'string')
-  for (const keyword of ['污染', '生成语义', 'bbox', 'summary']) {
+  for (const keyword of ['污染', '生成语义', '画框范围', '整图描述']) {
     assert.ok(CAPTION_HINT.includes(keyword), 'CAPTION_HINT must mention ' + keyword)
   }
 })
@@ -791,7 +795,7 @@ test('an official compiled prompt imports back into an editable draft', () => {
     JSON.parse(compiled).items.map((item) => item.bbox),
   )
 })
-test('the editor opens a draft whose boxes have no caption yet', () => {
+test('the editor opens in-progress drafts while compile enforces captions and literal text', () => {
   // A box drawn a second ago has no caption, and a template ships geometry only.
   // Mounting used to fail the whole draft ("items[0].caption must be nonempty"),
   // which blanked the editor over work the user had already drawn. Compiling is
@@ -809,12 +813,29 @@ test('the editor opens a draft whose boxes have no caption yet', () => {
   assert.ok(state.items.every((item) => item.caption === ''))
   // Compiling is where an unwritten caption is refused.
   assert.throws(() => compileLayout(stateToDraft(drafting)), /caption must be nonempty/)
-  // And a malformed item (missing text on a text item) still refuses to mount.
-  assert.throws(
-    () => draftToEditorState({ ...drafting, items: [{ label: 'text', caption: 'x', bbox: [0, 0, 100, 100] }] }),
-    /text items require literal text/,
-  )
+  // A historical text box may predate its literal copy. Keep it editable so the
+  // user can repair it in place; the compiler remains the strict gate.
+  const missingLiteral = draftToEditorState({
+    ...drafting,
+    items: [{ label: 'text', caption: 'x', bbox: [0, 0, 100, 100] }],
+  })
+  assert.equal(missingLiteral.items[0].text, undefined)
+  assert.throws(() => compileLayout(stateToDraft(missingLiteral)), /text items require literal text/)
 })
+test('layout canvas fitting preserves the draft ratio inside the available stage', () => {
+  assert.deepEqual(fitLayoutCanvasSize(600, 400, 1024, 1024, 20), { width: 360, height: 360 })
+  assert.deepEqual(fitLayoutCanvasSize(600, 400, 1600, 900, 20), { width: 560, height: 315 })
+  assert.deepEqual(fitLayoutCanvasSize(600, 400, 900, 1600, 20), { width: 202, height: 360 })
+  assert.deepEqual(fitLayoutCanvasSize(0, 0, 1024, 1024, 20), { width: 1, height: 1 })
+  assert.equal(layoutRatioLabel(1536, 1024), '3:2')
+  assert.equal(layoutRatioLabel(1024, 1024), '1:1')
+})
+
+test('visible schema vocabulary is localized without changing stored values', () => {
+  assert.deepEqual(LAYOUT_ITEM_LABEL_TEXT, { object: '主体', character: '人物', text: '文字' })
+  assert.deepEqual(LAYOUT_CANVAS_LABEL_TEXT, { single: '单幅画面', multi_panel: '多格画面', collage: '拼贴画面' })
+})
+
 test('a box can be named for the panel, and the name never reaches the prompt', () => {
   // The official schema rejects unknown item fields, so a name is editor-only:
   // it is how a human finds their own boxes, not something the model reads.

@@ -8,24 +8,16 @@
  *
  * @module workbench-log
  */
-import {
-  createElement,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   STUDIO_ENVIRONMENT_ROUTE,
-  STUDIO_LOG_DEFAULT_LIMIT,
-  STUDIO_LOG_ROUTE,
   type StudioEnvironmentResponse,
   type StudioEnvironmentSnapshot,
   type StudioLogLine,
   type StudioLogPage,
 } from './studio-shared.ts'
-
+import { refreshStudioEnvironment, runStudioEnvironmentAction, useEnvironmentClient } from './environment-client.ts'
+import { logFileName, readStudioLogPage } from './studio-log-client.ts'
 /** Heading the workbench strip uses for this page. */
 export const WORKBENCH_LOG_LABEL = '日志'
 
@@ -37,67 +29,6 @@ export const WORKBENCH_LOG_REFRESH_MS = 2000
 
 /** Keep live follow bounded; older pages remain available from disk. */
 const LOG_BUFFER_MAX_LINES = 1200
-
-async function readJson(response: Response): Promise<Record<string, unknown> | undefined> {
-  try {
-    const value = await response.json()
-    return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined
-  } catch {
-    return undefined
-  }
-}
-
-async function readEnvironment(): Promise<{ environment?: StudioEnvironmentSnapshot; error?: string }> {
-  try {
-    const response = await fetch(STUDIO_ENVIRONMENT_ROUTE, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'status' }),
-    })
-    const payload = await readJson(response)
-    if (!response.ok) {
-      return { error: typeof payload?.error === 'string' ? payload.error : `连接状态读取失败（HTTP ${String(response.status)}）` }
-    }
-    const answer = payload as StudioEnvironmentResponse | undefined
-    if (typeof answer?.error === 'string' && answer.error.length > 0) return { error: answer.error }
-    if (answer?.environment === undefined) return { error: '宿主没有返回 ComfyUI 连接状态。' }
-    return { environment: answer.environment }
-  } catch (cause) {
-    return { error: cause instanceof Error ? cause.message : String(cause) }
-  }
-}
-
-interface LogPageQuery {
-  readonly before?: number
-  readonly after?: number
-  readonly limit?: number
-}
-
-async function readLogPage(path: string, query: LogPageQuery = {}): Promise<{ page?: StudioLogPage; error?: string }> {
-  try {
-    const params = new URLSearchParams({ path, limit: String(query.limit ?? STUDIO_LOG_DEFAULT_LIMIT) })
-    if (query.before !== undefined) params.set('before', String(query.before))
-    if (query.after !== undefined) params.set('after', String(query.after))
-    const response = await fetch(`${STUDIO_LOG_ROUTE}?${params.toString()}`, { credentials: 'same-origin' })
-    const payload = await readJson(response)
-    if (!response.ok) {
-      return { error: typeof payload?.error === 'string' ? payload.error : `日志读取失败（HTTP ${String(response.status)}）` }
-    }
-    if (payload === undefined || payload.version !== 'studio-log/v1') return { error: '日志页返回了无法识别的数据。' }
-    return { page: payload as unknown as StudioLogPage }
-  } catch (cause) {
-    return { error: cause instanceof Error ? cause.message : String(cause) }
-  }
-}
-
-/** The basename of a Windows or POSIX path, for a compact source label. */
-export function logFileName(path: string | undefined): string | undefined {
-  if (path === undefined || path.length === 0) return undefined
-  const normalized = path.replace(/\\/g, '/')
-  const slash = normalized.lastIndexOf('/')
-  return normalized.slice(slash + 1)
-}
 
 /** What kind of log the current snapshot points at. */
 export function logSourceLabel(environment: StudioEnvironmentSnapshot | undefined): string {
@@ -160,9 +91,11 @@ function lineClass(line: StudioLogLine): string {
  * The dedicated ComfyUI log page.
  */
 export function WorkbenchLogPane(): ReturnType<typeof createElement> {
-  const [environment, setEnvironment] = useState<StudioEnvironmentSnapshot | undefined>(undefined)
-  const [statusError, setStatusError] = useState<string | undefined>(undefined)
-  const [statusBusy, setStatusBusy] = useState(false)
+  const environmentClient = useEnvironmentClient()
+  const environment = environmentClient.environment
+  const statusError = environmentClient.error
+  const environmentNote = environmentClient.note
+  const statusBusy = environmentClient.busy !== undefined
   const [page, setPage] = useState<StudioLogPage | undefined>(undefined)
   const [lines, setLines] = useState<readonly StudioLogLine[]>([])
   const [logError, setLogError] = useState<string | undefined>(undefined)
@@ -174,16 +107,20 @@ export function WorkbenchLogPane(): ReturnType<typeof createElement> {
   const logPath = environment?.logPath
 
   const refreshStatus = useCallback(async () => {
-    setStatusBusy(true)
-    const result = await readEnvironment()
-    setEnvironment(result.environment)
-    setStatusError(result.error)
-    setStatusBusy(false)
+    await refreshStudioEnvironment()
+  }, [])
+
+  const startEnvironment = useCallback(async () => {
+    await runStudioEnvironmentAction('start')
+  }, [])
+
+  const stopEnvironment = useCallback(async () => {
+    await runStudioEnvironmentAction('stop')
   }, [])
 
   const loadLatest = useCallback(async (path: string) => {
     setLogBusy(true)
-    const result = await readLogPage(path)
+    const result = await readStudioLogPage(path)
     if (result.page === undefined) {
       setLogError(result.error ?? '日志读取失败')
     } else {
@@ -200,7 +137,7 @@ export function WorkbenchLogPane(): ReturnType<typeof createElement> {
   const followLatest = useCallback(async (path: string) => {
     const after = newestCursorRef.current
     if (after <= 0) return
-    const result = await readLogPage(path, { after })
+    const result = await readStudioLogPage(path, { after })
     if (result.page === undefined) {
       setLogError(result.error ?? '日志读取失败')
       return
@@ -217,7 +154,7 @@ export function WorkbenchLogPane(): ReturnType<typeof createElement> {
     const oldest = lines[0]?.number
     if (oldest === undefined || oldest <= 1) return
     setLogBusy(true)
-    const result = await readLogPage(logPath, { before: oldest })
+    const result = await readStudioLogPage(logPath, { before: oldest })
     if (result.page === undefined) {
       setLogError(result.error ?? '更早日志读取失败')
     } else {
@@ -286,7 +223,10 @@ export function WorkbenchLogPane(): ReturnType<typeof createElement> {
       createElement(
         'div',
         { className: 'dsh-forge-workbench-log-actions' },
-        createElement('button', { type: 'button', className: 'dsh-forge-workbench-action', disabled: statusBusy, onClick: () => { void refreshStatus() } }, statusBusy ? '检测中…' : '重新检测'),
+        environment?.state === 'ready'
+          ? null
+          : createElement('button', { type: 'button', className: 'dsh-forge-workbench-action is-primary', disabled: statusBusy, onClick: () => { void startEnvironment() } }, statusBusy ? '启动中…' : '启动 ComfyUI'),
+        createElement('button', { type: 'button', className: 'dsh-forge-workbench-action', disabled: statusBusy, onClick: () => { void refreshStatus() } }, environmentClient.busy === 'status' ? '检测中…' : '重新检测'),
         createElement('button', { type: 'button', className: 'dsh-forge-workbench-action', disabled: logBusy || logPath === undefined, onClick: () => { if (logPath !== undefined) void loadLatest(logPath) } }, logBusy ? '读取中…' : '刷新最新'),
         createElement('button', { type: 'button', className: follow ? 'dsh-forge-workbench-action is-active' : 'dsh-forge-workbench-action', 'aria-pressed': follow, onClick: () => { setFollow((value) => !value) } }, follow ? '跟随中' : '已暂停'),
         createElement('button', { type: 'button', className: 'dsh-forge-workbench-action', disabled: olderDisabled, onClick: () => { void loadOlder() } }, '加载更早'),
@@ -316,9 +256,19 @@ export function WorkbenchLogPane(): ReturnType<typeof createElement> {
     ),
     createElement(
       'div',
-      { ref: bodyRef, className: 'dsh-forge-workbench-log-output', 'aria-label': 'ComfyUI 日志内容' },
+      { ref: bodyRef, className: lines.length === 0 ? 'dsh-forge-workbench-log-output is-empty' : 'dsh-forge-workbench-log-output', 'aria-label': 'ComfyUI 日志内容' },
       lines.length === 0
-        ? createElement('span', { className: 'dsh-forge-workbench-log-empty' }, logEmptyText(environment, statusError, logError))
+        ? createElement('div', { className: 'dsh-forge-workbench-log-empty' },
+            createElement('span', { className: 'dsh-forge-workbench-log-empty-mark', 'aria-hidden': 'true' }, 'LOG'),
+            createElement('span', { className: 'dsh-forge-workbench-log-empty-copy' }, logEmptyText(environment, statusError, logError)),
+            createElement('div', { className: 'dsh-forge-workbench-log-empty-actions' },
+              environment?.state === 'ready'
+                ? null
+                : createElement('button', { type: 'button', className: 'dsh-forge-workbench-action is-primary', disabled: statusBusy, onClick: () => { void startEnvironment() } }, statusBusy ? '启动中…' : '启动 ComfyUI'),
+              createElement('button', { type: 'button', className: 'dsh-forge-workbench-action', disabled: statusBusy, onClick: () => { void refreshStatus() } }, environmentClient.busy === 'status' ? '检测中…' : '重新检测'),
+              createElement('button', { type: 'button', className: 'dsh-forge-workbench-action', disabled: logBusy || logPath === undefined, onClick: () => { if (logPath !== undefined) void loadLatest(logPath) } }, logBusy ? '读取中…' : '刷新日志'),
+            ),
+          )
         : lines.map((line) => createElement(
             'div',
             { key: line.number, className: lineClass(line), 'data-line-number': line.number },

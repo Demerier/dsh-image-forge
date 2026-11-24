@@ -891,7 +891,7 @@ function renderResultBlocks(value: { markdown?: string; summary?: string }): { t
   if (typeof payload.markdown === 'string' && payload.markdown.length > 0) {
     blocks.push({
       type: 'text',
-      text: `已在对话里内联显示请**逐字复制**下面这几行到你的回复正文（客户端会把本地绝对路径渲染成图片）：\n${payload.markdown}`,
+      text: '图片由 dsh-image-forge 的交互结果卡正式展示。不要再次把 markdown 字段中的图片粘贴到回复正文；该字段仅供复制和导出。',
     })
   }
   blocks.push({ type: 'text', text: JSON.stringify(value, null, 2) })

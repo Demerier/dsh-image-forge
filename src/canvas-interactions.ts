@@ -334,6 +334,24 @@ export interface Command {
   revert(): void
 }
 
+/** One row in the session-scoped command timeline. */
+export interface CommandTimelineEntry {
+  /** Zero-based state position after this command has been applied. */
+  readonly index: number
+  /** Stable debug label supplied by the command author. */
+  readonly label: string
+  /** False for the redo tail, which is shown but not currently applied. */
+  readonly applied: boolean
+}
+
+/** A read-only projection of the command stack for the history popover. */
+export interface CommandTimeline {
+  /** Number of commands currently applied; also the current cursor. */
+  readonly position: number
+  /** Oldest to newest, including the undone redo tail. */
+  readonly entries: readonly CommandTimelineEntry[]
+}
+
 /**
  * One undoable change, paired with the two snapshots it switches between.
  *
@@ -444,6 +462,32 @@ export class CommandStack {
     if (command === undefined) return false
     command.apply()
     this.#undo.push(command)
+    return true
+  }
+
+  /** A read-only timeline, oldest first, with the redo tail marked unapplied. */
+  timeline(): CommandTimeline {
+    const redoNewestFirst = [...this.#redo].reverse()
+    const entries = [...this.#undo, ...redoNewestFirst].map((command, index) => ({
+      index: index + 1,
+      label: command.label ?? '操作',
+      applied: index < this.#undo.length,
+    }))
+    return { position: this.#undo.length, entries }
+  }
+
+  /**
+   * Move directly to one state on the timeline.
+   *
+   * Position 0 is before the oldest retained command; position `total` is the
+   * newest state. Jumping uses the same command `apply`/`revert` methods as
+   * single-step undo/redo, so it cannot invent a different state transition.
+   */
+  jumpTo(position: number): boolean {
+    const total = this.#undo.length + this.#redo.length
+    if (!Number.isInteger(position) || position < 0 || position > total || position === this.#undo.length) return false
+    while (this.#undo.length > position) this.undo()
+    while (this.#undo.length < position) this.redo()
     return true
   }
 
@@ -732,8 +776,8 @@ export function contextMenuItems(target: ContextMenuTarget): ContextMenuItem[] {
       // §8.4: the node draws the canvas only, so the tab is where the caption
       // rows, the hint and the export box live. Without this entry a layout node
       // would have no way to reach the full editor.
-      { id: 'open-detail', label: '打开详情（完整编辑器）', hint: '在页签里编辑 summary.caption、查看画框列表' },
-      { id: 'layout-send-form', label: '发送到表单', hint: '把 draft 的 summary.caption 送进生成表单，改完再点生成' },
+      { id: 'open-detail', label: '打开详情（完整编辑器）', hint: '在页签里编辑整图描述、查看画框列表' },
+      { id: 'layout-send-form', label: '发送到表单', hint: '把 draft 的整图描述送进生成表单，改完再点生成' },
       { id: 'layout-export-draft', label: '导出 draft', hint: '下载这份 draft 的 JSON（可再导入）' },
       { id: 'layout-export-compiled', label: '导出 compiled', hint: '下载 compiled（直接贴进 prompt）' },
       { id: 'remove', label: '删除节点' },

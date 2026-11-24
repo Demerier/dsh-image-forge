@@ -63,6 +63,9 @@ export default defineConfig([
       'src/config-defaults.ts',
       'src/config-resolve.ts',
       'src/settings-fields.ts',
+      'src/settings-draft.ts',
+      'src/settings-section.ts',
+      'src/studio-log-client.ts',
       'src/settings-section.ts',
       'src/tools.ts',
       // Studio logic: the route parsers, the step/size resolvers and the
@@ -92,6 +95,13 @@ export default defineConfig([
       // Canvas camera maths: pure, and wrong by a factor of `zoom` in the most
       // ordinary way. Asserted directly rather than through a rendered panel.
       'src/studio-canvas.ts',
+      // Conversation result cards and the optional Better Sidebar integration
+      // share pure readers, annotation geometry and handoff gates with tests.
+      'src/image-result-model.ts',
+      'src/image-annotation.ts',
+      'src/better-sidebar-model.ts',
+      'src/better-sidebar-handoff.ts',
+      'src/better-sidebar.ts',
     ],
     format: ['esm'],
     platform: 'node',

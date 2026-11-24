@@ -1378,7 +1378,7 @@ export function weightsReportOf(outcome: ProfileWeightsOutcome): StudioWeightsRe
 
 /** The environment report, narrowed to the fields the panel renders. */
 export function environmentSnapshotOf(status: EnvironmentStatus): StudioEnvironmentSnapshot {
-  const snapshot: StudioEnvironmentSnapshot = { state: status.state, owned: status.owned === true }
+  const snapshot: StudioEnvironmentSnapshot = { state: status.state, owned: status.owned === true, canStop: status.canStop === true || status.owned === true }
   if (status.note.length > 0) snapshot.note = status.note
   if (status.endpoint !== null) snapshot.endpoint = status.endpoint
   if (status.port !== null) snapshot.port = status.port
@@ -1391,6 +1391,8 @@ export function environmentSnapshotOf(status: EnvironmentStatus): StudioEnvironm
   // It is what lets the panel say "this is not yours" instead of showing a stop
   // button that would have to refuse when clicked.
   if (typeof status.ownershipNote === 'string' && status.ownershipNote.length > 0) snapshot.ownershipNote = status.ownershipNote
+  if (typeof status.stopBlockedReason === 'string' && status.stopBlockedReason.length > 0) snapshot.stopBlockedReason = status.stopBlockedReason
+  else if (!snapshot.canStop && typeof status.ownershipNote === 'string' && status.ownershipNote.length > 0) snapshot.stopBlockedReason = status.ownershipNote
   return snapshot
 }
 

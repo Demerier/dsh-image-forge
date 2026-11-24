@@ -10,26 +10,28 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const styles = readFileSync(fileURLToPath(new URL('../../../src/client-styles.ts', import.meta.url)), 'utf8')
+const settingsStyles = readFileSync(fileURLToPath(new URL('../../../src/settings-styles.ts', import.meta.url)), 'utf8')
 
 /** Pull one `export const NAME = \`…\`` body out of the stylesheet module. */
-function extract(name) {
+function extract(name, source = styles) {
   // `\r?\n` on purpose: this repo is edited on Windows, so a CRLF checkout
   // would otherwise make both constants look absent and the preview empty.
-  const match = styles.match(new RegExp(`export const ${name} = \`([\\s\\S]*?)\`\\r?\\n`))
+  const match = source.match(new RegExp(`export const ${name} = \`([\\s\\S]*?)\`\\r?\\n`))
   return match?.[1]
 }
 
 const base = extract('CLIENT_CSS')
 const studio = extract('STUDIO_CSS')
-if (base === undefined || studio === undefined) {
-  console.error('CLIENT_CSS / STUDIO_CSS extract failed')
+const settings = extract('SETTINGS_CSS', settingsStyles)
+if (base === undefined || studio === undefined || settings === undefined) {
+  console.error('CLIENT_CSS / STUDIO_CSS / SETTINGS_CSS extract failed')
   process.exit(1)
 }
 // `CLIENT_CSS` interpolates `${STUDIO_CSS}` so the shipped bundle carries both in
 // one sheet. This harness reads the *source* file, so it has to do that
 // substitution itself — without it the preview would silently render an
 // unstyled Studio panel.
-const css = base.replace('${STUDIO_CSS}', studio)
+const css = base.replace('${SETTINGS_CSS}', settings).replace('${STUDIO_CSS}', studio)
 
 const html = `<!doctype html>
 <html lang="zh-CN">

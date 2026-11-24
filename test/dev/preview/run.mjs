@@ -23,7 +23,7 @@ import { createReadStream, mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { previewPage } from './page.mjs'
+import { previewPage, resultCardPage, settingsPage, sidebarPage } from './page.mjs'
 import { vendorPath, vendorScript, vendorSpecifierOf, VENDOR_MODULES } from './vendor.mjs'
 import { dataDir, MAIN_BOARD, writeFixtures } from './fixtures.mjs'
 
@@ -143,9 +143,26 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    if (url.pathname === '/') {
+    if (url.pathname === '/' || url.pathname === '/sidebar' || url.pathname === '/result-card' || url.pathname === '/settings') {
       const vendorScripts = VENDOR_MODULES.map((specifier) => vendorPath(specifier))
-      send(res, 200, previewPage({ vendorScripts, mainBoardName: MAIN_BOARD_NAME }), MIME['.html'])
+      const page = url.pathname === '/sidebar'
+        ? sidebarPage({
+            vendorScripts,
+            imagePath: join(OUT, 'images', 'rainy-wide.png'),
+            boardId: MAIN_BOARD,
+            itemId: 'node-wide',
+            layoutId: 'node-layout',
+          })
+        : url.pathname === '/result-card'
+          ? resultCardPage({
+              vendorScripts,
+              imagePaths: [join(OUT, 'images', 'rainy-wide.png'), join(OUT, 'images', 'rainy-tall.png')],
+              boardId: MAIN_BOARD,
+            })
+          : url.pathname === '/settings'
+            ? settingsPage({ vendorScripts })
+            : previewPage({ vendorScripts, mainBoardName: MAIN_BOARD_NAME })
+      send(res, 200, page, MIME['.html'])
       return
     }
 
@@ -158,6 +175,12 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/client.js') {
       res.writeHead(200, { 'content-type': MIME['.js'], 'cache-control': 'no-store' })
       createReadStream(join(LIB, 'client.js')).pipe(res)
+      return
+    }
+
+    if (url.pathname === '/favicon.ico') {
+      res.writeHead(204, { 'cache-control': 'no-store' })
+      res.end()
       return
     }
 

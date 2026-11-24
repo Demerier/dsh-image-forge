@@ -327,6 +327,8 @@ export interface FlowModelOptions {
   readonly edgeLabels?: boolean
   /** Ids that may not be dragged (a task in flight stays put, §4.2). */
   readonly locked?: ReadonlySet<string>
+  /** The node that should receive the one-shot creation highlight. */
+  readonly highlighted?: string
 }
 
 /** The handle ids a node type exposes; mirrored by the pane's `Handle`s. */
@@ -342,7 +344,7 @@ const EDGE_LABELS: Readonly<Record<FlowSourceNode['kind'], string>> = {
 }
 
 /** The `data` payload of one node — the only thing its component reads. */
-function dataOf(node: FlowSourceNode): FlowNodeData {
+function dataOf(node: FlowSourceNode, highlighted: boolean): FlowNodeData {
   if (node.kind === 'image') {
     return {
       kind: 'image',
@@ -354,6 +356,7 @@ function dataOf(node: FlowSourceNode): FlowNodeData {
       width: node.image.width,
       height: node.image.height,
       bytes: node.image.bytes,
+      ...(highlighted ? { highlighted: true } : {}),
     }
   }
   if (node.kind === 'task') {
@@ -368,6 +371,7 @@ function dataOf(node: FlowSourceNode): FlowNodeData {
       percent: taskPercent(node),
       statusText: taskStatusText(node),
       ...(node.error === undefined ? {} : { error: node.error }),
+      ...(highlighted ? { highlighted: true } : {}),
     }
   }
   if (node.kind === 'layout') {
@@ -380,9 +384,10 @@ function dataOf(node: FlowSourceNode): FlowNodeData {
       width: node.draft.width,
       height: node.draft.height,
       referenceCount: node.references?.length ?? 0,
+      ...(highlighted ? { highlighted: true } : {}),
     }
   }
-  return { kind: 'draft', nodeId: node.id }
+  return { kind: 'draft', nodeId: node.id, ...(highlighted ? { highlighted: true } : {}) }
 }
 
 /** The node type string for a source node. */
@@ -439,7 +444,7 @@ export function toFlowModel(
       height: size.height,
       selected: selected.has(node.id),
       draggable: !locked.has(node.id),
-      data: dataOf(node),
+      data: dataOf(node, options.highlighted === node.id),
     })
     for (const parentId of node.parents) {
       if (!known.has(parentId)) {
@@ -482,7 +487,7 @@ export function flowModelFingerprint(model: FlowModel): string {
     (node) =>
       `${node.id}:${node.type}:${String(node.position.x)},${String(node.position.y)}:${String(node.width)}x${String(node.height)}:${node.selected ? '1' : '0'}:${
         typeof node.data['status'] === 'string' ? node.data['status'] : ''
-      }:${typeof node.data['percent'] === 'number' ? String(node.data['percent']) : ''}`,
+      }:${typeof node.data['percent'] === 'number' ? String(node.data['percent']) : ''}:${node.data['highlighted'] === true ? 'focus' : ''}`,
   )
   parts.push('|')
   for (const edge of model.edges) parts.push(`${edge.id}>${edge.source ?? ''}->${edge.target}`)

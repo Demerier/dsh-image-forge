@@ -722,7 +722,9 @@ test('creating a project names it, opens its canvas tab, and deleting asks first
     tabByKey(mounted.tree, 'projects').props.onClick()
     await settle(host, mounted)
     const card = cardOf(mounted.tree, 'b_one')
-    byLabel(card, '删除 橘猫计划').props.onClick()
+    byLabel(card, '管理 橘猫计划').props.onClick()
+    await settle(host, mounted)
+    byLabel(cardOf(mounted.tree, 'b_one'), '删除 橘猫计划').props.onClick()
     await settle(host, mounted)
     assert.equal(
       network.boardActions().filter((action) => action.action === 'delete').length,
@@ -758,7 +760,9 @@ test('U07: 复制 sends a duplicate action and the copy lands in the grid', asyn
   try {
     const card = cardOf(mounted.tree, 'b_one')
     // The card menu carries the copy action (§5.3), next to 重命名 / 删除.
-    const copyButton = byLabel(card, '复制 橘猫计划')
+    byLabel(card, '管理 橘猫计划').props.onClick()
+    await settle(host, mounted)
+    const copyButton = byLabel(cardOf(mounted.tree, 'b_one'), '复制 橘猫计划')
     assert.ok(copyButton !== undefined, '复制 is one of the card actions')
     assert.equal(textOf(copyButton), '复制')
     copyButton.props.onClick()
@@ -783,6 +787,8 @@ test('U07: 复制 sends a duplicate action and the copy lands in the grid', asyn
 test('U07: 连图片一起删除 sends deleteFiles, and only that option does', async () => {
   const { network, host, mounted } = await mountShell({ boards: [BOARD_ONE, BOARD_TWO] })
   try {
+    byLabel(cardOf(mounted.tree, 'b_one'), '管理 橘猫计划').props.onClick()
+    await settle(host, mounted)
     byLabel(cardOf(mounted.tree, 'b_one'), '删除 橘猫计划').props.onClick()
     await settle(host, mounted)
     const confirm = byClass(mounted.tree, 'dsh-forge-workbench-confirm')
@@ -802,6 +808,8 @@ test('U07: 连图片一起删除 sends deleteFiles, and only that option does', 
     assert.equal(cardOf(mounted.tree, 'b_one'), undefined)
 
     // An empty project needs no choice: one 确认删除, and no file flag.
+    byLabel(cardOf(mounted.tree, 'b_two'), '管理 海报草图').props.onClick()
+    await settle(host, mounted)
     byLabel(cardOf(mounted.tree, 'b_two'), '删除 海报草图').props.onClick()
     await settle(host, mounted)
     const empty = byClass(mounted.tree, 'dsh-forge-workbench-confirm')
@@ -1207,7 +1215,7 @@ test('U08: 在画布中打开 is disabled until a canvas is open, then copies th
   }
 })
 
-test('U08: the canvas tab keeps its own project-scope 素材 view (the other half of §9.2)', async () => {
+test('U08: the canvas tab exposes 画布 / 画廊 without turning 素材 into a third mode', async () => {
   const handle = await mountShell({ boards: [BOARD_ONE], board: LAYOUT_BOARD, assets: [ASSET_ONE] })
   const { network, host, mounted } = handle
   try {
@@ -1218,11 +1226,19 @@ test('U08: the canvas tab keeps its own project-scope 素材 view (the other hal
     byClass(cardOf(mounted.tree, 'b_one'), 'dsh-forge-workbench-card-open').props.onClick()
     await settle(host, mounted)
     assert.equal(selectedTab(mounted.tree).props['data-tab-key'], 'canvas:b_one')
-    const viewSwitch = findAll(mounted.tree, (element) => element.props.role === 'group' && element.props['aria-label'] === '结果视图')
-    assert.equal(viewSwitch.length, 1, 'the canvas tab still offers 画布 / 列表 / 素材')
+    const viewSwitch = findAll(mounted.tree, (element) => element.props.role === 'group' && element.props['aria-label'] === '工作台模式')
+    assert.equal(viewSwitch.length, 1, 'the canvas tab offers the two stable workspace modes')
     assert.deepEqual(
       viewSwitch[0].children.filter((child) => child !== null).map((child) => textOf(child)),
-      ['画布', '列表', '素材'],
+      ['画布', '画廊'],
+    )
+    viewSwitch[0].children.filter((child) => child !== null)[1].props.onClick()
+    await settle(host, mounted)
+    const scopeSwitch = findAll(mounted.tree, (element) => element.props.role === 'group' && element.props['aria-label'] === '画廊范围')
+    assert.equal(scopeSwitch.length, 1, '素材 scope is a gallery filter, not a third mode')
+    assert.deepEqual(
+      scopeSwitch[0].children.filter((child) => child !== null).map((child) => textOf(child)),
+      ['当前画板', '全部素材'],
     )
 
     // Coming back to the projects tab after a canvas: the library is still the

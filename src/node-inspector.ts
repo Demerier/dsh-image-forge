@@ -155,6 +155,8 @@ export interface InspectorField {
   /** The `<input>`'s bounds, for the two counters the host validates. */
   readonly min?: number
   readonly max?: number
+  /** Engineering detail kept behind the drawer's native 详情 disclosure. */
+  readonly advanced?: boolean
 }
 
 /** Every drawer action, by id. */
@@ -195,6 +197,12 @@ export interface InspectorSpec {
   readonly lineage: readonly string[]
   readonly actions: readonly InspectorActionSpec[]
   readonly hint?: string
+  /** A picture preview for the image node's inline editor. */
+  readonly preview?: {
+    readonly src: string
+    readonly href: string
+    readonly alt: string
+  }
 }
 
 /** The drawer's title when nothing is selected. */
@@ -691,9 +699,11 @@ export function inspectorSpecFor(
   const prompt = promptLine(item?.prompt) || promptLine(node.params?.prompt)
   return {
     kind: 'image',
-    title: '图片',
-    badge: '图片',
-    status: image === undefined ? undefined : sizeText(image.width, image.height),
+    title: '画面',
+    badge: item?.mode === 'edit' ? '改图' : '生成',
+    status: image === undefined
+      ? undefined
+      : `${sizeText(image.width, image.height)}${item?.ratio === null || item?.ratio === undefined ? '' : ` · ${item.ratio}`}`,
     fields: [
       {
         id: 'prompt',
@@ -701,11 +711,10 @@ export function inspectorSpecFor(
         value: prompt.length === 0 ? '（这张图没有记录提示词）' : prompt,
         editable: false,
       },
-      { id: 'size', label: '尺寸', value: image === undefined ? '' : sizeText(image.width, image.height), editable: false },
-      { id: 'ratio', label: '画幅', value: item?.ratio ?? '—', editable: false },
+      { id: 'ratio', label: '画幅比例', value: item?.ratio ?? '—', editable: false },
       {
         id: 'steps',
-        label: '步数',
+        label: '采样步数',
         value: typeof item?.steps === 'number' ? String(item.steps) : '—',
         editable: false,
       },
@@ -715,14 +724,17 @@ export function inspectorSpecFor(
         value: typeof item?.seed === 'number' ? String(item.seed) : '—',
         editable: false,
       },
+      { id: 'size', label: '像素尺寸', value: image === undefined ? '' : sizeText(image.width, image.height), editable: false },
       {
         id: 'model',
         label: '底模',
         value: options.model === undefined || options.model.length === 0 ? '按当前 profile' : options.model,
         editable: false,
         hint: '底模是 profile 级配置，不在节点上。',
+        advanced: true,
       },
-      { id: 'file', label: '文件', value: image?.path ?? '', editable: false },
+      { id: 'file', label: '文件路径', value: image?.path ?? '', editable: false, advanced: true },
+      ...(lineage.length === 0 ? [] : [{ id: 'lineage', label: '血缘来源', value: lineage.join(' → '), editable: false, advanced: true }]),
     ],
     references: [],
     canEditReferences: false,
@@ -735,7 +747,14 @@ export function inspectorSpecFor(
       { id: 'open-detail', label: '打开详情', title: '在大图详情页签里看这张图和它的全部参数' },
       { id: 'remove', label: '移除', title: '从画布移除（不删文件）', danger: true },
     ],
-    hint: '图片的参数是历史记录，要改就「按这张继续」再生成一张。',
+    ...(image === undefined ? {} : {
+      preview: {
+        src: studioFileUrl(image.markdownPath),
+        href: studioFileUrl(image.markdownPath),
+        alt: prompt.length === 0 ? '生成结果' : prompt,
+      },
+    }),
+    hint: '图片参数是这次生成的记录；要改画面，就用「按这张继续」再做一版。',
   }
 }
 
@@ -978,14 +997,38 @@ export function NodeInspector(props: NodeInspectorProps): ReactNode {
     spec.status === undefined
       ? null
       : createElement('div', { className: 'dsh-forge-inspector-status' }, spec.status),
+    spec.preview === undefined
+      ? null
+      : createElement(
+        'a',
+        {
+          className: 'dsh-forge-inspector-preview',
+          href: spec.preview.href,
+          target: '_blank',
+          rel: 'noreferrer',
+          title: '打开原图',
+        },
+        createElement('img', { src: spec.preview.src, alt: spec.preview.alt, draggable: false }),
+      ),
     createElement(
       'div',
       { className: 'dsh-forge-inspector-body' },
-      ...spec.fields.map((field) => fieldRowOf(field, props)),
+      ...spec.fields.filter((field) => field.advanced !== true).map((field) => fieldRowOf(field, props)),
       spec.canEditReferences || spec.references.length > 0
         ? referencesOfSpec(spec, props)
         : null,
       ...lineageOf(spec),
+      (() => {
+        const advanced = spec.fields.filter((field) => field.advanced === true)
+        return advanced.length === 0
+          ? null
+          : createElement(
+            'details',
+            { className: 'dsh-forge-inspector-details' },
+            createElement('summary', {}, '详情'),
+            ...advanced.map((field) => fieldRowOf(field, props)),
+          )
+      })(),
       props.error === undefined
         ? null
         : createElement('div', { className: 'dsh-forge-studio-alert' }, props.error),

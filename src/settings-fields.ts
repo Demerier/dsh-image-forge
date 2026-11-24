@@ -14,7 +14,10 @@
  */
 
 /** The coarse buckets the settings page shows, in display order. */
-export type SettingsGroupId = 'steps' | 'comfyui' | 'backend' | 'output'
+export type SettingsGroupId = 'connection' | 'generation' | 'output' | 'overrides' | 'backend'
+
+/** The two top-level settings modes. */
+export type SettingsTabId = 'basic' | 'advanced'
 
 /**
  * One tab of the settings page.
@@ -25,7 +28,7 @@ export type SettingsGroupId = 'steps' | 'comfyui' | 'backend' | 'output'
  */
 export interface SettingsTab {
   /** Stable id; also the tab button's key. */
-  readonly id: string
+  readonly id: SettingsTabId
   /** Tab label. */
   readonly label: string
   /** One-line blurb under the tab bar when the tab is active. */
@@ -41,19 +44,18 @@ export interface SettingsTab {
  */
 export const SETTINGS_TABS: readonly SettingsTab[] = [
   {
-    id: 'generate',
-    label: '出图',
-    hint: '画质步数、图落到哪里。',
-    groupIds: ['steps', 'output'],
+    id: 'basic',
+    label: '常用',
+    hint: '连接 ComfyUI、选择模型，并决定图片落在哪里。',
+    groupIds: ['connection', 'generation', 'output'],
   },
   {
-    id: 'comfyui',
-    label: 'ComfyUI',
-    hint: '复用你自己装好的 ComfyUI（本地推荐部署见 docs/comfyui-deployment.md）。',
-    groupIds: ['comfyui', 'backend'],
+    id: 'advanced',
+    label: '高级',
+    hint: '模型专用覆盖、执行后端和诊断路径。',
+    groupIds: ['overrides', 'backend'],
   },
 ]
-
 /** One display group (a titled block of fields). */
 export interface SettingsGroup {
   /** Stable id; also the block's DOM key. */
@@ -138,42 +140,37 @@ export function hintHasPath(hint: string): boolean {
 /** The blocks the page renders, in order. */
 export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   {
-    id: 'steps',
-    label: '步数（画质与耗时）',
-    hint: 'base 40 步；turbo 蒸馏版 8 步。',
+    id: 'connection',
+    label: 'ComfyUI 连接',
+    hint: '地址、探测端口与模型目录；运行状态在上方单独显示。',
   },
   {
-    id: 'comfyui',
-    label: 'ComfyUI',
-    hint: '地址、端口与权重目录。',
+    id: 'generation',
+    label: '生成默认值',
+    hint: '默认使用哪个权重、跑多少步。',
+  },
+  {
+    id: 'output',
+    label: '输出与单次超时',
+    hint: '图片落到哪里，以及一次生成最多等多久。',
+  },
+  {
+    id: 'overrides',
+    label: '模型专用覆盖',
+    hint: '只影响特定权重或 MOSS 采样，不懂时保持留空。',
   },
   {
     id: 'backend',
     label: '执行后端',
     hint: '默认 auto：MCP → CLI → HTTP 依次回退。',
-  },
-  {
-    id: 'output',
-    label: '输出与超时',
-    hint: '图片落到哪里，等多久。',
+    advanced: true,
   },
 ]
-
 /** Every configurable field, in page order. */
 export const SETTINGS_FIELDS: readonly SettingsField[] = [
   {
-    key: 'defaultSteps',
-    group: 'steps',
-    label: '默认步数',
-    hint: 'base 的默认：40，官方推荐 40–50。',
-    kind: 'number',
-    min: 1,
-    max: 200,
-    unit: '步',
-  },
-  {
     key: 'comfyuiSteps',
-    group: 'steps',
+    group: 'overrides',
     label: 'ComfyUI 专用步数',
     hint: '留空 = 用默认步数。',
     kind: 'number',
@@ -184,7 +181,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: 'comfyModel',
-    group: 'steps',
+    group: 'generation',
     label: 'ComfyUI 权重',
     hint: 'turbo 8 步 2.7×；缺权重退回 base；moss 缺报错。',
     kind: 'enum',
@@ -195,8 +192,18 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     ],
   },
   {
+    key: 'defaultSteps',
+    group: 'generation',
+    label: '默认步数',
+    hint: 'base 的默认：40，官方推荐 40–50。',
+    kind: 'number',
+    min: 1,
+    max: 200,
+    unit: '步',
+  },
+  {
     key: 'mossSampling',
-    group: 'steps',
+    group: 'overrides',
     label: 'MOSS 采样',
     hint: '默认 comfy：25 步/2.5；official：50 步/3，更慢。',
     kind: 'enum',
@@ -207,7 +214,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: 'turboSteps',
-    group: 'steps',
+    group: 'overrides',
     label: 'turbo 专用步数',
     hint: '留空 = 8。蒸馏按 8 步调，加减不一定更好。',
     kind: 'number',
@@ -218,7 +225,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: 'comfyEndpoint',
-    group: 'comfyui',
+    group: 'connection',
     label: 'ComfyUI 地址',
     hint: '留空 = 依次探 8000/8188/8189/8190/8191/8192。',
     kind: 'string',
@@ -226,7 +233,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: 'comfyPorts',
-    group: 'comfyui',
+    group: 'connection',
     label: 'ComfyUI 候选端口',
     hint: 'comfyEndpoint 留空时按顺序探测这些端口。',
     kind: 'string',
@@ -234,7 +241,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: 'comfyModelsDir',
-    group: 'comfyui',
+    group: 'connection',
     label: 'ComfyUI 模型目录',
     hint: '桌面版在「设置 → 模型路径」里；用来把「放哪里」写进报错。',
     kind: 'path',
@@ -325,6 +332,26 @@ export const HIDDEN_FIELD_KEYS: readonly string[] = SETTINGS_FIELDS.filter((fiel
 export const VISIBLE_FIELD_KEYS: readonly string[] = SETTINGS_FIELDS.filter((field) => field.hidden !== true).map(
   (field) => field.key,
 )
+
+/**
+ * Fields whose saved value changes which ComfyUI is inspected or which profile
+ * its generation capability is checked against.
+ *
+ * The settings page disables start/stop/recheck while any of these has an
+ * unsaved draft: the environment routes always read the persisted form, so
+ * acting on a draft would test a different configuration than the one on screen.
+ */
+export const ENVIRONMENT_CONFIG_KEYS: readonly string[] = [
+  'comfyEndpoint',
+  'comfyPorts',
+  'comfyModelsDir',
+  'comfyModel',
+]
+
+/** Whether a field changes which environment/capability a status read targets. */
+export function isEnvironmentField(key: string): boolean {
+  return ENVIRONMENT_CONFIG_KEYS.includes(key)
+}
 
 /** Whether a control belongs on the page. */
 export function isFieldVisible(key: string): boolean {
@@ -444,7 +471,7 @@ export const BACKEND_PERF_ADVISORY: SettingsAdvisory = {
     '盲测 5 题（同 prompt 同 seed）：base 3 : 2 turbo；单张 27–29 s → turbo 9–11 s。',
     'turbo 赢在高对比氛围（夜市、动物）；输在材质细节、中文小字与印章、古典构图。',
   ],
-  placedAfterGroup: 'steps',
+  placedAfterGroup: 'generation',
 }
 
 /**

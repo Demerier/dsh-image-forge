@@ -147,6 +147,10 @@ export interface EnvironmentStatus {
    * refusal is explained before it is clicked rather than after.
    */
   readonly ownershipNote?: string | null
+  /** True when a live launch record can be stopped after ownership verification. */
+  readonly canStop?: boolean
+  /** Why stop is unavailable even though a launch record exists. */
+  readonly stopBlockedReason?: string | null
   /** Wall clock spent in this call. */
   readonly elapsedMs: number
 }
@@ -537,7 +541,8 @@ async function readyStatus(
     waitedMs: extras.waitedMs,
     pid: extras.launchedPid ?? ownership.pid,
     owned: ownership.owned,
-    ...(ownership.owned || ownership.note === null ? {} : { ownershipNote: ownership.note }),
+    canStop: ownership.owned,
+    ...(ownership.owned || ownership.note === null ? {} : { ownershipNote: ownership.note, stopBlockedReason: ownership.note }),
     argvPreview: extras.argvPreview ?? ownership.argv,
     elapsedMs: nowOf(extras.deps)() - extras.startedAt,
   }
@@ -665,6 +670,8 @@ export async function ensureEnvironment(
       waitedMs: null,
       pid: previous.pid,
       owned: previous.owned,
+      canStop: previous.owned,
+      ...(previous.note === null ? {} : { stopBlockedReason: previous.note }),
       argvPreview: previous.argv ?? argvPreview,
       elapsedMs: nowOf(deps)() - startedAt,
     }
@@ -776,6 +783,7 @@ export async function ensureEnvironment(
   }
 
   const waitedMs = wait.waitedMs ?? null
+  const postWaitOwnership = ownershipOf(deps)
   const failed = wait.reason === 'exited'
   return {
     state: failed ? 'launch-failed' : 'timeout',
@@ -794,8 +802,10 @@ export async function ensureEnvironment(
     // The child is not answering, so it is not "owned and running": the record
     // stays (a retry or a stop can still use it) but the report must not claim a
     // live instance.
-    pid: launch.pid ?? null,
-    owned: false,
+    pid: postWaitOwnership.pid ?? launch.pid ?? null,
+    owned: postWaitOwnership.owned,
+    canStop: postWaitOwnership.owned,
+    ...(postWaitOwnership.owned || postWaitOwnership.note === null ? {} : { stopBlockedReason: postWaitOwnership.note }),
     argvPreview,
     elapsedMs: nowOf(deps)() - startedAt,
   }
