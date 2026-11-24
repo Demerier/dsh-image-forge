@@ -3,9 +3,12 @@
 ## 测试
 
 ```powershell
+pnpm typecheck
 pnpm build
 pnpm test
 ```
+
+`pnpm typecheck` 对 `src/**/*.ts` 与 tsdown 配置运行严格 TypeScript 检查且不产出文件；CI 与发布流程都会在构建前执行它。
 
 **32 个文件 / 651 个用例**（2026-11-24 计数），全部不需要 GPU、ComfyUI、comfy-mcp 或任何权重
 （ratio 14 / surface 13 / comfyui-e2e 31 / edit-e2e 8 / moss-edit 3 / settings 60 /
