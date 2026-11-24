@@ -13,7 +13,7 @@
  * half the product. Every tool below talks to `comfyui.ts` and nothing else.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
+import { defineTool, type InferValue, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
 import {
   comfyOptionsOf as buildComfyOptions,
   comfySystemStats,
@@ -63,7 +63,7 @@ import type { Config } from './index.ts'
  * policy (which profiles accept them, the auto negative set, the range) lives in
  * {@link resolveQualityTier}.
  */
-const QUALITY_PARAMETERS: ParameterSchemaSpec = {
+const QUALITY_PARAMETERS = {
   cfg: {
     type: 'number',
     description:
@@ -78,7 +78,7 @@ const QUALITY_PARAMETERS: ParameterSchemaSpec = {
       '省略而 cfg>1 时会自动补默认负向词集（含 "overly warm color temperature"，压黄偏移），结果里会标明来源；' +
       'cfg=1 时给负向词会被拒绝（否则会被静默忽略）。默认空 = 官方口径。',
   },
-}
+} satisfies ParameterSchemaSpec
 
 /**
  * The optional advanced-sampler knobs both image tools carry.
@@ -88,7 +88,7 @@ const QUALITY_PARAMETERS: ParameterSchemaSpec = {
  * values are ComfyUI-native only — see `NATIVE_SAMPLERS` — and the policy (which
  * profiles accept them) lives in {@link resolveSamplerOverrides}.
  */
-const SAMPLER_PARAMETERS: ParameterSchemaSpec = {
+const SAMPLER_PARAMETERS = {
   sampler: {
     type: 'string',
     enum: NATIVE_SAMPLERS,
@@ -107,10 +107,10 @@ const SAMPLER_PARAMETERS: ParameterSchemaSpec = {
       '没有严格对照；官方仍推荐 euler/simple。第三方节点包的调度器（RES4LYF 等）**不内置**。' +
       'turbo 与 moss-sft 会拒绝该参数。',
   },
-}
+} satisfies ParameterSchemaSpec
 
 /** The optional canvas-budget select both image tools carry. */
-const SIZE_TIER_PARAMETER: ParameterSchemaSpec['size_tier'] = {
+const SIZE_TIER_PARAMETER = {
   type: 'string',
   enum: SIZE_TIERS,
   description:
@@ -118,10 +118,10 @@ const SIZE_TIER_PARAMETER: ParameterSchemaSpec['size_tier'] = {
     '`2k`（官方模型卡 4.2MP 七档表，1:1 = 2048×2048，16:9 = 2752×1536）。' +
     '**画面里要出现文字时建议用 2k**（小字精度随分辨率提升）；2k 的像素约为默认档 2.8 倍，8GB 卡上显存与耗时风险明显。' +
     '显式 `width`/`height` 优先于本档；4K 不是一个档（官方明确 4K 丢提示词贴合度）。',
-}
+} satisfies ParameterSchemaSpec['size_tier']
 
 /** Everything `image_forge_generate` accepts, as one schema reused by validation. */
-const GENERATE_PARAMETERS: ParameterSchemaSpec = {
+const GENERATE_PARAMETERS = {
   prompt: {
     type: 'string',
     required: true,
@@ -183,10 +183,10 @@ const GENERATE_PARAMETERS: ParameterSchemaSpec = {
       '**省略就新建一个画板**（用提示词首行命名），结果里的 board.id 就是它；同一组图继续出图时把那个 id 传回来，' +
       '成果才会落在同一个画板里，而不是又开一个。',
   },
-}
+} satisfies ParameterSchemaSpec
 
 /** Everything `image_forge_edit` accepts. */
-const EDIT_PARAMETERS: ParameterSchemaSpec = {
+const EDIT_PARAMETERS = {
   prompt: {
     type: 'string',
     required: true,
@@ -259,7 +259,7 @@ const EDIT_PARAMETERS: ParameterSchemaSpec = {
       '画板 id 或名字。**省略就新建一个画板**；改图通常应落在参考图所在的那个画板里——' +
       '如果你知道上一次出图返回的 board.id，就把它传进来，新图和它的来源才会在同一块画布上连起来。',
   },
-}
+} satisfies ParameterSchemaSpec
 
 /** Coerce a caller value that the schema may hand over as a loose number. */
 function asInteger(value: number | undefined, label: string): number | undefined {
@@ -317,8 +317,9 @@ function validateCount(count: number | undefined): number {
  * @param value - the payload `execute` wants to return.
  * @returns the same shape with `undefined` replaced by `null`.
  */
-function jsonSafe<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value, (_key, inner) => (inner === undefined ? null : inner))) as T
+type ToolJson = InferValue<{ type: 'json' }>
+function jsonSafe(value: unknown): ToolJson {
+  return JSON.parse(JSON.stringify(value, (_key, inner) => (inner === undefined ? null : inner))) as ToolJson
 }
 
 /** Build the Markdown block the model can paste into its reply verbatim. */
@@ -884,7 +885,7 @@ export function resolveSamplerOverrides(
 }
 
 /** The tool-output blocks shared by generate and edit: summary, markdown, JSON. */
-function renderResultBlocks(value: { markdown?: string; summary?: string }): { type: 'text'; text: string }[] {
+function renderResultBlocks(value: unknown): { type: 'text'; text: string }[] {
   const payload = value as { markdown?: string; summary?: string }
   const blocks: { type: 'text'; text: string }[] = []
   if (typeof payload.summary === 'string') blocks.push({ type: 'text', text: payload.summary })

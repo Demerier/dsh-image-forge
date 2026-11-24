@@ -234,7 +234,7 @@ export async function commitSettingsDraft(
     const outcome = await saveField(form, change.key, change.unset ? undefined : change.value)
     onProgress?.(attempted.length, normalized.changes.length, change.key)
     if (!outcome.ok) {
-      if (outcome.reason === 'conflict') {
+      if ('reason' in outcome && outcome.reason === 'conflict') {
         return {
           status: 'conflict',
           changed: attempted.map((entry) => entry.key),

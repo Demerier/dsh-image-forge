@@ -302,7 +302,10 @@ const html = `<!doctype html>
                 <div class="dsh-forge-node-meta">1024×1536 · 1180 KB</div>
               </div>
             </div>
-            <div class="dsh-forge-canvas-foot">已选 1 张参考图，下一轮将是改图。</div>
+            <div class="dsh-forge-canvas-gesture-guide">
+              <span class="dsh-forge-canvas-gesture-copy">已选 1 张参考图，下一轮将按这些图改图</span>
+              <span class="dsh-forge-canvas-gesture-hint">空白拖动平移 · Shift 拖动框选</span>
+            </div>
           </div>
         </div>
       </div>

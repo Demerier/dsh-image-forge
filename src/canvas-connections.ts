@@ -424,8 +424,8 @@ export interface ConnectTargetItem {
  */
 export function connectMenuItems(): ConnectTargetItem[] {
   return [
-    { id: 'image', label: '图片生成', hint: '在这里放一个待生成的节点，左侧表单的参考图自动填成来源节点' },
-    { id: 'layout', label: '布局', hint: '建一个 MOSS 布局节点，血缘指向来源节点' },
-    { id: 'asset', label: '放入素材', hint: '从素材库挑一张放进画布，血缘指向来源节点；文件原地不动，不生成' },
+    { id: 'image', label: '图片生成', hint: '在这里放一个待生成的节点，当前图会作为第一张参考图' },
+    { id: 'layout', label: '布局', hint: '建一个 MOSS 布局节点，当前图会作为参考图' },
+    { id: 'asset', label: '放入素材', hint: '从素材库挑一张放进画布，当前图会作为参考图；文件原地不动，不生成' },
   ]
 }

@@ -221,6 +221,16 @@ export type StudioRatio = (typeof STUDIO_RATIOS)[number]
 
 /** Most reference images one Studio edit accepts. */
 export const STUDIO_MAX_REFERENCES = 10
+/** Official layout, or the explicitly experimental layout + reference graph. */
+export const STUDIO_LAYOUT_MODES = ['layout', 'layout-edit-experimental'] as const
+export type StudioLayoutMode = (typeof STUDIO_LAYOUT_MODES)[number]
+
+/** Whether the explicit MOSS layout + reference graph can run on this host. */
+export interface StudioLayoutExperimentalCapability {
+  readonly available: boolean
+  /** User-facing blocker; only present when {@link available} is false. */
+  readonly reason?: string
+}
 /** Most images one Studio generation may ask for. */
 export const STUDIO_MAX_COUNT = 4
 /** Longest prompt the Studio forwards, in characters. */
@@ -231,6 +241,38 @@ export const STUDIO_MAX_BODY_BYTES = 48 * 1024 * 1024
 export const STUDIO_MAX_LAYOUT_CHARS = 64 * 1024
 /** Most parent item ids one Studio request may carry. */
 export const STUDIO_MAX_PARENT_IDS = 32
+
+/** Browser-side notification that one board item write changed the file. */
+export const STUDIO_BOARD_CHANGE_EVENT = 'dsh-image-forge:board-change'
+export type StudioBoardChangeSource = 'canvas' | 'detail' | 'sidebar'
+
+export interface StudioBoardChange {
+  readonly boardId: string
+  readonly source: StudioBoardChangeSource
+}
+
+/** Notify other mounted workbench surfaces; no-op outside a browser. */
+export function notifyStudioBoardChange(boardId: string, source: StudioBoardChangeSource): void {
+  if (boardId.length === 0 || typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return
+  window.dispatchEvent(new CustomEvent<StudioBoardChange>(STUDIO_BOARD_CHANGE_EVENT, {
+    detail: { boardId, source },
+  }))
+}
+
+/** Subscribe to writes for one board and return the unsubscribe function. */
+export function subscribeStudioBoardChange(
+  boardId: string,
+  listener: (change: StudioBoardChange) => void,
+): () => void {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {}
+  const receive = (event: Event): void => {
+    const detail = (event as CustomEvent<StudioBoardChange>).detail
+    if (detail?.boardId !== boardId) return
+    listener(detail)
+  }
+  window.addEventListener(STUDIO_BOARD_CHANGE_EVENT, receive)
+  return () => { window.removeEventListener(STUDIO_BOARD_CHANGE_EVENT, receive) }
+}
 
 /** Aspect of every official ratio, kept beside {@link STUDIO_RATIOS}. */
 const STUDIO_RATIO_ASPECTS: ReadonlyArray<{ readonly ratio: StudioRatio; readonly aspect: number }> = [
@@ -311,6 +353,8 @@ export interface StudioConfigResponse {
   sizes: Array<{ ratio: StudioRatio; width: number; height: number }>
   /** Whether the conversation model is reachable for prompt optimisation. */
   optimizeAvailable: boolean
+  /** Preflight result for the opt-in MOSS layout + reference path. */
+  layoutExperimental?: StudioLayoutExperimentalCapability
   /** Model the optimiser would use, e.g. `deepseek-chat`; absent when unavailable. */
   optimizeModel?: string
   /**
@@ -503,8 +547,13 @@ export interface StudioReferencePayload {
 export interface StudioGenerateRequest {
   /** Finished prompt text, forwarded verbatim to ComfyUI. */
   prompt: string
-  /** Canvas ratio; the host resolves it to 32-aligned pixels. */
+  /** Canvas ratio; metadata when width/height are supplied, otherwise the size source. */
   ratio: string
+  /** Explicit canvas size; both must be present, 16-aligned and within bounds. */
+  width?: number
+  height?: number
+  /** Layout runs only: official layout or the experimental reference overlay. */
+  layoutMode?: StudioLayoutMode
   /** Sampler steps, clamped by the host to a sane range. */
   steps?: number
   /** Deterministic seed; omitted means random and is reported back. */
@@ -604,6 +653,8 @@ export interface StudioGenerateResponse {
   endpoint: string
   /** `generate` for a fresh draw, `edit` when references were supplied. */
   mode: 'generate' | 'edit'
+  /** Present when the run was conditioned by a MOSS layout. */
+  layoutMode?: StudioLayoutMode
   /**
    * True when the run asked for the **turbo** variant but the base weights ran
    * instead, because no distilled checkpoint is installed.
@@ -733,6 +784,9 @@ export interface BoardLayoutDraft {
 export interface BoardTaskParams {
   prompt: string
   ratio?: string
+  width?: number
+  height?: number
+  layoutMode?: StudioLayoutMode
   steps?: number
   count?: number
   seed?: number
@@ -798,6 +852,8 @@ export interface BoardItem {
    * reference is what the run would send.
    */
   references?: string[]
+  /** A layout item's mode, or a generated picture's layout provenance. */
+  layoutMode?: StudioLayoutMode
   /** `kind:'task'` only: the terminal state and the request to retry. */
   task?: BoardTaskInfo
 }
@@ -874,6 +930,10 @@ export interface StudioBoardRequest {
   y?: number
   /** Canvas parents of a saved task/layout node, as board item ids. */
   parents?: string[]
+  /** Picture ids held by a layout node, in connection order. */
+  references?: string[]
+  /** Generation mode stored on a layout node. */
+  layoutMode?: StudioLayoutMode
   /** Terminal state to store, for `save-task` (§4.6: only failed/interrupted). */
   task?: BoardTaskInfo
   /** Draft to store, for `save-layout-node`. */

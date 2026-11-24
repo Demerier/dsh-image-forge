@@ -60,13 +60,19 @@ import {
 } from 'react'
 import {
   STUDIO_BOARD_ROUTE,
+  STUDIO_CONFIG_ROUTE,
   STUDIO_LAYOUT_RATIO_TOLERANCE,
   STUDIO_MAX_LAYOUT_CHARS,
+  STUDIO_MAX_REFERENCES,
   fitStudioRatio,
+  notifyStudioBoardChange,
   studioFileUrl,
   type BoardDetail,
   type BoardItem,
   type BoardLayoutDraft,
+  type StudioConfigResponse,
+  type StudioLayoutExperimentalCapability,
+  type StudioLayoutMode,
   type BoardTaskParams,
 } from './studio-shared.ts'
 import {
@@ -331,14 +337,26 @@ export type LayoutGeneratePlan =
   | { readonly ok: true; readonly params: BoardTaskParams }
   | { readonly ok: false; readonly reason: string }
 
-export function layoutGeneratePlan(draft: BoardLayoutDraft | undefined, referenceCount = 0): LayoutGeneratePlan {
+export function layoutGeneratePlan(
+  draft: BoardLayoutDraft | undefined,
+  referenceCount = 0,
+  layoutMode: StudioLayoutMode = 'layout',
+  layoutExperimental?: StudioLayoutExperimentalCapability,
+): LayoutGeneratePlan {
   if (draft === undefined) return { ok: false, reason: '草稿缺失：这个布局节点没有可生成的内容。' }
-  if (referenceCount > 0) {
-    return {
-      ok: false,
-      reason: '这个布局节点接着 ' + String(referenceCount) + ' 张参考图，但 MOSS 的布局通路（compiled JSON 当正向编码文本）' +
-        '没有参考图输入槽——布局 + 参考图改图的叠加行为官方未定义。请断开参考图，或复制一张图用「用作参考」单独改图。',
-    }
+  if (layoutMode === 'layout-edit-experimental' && referenceCount === 0) {
+    return { ok: false, reason: '实验性 Layout + 参考图至少需要一张参考图。' }
+  }
+  if (layoutMode === 'layout-edit-experimental' && layoutExperimental?.available === false) {
+    return { ok: false, reason: `实验叠加不可用：${layoutExperimental.reason ?? '当前环境不满足要求'}` }
+  }
+  if (referenceCount > STUDIO_MAX_REFERENCES) {
+    return { ok: false, reason: `布局节点最多支持 ${String(STUDIO_MAX_REFERENCES)} 张参考图。` }
+  }
+  if (!Number.isInteger(draft.width) || !Number.isInteger(draft.height)
+    || draft.width < 256 || draft.height < 256 || draft.width > 4096 || draft.height > 4096
+    || draft.width % 16 !== 0 || draft.height % 16 !== 0) {
+    return { ok: false, reason: '布局草稿宽高必须是 256–4096 之间且能被 16 整除的整数。' }
   }
   if (!Array.isArray(draft.items) || draft.items.length === 0) {
     return { ok: false, reason: '布局至少需要一个画框：先在内嵌编辑器里拖出一个框，再生成。' }
@@ -373,7 +391,15 @@ export function layoutGeneratePlan(draft: BoardLayoutDraft | undefined, referenc
   }
   return {
     ok: true,
-    params: { prompt: caption, ratio: fit.ratio, count: 1, layout: compiled },
+    params: {
+      prompt: caption,
+      ratio: fit.ratio,
+      width: draft.width,
+      height: draft.height,
+      count: 1,
+      layout: compiled,
+      layoutMode,
+    },
   }
 }
 
@@ -580,6 +606,17 @@ async function postBoardRoute(body: Record<string, unknown>): Promise<{ error?: 
  * another component's state. A tab therefore always shows what the *file* says,
  * which is also what makes "edit here, go back, see it there" true.
  */
+async function readStudioLayoutCapability(): Promise<StudioLayoutExperimentalCapability | undefined> {
+  try {
+    const response = await fetch(STUDIO_CONFIG_ROUTE, { credentials: 'same-origin' })
+    const payload = await readJsonBody(response)
+    if (!response.ok || payload === undefined) return undefined
+    return (payload as unknown as StudioConfigResponse).layoutExperimental
+  } catch {
+    return undefined
+  }
+}
+
 async function readBoardDetail(boardId: string): Promise<{ detail?: BoardDetail; error?: string }> {
   try {
     const response = await fetch(`${STUDIO_BOARD_ROUTE}?board=${encodeURIComponent(boardId)}`, {
@@ -718,6 +755,9 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null)
   const [boxEditorOpen, setBoxEditorOpen] = useState(false)
   const [boxFloat, setBoxFloat] = useState({ x: 16, y: 16 })
+  const [layoutMode, setLayoutMode] = useState<StudioLayoutMode>('layout')
+  const layoutModeRef = useRef<StudioLayoutMode>('layout')
+  const [layoutExperimental, setLayoutExperimental] = useState<StudioLayoutExperimentalCapability | undefined>(undefined)
   const boxFloatDragRef = useRef<{ readonly startX: number; readonly startY: number; readonly originX: number; readonly originY: number } | undefined>(undefined)
   const canvasPaneRef = useRef<HTMLDivElement | null>(null)
 
@@ -727,11 +767,18 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     [detail, props.itemId],
   )
 
-  const backgroundReference = useMemo(() => {
-    const references = row !== undefined && 'references' in row ? row.references : undefined
-    const id = Array.isArray(references) ? references[0] : undefined
-    if (typeof id !== 'string' || id.length === 0) return undefined
-    return detail?.items.find((entry) => entry.id === id)
+  const layoutReferences = useMemo(() => {
+    const ids = row !== undefined && 'references' in row && Array.isArray(row.references) ? row.references : []
+    return ids.flatMap((id, index) => {
+      const item = detail?.items.find((entry) => entry.id === id)
+      if (item === undefined || (item.kind !== undefined && item.kind !== 'image')) return []
+      return [{
+        id,
+        number: index + 1,
+        name: item.path.split(/[\\/]/).pop() ?? `参考图 ${String(index + 1)}`,
+        imageUrl: studioFileUrl(item.markdownPath),
+      }]
+    })
   }, [detail, row])
 
   /* ---- read the node (§8.1: one board read per mount) -------------------- */
@@ -760,12 +807,24 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
         savedRef.current = item.draft
         setHistory(EMPTY_DRAFT_HISTORY)
         setNote(undefined)
+        setLayoutMode(item.layoutMode ?? 'layout')
+        layoutModeRef.current = item.layoutMode ?? 'layout'
       }
     })()
     return () => {
       cancelled = true
     }
   }, [props.boardId, props.itemId, reloadToken])
+
+  /* ---- capability preflight for the opt-in layout overlay --------------- */
+  useEffect(() => {
+    if (props.kind !== 'layout') return
+    let cancelled = false
+    void readStudioLayoutCapability().then((capability) => {
+      if (!cancelled) setLayoutExperimental(capability)
+    })
+    return () => { cancelled = true }
+  }, [props.kind, reloadToken])
 
   /* ---- tell the strip what this tab is about (§8.2 titles) --------------- */
   useEffect(() => {
@@ -792,7 +851,9 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
       w: write.w,
       h: write.h,
       draft: write.draft,
+      layoutMode: layoutModeRef.current,
       ...(item.parents.length === 0 ? {} : { parents: [...item.parents] }),
+      ...(item.references === undefined || item.references.length === 0 ? {} : { references: [...item.references] }),
     })
     if (after.error !== undefined) {
       setSaveError(after.error)
@@ -801,6 +862,7 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     setSaveError(undefined)
     setSavedDraft(next)
     savedRef.current = next
+    notifyStudioBoardChange(latest.current.boardId, 'detail')
     return true
   }, [])
 
@@ -888,7 +950,6 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
       editor = mountLayoutEditor(host, {
         draft: initial as unknown as LayoutDraft,
         canvasOnly: true,
-        ...(backgroundReference === undefined ? {} : { backgroundImageUrl: studioFileUrl(backgroundReference.markdownPath) }),
         // `pointerScale` stays at its default: a tab has no zoomed ancestor, and
         // the editor measures its own box, so passing a scale would double it.
         onChange: (state: LayoutEditorState) => { handlersRef.current.submitEdit(state) },
@@ -913,7 +974,7 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
         // A destroy failure must never run as an unhandled throw during unmount.
       }
     }
-  }, [backgroundReference, openBoxEditor, props.boardId, props.itemId, readyForEditor])
+  }, [openBoxEditor, props.boardId, props.itemId, readyForEditor])
 
   // 撤销 (and a re-read) replaces the draft object; mirror it into the live
   // editor, exactly as the canvas's own mount does.
@@ -949,6 +1010,44 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
     const next = mutate(editor.getState())
     editor.setState(next)
     handlersRef.current.submitEdit(next)
+  }
+
+  /** Remove one picture reference; references are pointers, not file copies. */
+  const removeLayoutReference = (id: string): void => {
+    const item = itemRef.current
+    if (item === undefined || item.kind !== 'layout') return
+    const references = (item.references ?? []).filter((entry) => entry !== id)
+    const nextItem: BoardItem = { ...item, references }
+    itemRef.current = nextItem
+    setDetail((current) => current === undefined
+      ? current
+      : { ...current, items: current.items.map((entry) => (entry.id === item.id ? nextItem : entry)) })
+    void persistNow(draftRef.current as BoardLayoutDraft)
+  }
+
+  /** Toggle the per-node experimental overlay and persist it with the draft. */
+  const toggleLayoutMode = (): void => {
+    const item = itemRef.current
+    if (item === undefined || item.kind !== 'layout') return
+    const nextMode: StudioLayoutMode = layoutModeRef.current === 'layout-edit-experimental'
+      ? 'layout'
+      : 'layout-edit-experimental'
+    if (nextMode === 'layout-edit-experimental' && (item.references?.length ?? 0) === 0) {
+      setNote('实验性 Layout + 参考图至少需要一张参考图。')
+      return
+    }
+    if (nextMode === 'layout-edit-experimental' && layoutExperimental?.available === false) {
+      setNote(`实验叠加不可用：${layoutExperimental.reason ?? '当前环境不满足要求'}`)
+      return
+    }
+    layoutModeRef.current = nextMode
+    setLayoutMode(nextMode)
+    const nextItem: BoardItem = { ...item, layoutMode: nextMode }
+    itemRef.current = nextItem
+    setDetail((current) => current === undefined
+      ? current
+      : { ...current, items: current.items.map((entry) => (entry.id === item.id ? nextItem : entry)) })
+    void persistNow(draftRef.current as BoardLayoutDraft)
   }
 
   const layoutBoxes = useMemo(
@@ -1060,7 +1159,10 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
   }
 
   /* ---- what the kind's view is ------------------------------------------- */
-  const plan = useMemo(() => layoutGeneratePlan(draft), [draft])
+  const plan = useMemo(
+    () => layoutGeneratePlan(draft, layoutReferences.length, layoutMode, layoutExperimental),
+    [draft, layoutReferences.length, layoutMode, layoutExperimental],
+  )
   const summary = useMemo(() => layoutDetailSummary(draft), [draft])
 
   const head = createElement('div', { className: 'dsh-forge-detail-head' }, [
@@ -1114,7 +1216,7 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
   } else if (view === 'unknown') {
     body = noticeCard(NODE_DETAIL_UNKNOWN_COPY, closePane)
   } else if (view === 'layout') {
-    if (row.kind !== 'layout' || row.draft === undefined) {
+    if (row.kind !== 'layout' || row.draft === undefined || draft === undefined) {
       body = noticeCard(NODE_DETAIL_UNKNOWN_COPY, closePane, () => { setReloadToken((current) => current + 1) })
     } else {
       const railSection = (key: string, title: string, children: ReactNode[], collapsed = false): ReactNode => createElement(
@@ -1258,6 +1360,29 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
             }),
           ),
         ]),
+        railSection('mode', '生成模式', [
+          createElement('div', { key: 'mode', className: 'dsh-forge-layout-mode-settings' }, [
+            createElement('span', { key: 'mode-label', className: 'dsh-forge-detail-copy' },
+              layoutMode === 'layout-edit-experimental' ? 'Layout + 参考图（实验）' : '官方纯 Layout'),
+            createElement('button', {
+              key: 'mode-toggle',
+              type: 'button',
+              className: layoutMode === 'layout-edit-experimental'
+                ? 'dsh-forge-btn is-primary'
+                : 'dsh-forge-btn',
+              onClick: toggleLayoutMode,
+              disabled: (layoutMode === 'layout' && layoutReferences.length === 0) || layoutExperimental?.available === false,
+              title: layoutExperimental?.available === false
+                ? `实验叠加不可用：${layoutExperimental.reason ?? '当前环境不满足要求'}`
+                : layoutReferences.length === 0
+                  ? '至少连接一张参考图后才能开启实验叠加'
+                  : '切换实验性 Layout + 参考图',
+            }, layoutMode === 'layout-edit-experimental' ? '切回纯 Layout' : '开启实验叠加'),
+          ]),
+          layoutExperimental?.available === false
+            ? createElement('p', { key: 'mode-reason', className: 'dsh-forge-detail-copy', 'data-layout-experimental-reason': 'true' }, layoutExperimental.reason)
+            : null,
+        ]),
         railSection('canvas', '画布与画幅', [
           createElement('div', { key: 'size', className: 'dsh-forge-layout-size-row' },
             createElement('input', {
@@ -1350,14 +1475,27 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
               )),
           ),
         ]),
-        backgroundReference === undefined
-          ? null
-          : railSection('background', '背景参考', [
-            createElement('div', { key: 'bg', className: 'dsh-forge-layout-reference' },
-              createElement('img', { src: studioFileUrl(backgroundReference.markdownPath), alt: '布局背景参考' }),
-              createElement('span', {}, backgroundReference.prompt || backgroundReference.markdownPath),
-            ),
-          ], true),
+        railSection('references', `参考图（${String(layoutReferences.length)}/${String(STUDIO_MAX_REFERENCES)}）`, [
+          layoutReferences.length === 0
+            ? createElement('p', { key: 'empty', className: 'dsh-forge-detail-copy' }, '在画布上把图片连到布局节点后，这里会显示参考图；参考图不参与官方纯 Layout。')
+            : createElement('div', { key: 'list', className: 'dsh-forge-layout-reference-list' },
+                ...layoutReferences.map((reference) => createElement('div', {
+                  key: reference.id,
+                  className: 'dsh-forge-layout-reference-row',
+                  'data-layout-reference': reference.id,
+                }, [
+                  createElement('span', { key: 'number', className: 'dsh-forge-layout-reference-number' }, String(reference.number)),
+                  createElement('img', { key: 'image', src: reference.imageUrl, alt: reference.name }),
+                  createElement('span', { key: 'name', className: 'dsh-forge-layout-reference-name' }, reference.name),
+                  createElement('button', {
+                    key: 'remove',
+                    type: 'button',
+                    className: 'dsh-forge-layout-reference-remove',
+                    'aria-label': `移除参考图 ${reference.name}`,
+                    onClick: () => { removeLayoutReference(reference.id) },
+                  }, '移除'),
+                ]))),
+        ]),
       ])
       body = createElement('div', { className: 'dsh-forge-layout-workspace' }, canvasPane, rail)
     }
@@ -1397,6 +1535,8 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
           factRow('张数', String(task.params.count ?? 1), 'count'),
           factRow('种子', typeof task.params.seed === 'number' ? String(task.params.seed) : '—', 'seed'),
           factRow('布局参数', task.params.layout === undefined ? '—' : `${String(task.params.layout.length)} 字符`, 'layout'),
+          factRow('布局模式', task.params.layoutMode === 'layout-edit-experimental' ? 'Layout + 参考图（实验）' : '官方 Layout', 'layout-mode'),
+          factRow('画布尺寸', task.params.width === undefined || task.params.height === undefined ? '—' : `${String(task.params.width)}×${String(task.params.height)}`, 'layout-size'),
           factRow('失败原因', task.error ?? '—', 'error'),
         ),
       ])
@@ -1438,7 +1578,11 @@ export function NodeDetailPane(props: NodeDetailPaneProps): ReactNode {
       action: 'intent',
       label: view === 'layout' ? '生成' : view === 'image' ? '按这张继续' : '重试',
       title: view === 'layout'
-        ? (plan.ok ? '把 compiled 布局作为 MOSS 的正向编码文本提交（回到画布执行）' : plan.reason)
+        ? (plan.ok
+            ? (layoutMode === 'layout-edit-experimental'
+                ? '提交实验性 Layout + 参考图；失败不会回退纯 Layout'
+                : '把 compiled 布局作为 MOSS 的正向编码文本提交')
+            : ('reason' in plan ? plan.reason : '布局参数不完整。'))
         : view === 'image'
           ? '回到画布，建一个以这张图为参考的待生成节点'
           : '回到画布，用同一份参数原地重跑',

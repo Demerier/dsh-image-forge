@@ -39,6 +39,7 @@ import {
   generateViaComfyUiTurboEdit,
   loadComfyModels,
   parseComfyPorts,
+  probeMossLayoutEditCapability,
   TURBO_STEPS,
   type LayoutOverride,
   type ComfyModels,
@@ -62,11 +63,15 @@ import type { Config } from './index.ts'
 import {
   STUDIO_MAX_COUNT,
   STUDIO_MAX_PROMPT_CHARS,
+  STUDIO_LAYOUT_RATIO_TOLERANCE,
   STUDIO_MAX_REFERENCES,
+  fitStudioRatio,
   type BoardSummary,
   type StudioConfigResponse,
   type StudioGenerateRequest,
   type StudioGenerateResponse,
+  type StudioLayoutExperimentalCapability,
+  type StudioLayoutMode,
   type StudioRatio,
   type StudioReferencePayload,
 } from './studio-shared.ts'
@@ -235,12 +240,19 @@ export async function describeStudio(
   let endpoint: string | undefined
   let models: ComfyModels | undefined
   let reason: string | undefined
+  let layoutExperimental: StudioLayoutExperimentalCapability = {
+    available: false,
+    reason: 'ComfyUI 尚未就绪，无法检测 Layout + 参考图所需的 MOSS 编辑能力。',
+  }
   try {
     const target = await discoverComfyUi(comfyOptionsOf(settings, Math.min(settings.timeoutMs, 15_000)), signal)
     const resolved = await loadComfyModels(target, comfyOptionsOf(settings, Math.min(settings.timeoutMs, 20_000)), signal)
     endpoint = target.endpoint
     models = resolved
     ready = true
+    layoutExperimental = resolveProfile(settings.comfyModel).family === 'moss-image'
+      ? await probeMossLayoutEditCapability(target, resolved, comfyOptionsOf(settings, Math.min(settings.timeoutMs, 20_000)), signal)
+      : { available: false, reason: '当前模型不是 moss-sft；实验性 Layout + 参考图仅支持 MOSS-Image。' }
   } catch (error) {
     reason = error instanceof Error ? error.message : String(error)
   }
@@ -279,7 +291,8 @@ export async function describeStudio(
     outputDir: settings.outputDir,
     sizes,
     optimizeAvailable,
-    ...(resolution.ok ? { optimizeModel: resolution.model } : { optimizeNote: `[${resolution.stage}] ${resolution.detail}` }),
+    layoutExperimental,
+    ...('model' in resolution ? { optimizeModel: resolution.model } : { optimizeNote: `[${resolution.stage}] ${resolution.detail}` }),
     boards,
     activeBoard: active,
     ...(boardsNote === undefined ? {} : { boardsNote }),
@@ -338,6 +351,26 @@ function referencePayloads(references: readonly StudioReferencePayload[] | undef
 /** Name prefix for the files one run writes; keeps Studio output distinguishable. */
 function outputPrefix(referenceCount: number): string {
   return referenceCount > 0 ? 'studio-edit' : 'studio'
+}
+
+/** Resolve an exact request size, refusing a half-specified or unaligned pair. */
+function requestedSize(input: StudioGenerateRequest): { width: number; height: number; ratio: StudioRatio } {
+  if (input.width === undefined && input.height === undefined) {
+    const size = studioSize(input.ratio)
+    if (size === undefined) throw new Error(`不支持的画幅比例：${String(input.ratio)}`)
+    return size
+  }
+  if (input.width === undefined || input.height === undefined) throw new Error('width 和 height 必须成对提供')
+  const width = input.width
+  const height = input.height
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 256 || height < 256 || width > 4096 || height > 4096 || width % 16 !== 0 || height % 16 !== 0) {
+    throw new Error('画布尺寸必须是 256–4096 之间且能被 16 整除的整数')
+  }
+  const fit = fitStudioRatio(width, height)
+  if (fit === undefined || fit.ratio !== input.ratio || fit.deviation > STUDIO_LAYOUT_RATIO_TOLERANCE) {
+    throw new Error(`画布尺寸 ${String(width)}×${String(height)} 与画幅 ${String(input.ratio)} 不匹配`)
+  }
+  return { width, height, ratio: fit.ratio }
 }
 
 /**
@@ -422,8 +455,7 @@ export async function runStudioGeneration(
   if (prompt.length > STUDIO_MAX_PROMPT_CHARS) {
     throw new Error(`提示词最多 ${String(STUDIO_MAX_PROMPT_CHARS)} 个字符`)
   }
-  const size = studioSize(input.ratio)
-  if (size === undefined) throw new Error(`不支持的画幅比例：${String(input.ratio)}`)
+  const size = requestedSize(input)
   // Resolved here so a bogus request never costs a ComfyUI round trip, then
   // re-resolved below against the profile that really runs — that is the value
   // that goes on the wire and into the response.
@@ -435,21 +467,17 @@ export async function runStudioGeneration(
   const seed = input.seed === undefined || !Number.isFinite(input.seed)
     ? Math.floor(Math.random() * 2 ** 31)
     : Math.trunc(input.seed)
-  const references = referencePayloads(input.references)
-  const mode: 'generate' | 'edit' = references.length > 0 ? 'edit' : 'generate'
-
-  // C14/T21: layout is MOSS-only, never combines with references, and is
-  // validated here as well as at the route/tool boundary so a direct caller of
-  // this function gets the named reason before any backend work. The adapter
-  // parses it a third time at graph-build time — defence in depth for a value
-  // that changes what the model is conditioned on.
   const layout = typeof input.layout === 'string' ? input.layout : undefined
+  const layoutMode: StudioLayoutMode | undefined = layout === undefined ? undefined : (input.layoutMode ?? 'layout')
+  if (layout === undefined && input.layoutMode !== undefined) throw new Error('layoutMode 只能和 layout 一起使用')
+  const experimentalLayout = layout !== undefined && layoutMode === 'layout-edit-experimental'
+  if (experimentalLayout && (input.references === undefined || input.references.length === 0)) {
+    throw new Error('实验性 Layout + 参考图至少需要一张参考图')
+  }
+  const runReferences = layout === undefined || experimentalLayout ? (input.references ?? []) : []
+  const references = referencePayloads(runReferences)
+  const mode: 'generate' | 'edit' = references.length > 0 ? 'edit' : 'generate'
   if (layout !== undefined) {
-    if (mode === 'edit') {
-      throw new Error(
-        '布局（layout）只支持 MOSS 文生图；布局 + 参考图改图的叠加行为未定义（T21 边界），请去掉参考图或 layout。',
-      )
-    }
     const requestedLayoutProfile = resolveProfile(settings.comfyModel)
     if (requestedLayoutProfile.layoutTemplate === undefined) {
       throw new Error(
@@ -516,6 +544,10 @@ export async function runStudioGeneration(
     // base run reports false.
     const requestedProfile = resolveProfile(settings.comfyModel)
     const profile = effectiveProfile(settings.comfyModel, models)
+    if (experimentalLayout) {
+      const capability = await probeMossLayoutEditCapability(target, models, submitOptions, signal)
+      if (!capability.available) throw new Error(`实验性 Layout + 参考图不可用：${capability.reason ?? '未知原因'}`)
+    }
     const turbo = profile.variant === 'turbo'
     turboFallback = requestedProfile.variant === 'turbo' && !turbo
     steps = resolveStudioSteps(settings, input.steps, profile)
@@ -535,6 +567,7 @@ export async function runStudioGeneration(
           steps,
           seed,
           images: references,
+          ...(experimentalLayout && layout !== undefined ? { layout } : {}),
         },
         submitOptions,
         signal,
@@ -584,6 +617,7 @@ export async function runStudioGeneration(
       seed,
       mode,
       backend: 'studio',
+      ...(layoutMode === undefined ? {} : { layoutMode }),
       // Lineage travels as *paths*, never as ids (`boards.resolveParents`): the
       // canvas knows its references only as files this host already wrote, and
       // the item id is decided inside the board write lock, where the board is
@@ -592,7 +626,7 @@ export async function runStudioGeneration(
       // this edge used to be lost on every reload. References without a path
       // (base64 uploads) are not board items and so contribute no edge, exactly
       // like the conversation tool path.
-      parentPaths: (input.references ?? []).flatMap((reference) => (
+      parentPaths: (runReferences ?? []).flatMap((reference) => (
         typeof reference.path === 'string' && reference.path.length > 0 ? [reference.path] : []
       )),
       // C14: the canvas knows its lineage as board item ids — including a layout
@@ -632,6 +666,7 @@ export async function runStudioGeneration(
     endpoint: target.endpoint,
     mode,
     turboFallback,
+    ...(layoutMode === undefined ? {} : { layoutMode }),
     ...(board === undefined ? {} : { board }),
     ...(boardNote === undefined ? {} : { boardNote }),
   }

@@ -70,7 +70,9 @@ import {
   type ChangeEvent,
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ComponentType,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from 'react'
 import {
   CANVAS_NODE_HEIGHT,
@@ -207,7 +209,9 @@ import {
   STUDIO_RATIOS,
   firstLine,
   formatBytes,
+  notifyStudioBoardChange,
   stepperStepsOf,
+  subscribeStudioBoardChange,
   studioFileUrl,
   type BoardDetail,
   type BoardItem,
@@ -223,12 +227,26 @@ import {
   type StudioGenerateResponse,
   type StudioImage,
   type StudioImportResponse,
+  type StudioLayoutMode,
   type StudioOptimizeResponse,
   type StudioPromptStyle,
   type StudioProgressEvent,
   type StudioReferencePayload,
 } from './studio-shared.ts'
 import { refreshStudioEnvironment, runStudioEnvironmentAction, setEnvironmentClientError, useEnvironmentClient } from './environment-client.ts'
+import {
+  DEFAULT_SIZE_TIER,
+  SIZE_TIERS,
+  sizesForTier,
+  type SizeTier,
+  type WhRatio,
+} from './ratio.ts'
+import {
+  applyMention,
+  filterMentionCandidates,
+  mentionRangeAt,
+  type MentionCandidate,
+} from './studio-mentions.ts'
 
 /** One reference image held in the form, with its preview URL and wire payload. */
 interface HeldReference {
@@ -270,6 +288,8 @@ interface ImageCanvasNode extends CanvasNodeBase {
   readonly batchId: string
   /** Prompt that produced the picture; absent for an imported file. */
   readonly prompt?: string
+  /** MOSS layout provenance carried through the task that produced it. */
+  readonly layoutMode?: StudioLayoutMode
 }
 
 /**
@@ -293,15 +313,15 @@ interface LayoutCanvasNode extends CanvasNodeBase {
   readonly w: number
   readonly h: number
   readonly draft: BoardLayoutDraft
+  readonly layoutMode: StudioLayoutMode
   /**
    * Pictures wired into this draft.
    *
    * The canvas wire from a picture already lands on a *draft* node as held
    * references; a layout is the other input-taking kind, so it keeps them the
-   * same way. What the run does with them is `layoutGeneratePlan`'s business —
-   * today the MOSS layout graph has no reference slots, so the node reports the
-   * count and the generation refuses the combination by name instead of
-   * pretending the wire did something.
+   * same way. Official Layout ignores them; the explicit experimental mode
+   * wires them into the MOSS edit graph. `layoutGeneratePlan` owns that split,
+   * so the canvas and detail page cannot disagree.
    */
   readonly references?: readonly HeldReference[]
 }
@@ -576,10 +596,8 @@ function canvasMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
 }
 
 /** Small stroke icons for the grouped canvas dock. */
-function toolIcon(kind: 'select' | 'hand' | 'image' | 'layout'): ReturnType<typeof createElement> {
+function toolIcon(kind: 'image' | 'layout'): ReturnType<typeof createElement> {
   const paths: Readonly<Record<typeof kind, readonly string[]>> = {
-    select: ['M5 3l7 16 2.2-6.2L20 11z'],
-    hand: ['M8 11V6.5a1.5 1.5 0 0 1 3 0V10', 'M11 10V5.5a1.5 1.5 0 0 1 3 0V10', 'M14 10V6.5a1.5 1.5 0 0 1 3 0V11', 'M17 11V8.5a1.5 1.5 0 0 1 3 0v6.2c0 3.4-2.4 6.3-6.2 6.3H12c-2 0-3.4-.8-4.8-2.3L4.4 15a1.7 1.7 0 0 1 2.4-2.4L9 15'],
     image: ['M4 5h16v14H4z', 'M8 10a1.5 1.5 0 1 0 0.01 0', 'M4 16l5-5 4 4 2-2 5 5'],
     layout: ['M4 4h7v7H4z', 'M13 4h7v4h-7z', 'M13 10h7v10h-7z', 'M4 13h7v7H4z'],
   }
@@ -717,6 +735,7 @@ function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
         w: width,
         h: item.h ?? layoutNodeHeight(width, draft),
         draft,
+        layoutMode: item.layoutMode ?? 'layout',
         ...referencesFromIds(item.references, items),
       })
       return
@@ -753,6 +772,7 @@ function nodesFromBoard(items: readonly BoardItem[]): CanvasNode[] {
       },
       batchId: item.batchId,
       ...(item.prompt.length === 0 ? {} : { prompt: item.prompt }),
+      ...(item.layoutMode === undefined ? {} : { layoutMode: item.layoutMode }),
       x: item.x ?? spot.x,
       y: item.y ?? spot.y,
       parents: item.parents,
@@ -949,7 +969,7 @@ async function postBoard(body: Record<string, unknown>): Promise<string | undefi
  * just happened.
  */
 async function postEnvironment(
-  action: 'status' | 'start' | 'stop',
+  action: 'status' | 'start' | 'stop' | 'download',
   options: {
     /** `download` only: run for real instead of the dry-run plan. */
     readonly confirm?: boolean
@@ -1609,7 +1629,11 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   /** True while the running pass is the real download (not the dry-run plan). */
   const [weightsGoal, setWeightsGoal] = useState(false)
   const [prompt, setPrompt] = useState('')
+  const [promptCaret, setPromptCaret] = useState(0)
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const [mentionDismissed, setMentionDismissed] = useState(false)
   const [ratio, setRatio] = useState<string>('1:1')
+  const [sizeTier, setSizeTier] = useState<SizeTier>(DEFAULT_SIZE_TIER)
   const [steps, setSteps] = useState<string>('')
   const [count, setCount] = useState(1)
   const [references, setReferences] = useState<HeldReference[]>([])
@@ -1774,37 +1798,36 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   // pointer-down and in state only for the cursor affordance (§6.3, §6.6).
   const panRef = useRef(false)
   const [panHeld, setPanHeld] = useState(false)
-  // The third pan entry (§6.6 keeps three): a toolbar toggle for users who would
-  // rather not hold a key at all. It is sticky, unlike Space.
-  const [handMode, setHandMode] = useState(false)
-  // The dock is a two-state pointer surface: open on enter, close immediately
-  // on leave, and make it non-hit-testable for the whole closing transition.
-  // Otherwise the shrinking geometry stays under the pointer and fires a new
-  // pointerenter, which shows up as an expansion/collapse flicker.
+
+  // The dock uses a short close grace period instead of a pointer-events lock.
+  // A quick pass across the rail should not flash the whole drawer, and moving
+  // back while it is shrinking must still cancel the close. Keeping the dock
+  // hit-testable during the transition is what makes that reversal possible.
   const [toolDockOpen, setToolDockOpen] = useState(false)
-  const [toolDockClosing, setToolDockClosing] = useState(false)
-  const toolDockClosingRef = useRef(false)
+  const toolDockCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const clearToolDockClose = (): void => {
+    if (toolDockCloseTimer.current === undefined) return
+    clearTimeout(toolDockCloseTimer.current)
+    toolDockCloseTimer.current = undefined
+  }
   const openToolDock = (): void => {
-    if (toolDockClosingRef.current) return
+    clearToolDockClose()
     setToolDockOpen(true)
   }
   const closeToolDock = (event?: { currentTarget: EventTarget }): void => {
-    if (!toolDockOpen || toolDockClosingRef.current) return
     const active = typeof document === 'undefined' ? null : document.activeElement
     if (active !== null && event?.currentTarget instanceof Node && event.currentTarget.contains(active)) return
-    toolDockClosingRef.current = true
-    setToolDockClosing(true)
-    setToolDockOpen(false)
+    clearToolDockClose()
+    toolDockCloseTimer.current = setTimeout(() => {
+      toolDockCloseTimer.current = undefined
+      setToolDockOpen(false)
+    }, 160)
   }
   const closeToolDockOnBlur = (event: { currentTarget: HTMLDivElement; relatedTarget: EventTarget | null }): void => {
     if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
     closeToolDock(event)
   }
-  const finishToolDockClose = (event: { target: EventTarget; currentTarget: EventTarget; propertyName: string }): void => {
-    if (event.target !== event.currentTarget || event.propertyName !== 'width') return
-    toolDockClosingRef.current = false
-    setToolDockClosing(false)
-  }
+  useEffect(() => () => { clearToolDockClose() }, [])
 
   // Undo history (§6.5, DD9): in memory, session-scoped, capped by the stack.
   const historyRef = useRef<CommandStack>(new CommandStack())
@@ -1861,6 +1884,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const draftEditRef = useRef<{ at: number; id: string; after: CanvasNode[]; command: Command } | undefined>(undefined)
   const referencesRef = useRef<HeldReference[]>([])
   referencesRef.current = references
+  const composerPromptRef = useRef<HTMLTextAreaElement | null>(null)
   const nodesRef = useRef<CanvasNode[]>([])
   nodesRef.current = nodes
   const boardIdRef = useRef<string | undefined>(undefined)
@@ -1946,7 +1970,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       setCamera(board.camera ?? { x: -28, y: -28, zoom: 1 })
       // U04 step 4: and the *engine* is told the same thing, once, so it opens
       // at the stored viewport rather than framing the board and then jumping.
-      setBoardView(board.camera === undefined ? BOARD_VIEW_EMPTY : { loaded: true, camera: board.camera })
+      setBoardView(board.camera == null ? BOARD_VIEW_EMPTY : { loaded: true, camera: board.camera })
       setBoardError(undefined)
     } catch (cause) {
       if (signal?.aborted !== true) setBoardError(cause instanceof Error ? cause.message : String(cause))
@@ -1957,6 +1981,25 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       setBoardBusy(false)
     }
   }, [])
+
+  // A layout save from the detail tab or Better Sidebar must update this
+  // still-mounted canvas without a manual board switch.
+  useEffect(() => {
+    if (boardId === undefined) return undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const unsubscribe = subscribeStudioBoardChange(boardId, (change) => {
+      if (change.source === 'canvas') return
+      if (timer !== undefined) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = undefined
+        void openBoard(boardId)
+      }, 80)
+    })
+    return () => {
+      unsubscribe()
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [boardId, openBoard])
 
   /**
    * Read the environment snapshot (`status`), silently.
@@ -2143,6 +2186,10 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     const table = config?.sizes ?? []
     return (value: string) => table.find((entry) => entry.ratio === value)
   }, [config])
+  const composerSize = useMemo(
+    () => sizesForTier(sizeTier)[ratio as WhRatio] ?? sizesForTier(sizeTier)['1:1'],
+    [ratio, sizeTier],
+  )
 
   /** Write the arrangement back to the board — only what changed (DD12). */
   const persistLayout = useCallback(async () => {
@@ -2526,6 +2573,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       draft: node.draft,
       w: node.w,
       h: node.h,
+      layoutMode: node.layoutMode,
       ...(node.parents.length === 0 ? {} : { parents: [...node.parents] }),
       // The wired-in pictures, as board ids: a reference is a pointer to a file
       // that already exists, and without it the edge vanished on reload.
@@ -2544,6 +2592,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     if (item.id !== id) {
       writeNodes(nodesRef.current.map((entry) => (entry.id === id ? { ...entry, id: item.id } : entry)))
     }
+    if (boardIdRef.current !== undefined) notifyStudioBoardChange(boardIdRef.current, 'canvas')
   }, [adoptBoard, writeNodes])
 
   // The unmount flush above runs before this callback is declared in source
@@ -2635,6 +2684,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         image,
         prompt: result.prompt,
         batchId: batch.id,
+        ...(result.layoutMode === undefined ? {} : { layoutMode: result.layoutMode }),
         x: spot.x,
         y: spot.y,
         parents: taskNode.parents,
@@ -2662,6 +2712,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         seed: result.seed,
         mode: result.mode,
         backend: 'studio',
+        ...(result.layoutMode === undefined ? {} : { layoutMode: result.layoutMode }),
         parents: [...node.parents],
         createdAt: new Date().toISOString(),
         sessionId: null,
@@ -2846,6 +2897,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     const params: BoardTaskParams = {
       prompt: text,
       ratio,
+      width: composerSize[0],
+      height: composerSize[1],
       ...(parsedSteps === undefined || !Number.isFinite(parsedSteps) ? {} : { steps: parsedSteps }),
       count,
       ...(requested.length === 0 ? {} : { references: requested }),
@@ -2867,7 +2920,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     } finally {
       setBusy(false)
     }
-  }, [count, prompt, ratio, references, startGeneration, steps])
+  }, [composerSize, count, prompt, ratio, references, startGeneration, steps])
   /**
    * Generate from a layout node (§8.4, C14).
    *
@@ -2886,18 +2939,45 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
   const generateLayoutNode = useCallback((nodeId: string) => {
     const node = nodesRef.current.find((entry) => entry.id === nodeId)
     if (node === undefined || !isLayoutNode(node)) return
-    const plan = layoutGeneratePlan(node.draft, node.references?.length ?? 0)
-    if (!plan.ok) {
+    const references = node.references ?? []
+    const plan = layoutGeneratePlan(node.draft, references.length, node.layoutMode)
+    if ('reason' in plan) {
       setNote(plan.reason)
       return
     }
-    setNote('已按布局 ' + String(plan.params.ratio) + ' 提交 MOSS 生成（compiled 作为正向编码文本）。')
-    void startGeneration(plan.params, { parents: [node.id] })
-  }, [startGeneration])
+    const experimental = node.layoutMode === 'layout-edit-experimental'
+    if (experimental && config?.layoutExperimental?.available === false) {
+      setNote(`实验叠加不可用：${config.layoutExperimental.reason ?? '当前环境不满足要求'}`)
+      return
+    }
+    const taskParams: BoardTaskParams = experimental
+      ? {
+          ...plan.params,
+          references: references.flatMap((reference) => {
+            const path = reference.payload.path
+            return typeof path === 'string' && path.length > 0
+              ? [{ path, name: reference.name, mediaType: reference.payload.mediaType }]
+              : []
+          }),
+        }
+      : plan.params
+    setNote(experimental
+      ? `已提交实验性 Layout + 参考图（${String(references.length)} 张）；失败不会回退纯 Layout。`
+      : `已按布局 ${String(plan.params.ratio)} 提交 MOSS 生成（compiled 作为正向编码文本）；${String(references.length)} 张参考不参与。`)
+    void startGeneration(taskParams, {
+      parents: [node.id],
+      ...(experimental ? { references: references.map((reference) => reference.payload) } : {}),
+    })
+  }, [startGeneration, config?.layoutExperimental])
 
   const reuse = useCallback((batch: Batch) => {
     setPrompt(batch.response.prompt)
     setRatio(batch.response.ratio)
+    const tier = SIZE_TIERS.find((candidate) => {
+      const pair = sizesForTier(candidate)[batch.response.ratio as WhRatio]
+      return pair !== undefined && pair[0] === batch.response.width && pair[1] === batch.response.height
+    })
+    if (tier !== undefined) setSizeTier(tier)
     setSteps(String(batch.response.steps))
     setSelectedId(batch.id)
   }, [])
@@ -3302,6 +3382,14 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // the same gesture here — `parents` records where it came from, the held
     // reference is the pixels it can send.
     const held = isImageNode(source) ? referenceOf(source) : undefined
+    if (held !== undefined && isLayoutNode(target)) {
+      const existingReferences = target.references ?? []
+      const alreadyHeld = existingReferences.some((entry) => entry.nodeId === source.id)
+      if (!alreadyHeld && existingReferences.length >= STUDIO_MAX_REFERENCES) {
+        setNote(`布局节点最多支持 ${String(STUDIO_MAX_REFERENCES)} 张参考图。`)
+        return
+      }
+    }
     const withReference = held === undefined || isLayoutNode(target) === false
       ? undefined
       : [...(target.references ?? []).filter((entry) => entry.nodeId !== source.id), held]
@@ -3320,8 +3408,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // A layout node persists through its own writer, which already sends parents.
     if (isLayoutNode(target)) scheduleLayoutPersist(toId)
     setNote(held !== undefined && isLayoutNode(target)
-      ? '已把这张图接进布局当参考；MOSS 布局通路暂时不叠加参考图，生成时会说明原因。'
-      : '已连线：' + (isImageNode(source) ? '来源图' : '来源节点') + ' → 这个节点；不会触发生成。')
+      ? '已把这张图接进布局参考；默认不参与纯 Layout，可在节点里开启实验性 Layout + 参考图。'
+      : '已连接参考图：' + (isImageNode(source) ? '图片' : '节点') + ' → 这个节点；不会触发生成。')
   }, [markDirty, pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes])
 
   /** Release a wire on blank canvas: ask what to build there (G26). */
@@ -3377,7 +3465,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       return
     }
     if (plan.reason === 'cycle') {
-      setNote('这条线会绕回去：血缘只能是单向的派生，不能成环。')
+      setNote('这条线会绕回去：参考关系不能成环。')
       return
     }
     if (plan.reason === 'kind') {
@@ -3478,7 +3566,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       gestureRef.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, camera }
       return
     }
-    if (event.button === 1 || panRef.current || handMode) {
+    if (event.button === 1 || panRef.current) {
       gestureRef.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, camera }
       return
     }
@@ -3496,7 +3584,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     // §6.1: a plain blank click clears the selection. With Ctrl/Meta the drag
     // adds to what is already there.
     if (!(event.ctrlKey || event.metaKey)) setSelection(new Set())
-  }, [camera, handMode, selection])
+  }, [camera, selection])
 
   /**
    * Pointer-down on a node: select (or toggle) it and start the batch drag.
@@ -3910,7 +3998,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     pushCommand(snapshotCommand('place-asset', before, after, (list) => { writeNodes([...list]) }))
     setSelection(new Set([node.id]))
     setWireMenu(undefined)
-    setNote('已放入素材「' + describeAsset(asset) + '」，血缘指向来源节点；不会触发生成。')
+    setNote('已放入素材「' + describeAsset(asset) + '」，并标记参考图来源；不会触发生成。')
   }, [appendBoardItem, assetPick, pushCommand, writeNodes])
 
   /** Begin dragging one asset card (§7.1: a private MIME, not plain text). */
@@ -4092,7 +4180,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       created.push(node.id)
       offset += 40
     }
-    if (created.length > 0) setSelection(new Set(created.map((node) => node.id)))
+    if (created.length > 0) setSelection(new Set(created))
   }, [appendBoardItem])
 
   /**
@@ -4211,6 +4299,10 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         draft: node.draft,
         w: node.w,
         h: node.h,
+        layoutMode: node.layoutMode,
+        ...(node.references === undefined || node.references.length === 0
+          ? {}
+          : { references: node.references.map((reference) => reference.nodeId).filter((id): id is string => typeof id === 'string') }),
       })
     }
     return items
@@ -4355,6 +4447,29 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     updateLayoutDraft(id, draft)
   }, [updateLayoutDraft])
 
+  /** Persist a layout node's explicit official/experimental generation mode. */
+  const updateLayoutMode = useCallback((id: string, mode: StudioLayoutMode) => {
+    const current = nodesRef.current
+    const node = current.find((entry) => entry.id === id)
+    if (node === undefined || !isLayoutNode(node) || node.layoutMode === mode) return
+    if (mode === 'layout-edit-experimental' && (node.references?.length ?? 0) === 0) {
+      setNote('实验性 Layout + 参考图至少需要一张参考图。')
+      return
+    }
+    if (mode === 'layout-edit-experimental' && config?.layoutExperimental?.available === false) {
+      setNote(`实验叠加不可用：${config.layoutExperimental.reason ?? '当前环境不满足要求'}`)
+      return
+    }
+    const next = current.map((entry) => (entry.id === id ? { ...entry, layoutMode: mode } : entry))
+    writeNodes(next)
+    pushCommand(snapshotCommand('layout-mode', current, next, (list) => { writeNodes([...list]) }))
+    scheduleLayout()
+    scheduleLayoutPersist(id)
+    setNote(mode === 'layout-edit-experimental'
+      ? '已开启实验性 Layout + 参考图；失败会明确报错，不自动回退。'
+      : '已切回官方纯 Layout；参考图仍保留在节点上，但不参与生成。')
+  }, [pushCommand, scheduleLayout, scheduleLayoutPersist, writeNodes, config?.layoutExperimental])
+
   /** Create a layout node with the default 1536×1024 draft (C13 step 5). */
   const addLayoutNode = useCallback((options: {
     /** Where it goes; omitted means "append to the board" (the toolbar path). */
@@ -4380,6 +4495,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       w: LAYOUT_NODE_DEFAULT_WIDTH,
       h: layoutNodeHeight(LAYOUT_NODE_DEFAULT_WIDTH, draft),
       draft,
+      layoutMode: 'layout',
     }
     const before = nodesRef.current
     const after = [...before, node]
@@ -4777,13 +4893,13 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       // for a draft the drawer passes its own id explicitly — either way the
       // picture that lands inherits the lineage.
       pendingReplaceRef.current = { id: draft.id }
-      setNote('已在这里放一个待生成的节点（血缘指向来源）。在右侧抽屉里写下提示词再点「生成」，图会落在这个位置。')
+      setNote('已在这里放一个待生成的节点（当前图作为参考图）。在右侧抽屉里写下提示词再点「生成」，图会落在这个位置。')
       focusPrompt()
       return
     }
     if (target === 'layout') {
       addLayoutNode({ spot: open.world, parents: [open.sourceId] })
-      setNote('已在这里建布局节点，血缘指向来源节点；在里面拖画框、写整图描述再点「生成」。')
+      setNote('已在这里建布局节点，当前图会作为参考图；在里面拖画框、写整图描述再点「生成」。')
       return
     }
   }, [addDraftNode, addLayoutNode, focusPrompt, referenceOf, wireMenu])
@@ -4894,36 +5010,16 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
 
   /** Grouped canvas tools: modes and creation are separate jobs. */
   const canvasToolDock = createElement('div', {
-    className: ['dsh-forge-canvas-tool-dock', toolDockOpen ? 'is-open' : '', toolDockClosing ? 'is-closing' : ''].filter(Boolean).join(' '),
+    className: toolDockOpen ? 'dsh-forge-canvas-tool-dock is-open' : 'dsh-forge-canvas-tool-dock',
+    role: 'toolbar',
     'aria-label': '画布工具',
     'data-open': toolDockOpen ? 'true' : 'false',
-    'data-closing': toolDockClosing ? 'true' : 'false',
     onPointerEnter: openToolDock,
     onPointerLeave: closeToolDock,
     onFocusCapture: openToolDock,
     onBlurCapture: closeToolDockOnBlur,
-    onTransitionEnd: finishToolDockClose,
   }, [
-    createElement('span', { key: 'browse-label', className: 'dsh-forge-canvas-tool-group-label' }, '浏览'),
-    createElement('button', {
-      key: 'select',
-      type: 'button',
-      className: handMode ? 'dsh-forge-canvas-tool' : 'dsh-forge-canvas-tool is-active',
-      'aria-label': '选择与框选',
-      title: '选择与框选',
-      'aria-pressed': !handMode,
-      onClick: () => { setHandMode(false) },
-    }, toolIcon('select'), createElement('span', { className: 'dsh-forge-canvas-tool-label' }, '选择')),
-    createElement('button', {
-      key: 'hand',
-      type: 'button',
-      className: handMode ? 'dsh-forge-canvas-tool is-active' : 'dsh-forge-canvas-tool',
-      'aria-label': '平移画布',
-      title: '平移画布',
-      'aria-pressed': handMode,
-      onClick: () => { setHandMode(true) },
-    }, toolIcon('hand'), createElement('span', { className: 'dsh-forge-canvas-tool-label' }, '平移')),
-    createElement('span', { key: 'create-label', className: 'dsh-forge-canvas-tool-group-label is-create' }, '创建'),
+    createElement('span', { key: 'create-label', className: 'dsh-forge-canvas-tool-group-label' }, '创建'),
     createElement('button', {
       key: 'generate',
       type: 'button',
@@ -4952,48 +5048,176 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     createElement('button', { key: 'in', type: 'button', 'aria-label': '放大', title: '放大', onClick: () => { zoomBy(1.25) } }, '+'),
     createElement('button', { key: 'fit', type: 'button', title: '适应全部节点', onClick: fitView }, '适应'),
   ])
+  const mentionPool = useMemo<MentionCandidate[]>(() => nodes.flatMap((node) => {
+    if (!isImageNode(node)) return []
+    const label = node.image.path.split(/[\\/]/).pop() ?? '参考图'
+    return [{
+      id: node.id,
+      label,
+      detail: node.prompt?.split(/\r?\n/, 1)[0]?.trim() || '画布参考图',
+      path: node.image.path,
+      nodeId: node.id,
+      previewUrl: studioFileUrl(node.image.markdownPath, 256),
+    }]
+  }), [nodes])
+  const selectedReferencePaths = references.flatMap((reference) => (
+    typeof reference.payload.path === 'string' ? [reference.payload.path] : []
+  ))
+  const activeMention = mentionDismissed ? undefined : mentionRangeAt(prompt, promptCaret)
+  const mentionResults = activeMention === undefined
+    ? []
+    : filterMentionCandidates(mentionPool, activeMention.query, selectedReferencePaths)
+  const highlightedMention = mentionResults.length === 0
+    ? -1
+    : Math.min(Math.max(mentionIndex, 0), mentionResults.length - 1)
+
+  const focusComposerAt = (caret: number): void => {
+    setTimeout(() => {
+      const textarea = composerPromptRef.current
+      textarea?.focus?.()
+      textarea?.setSelectionRange?.(caret, caret)
+      setPromptCaret(caret)
+    }, 0)
+  }
+
+  const acceptMention = (candidate: MentionCandidate | undefined): void => {
+    if (candidate === undefined || activeMention === undefined) return
+    const node = candidate.nodeId === undefined
+      ? undefined
+      : nodesRef.current.find((entry) => entry.id === candidate.nodeId)
+    const held = node === undefined ? undefined : referenceOf(node)
+    if (held !== undefined) {
+      if (!hasReference(references, held.payload) && references.length >= STUDIO_MAX_REFERENCES) {
+        setNote(`最多 ${String(STUDIO_MAX_REFERENCES)} 张参考图`)
+        return
+      }
+      setReferences((current) => (
+        hasReference(current, held.payload) || current.length >= STUDIO_MAX_REFERENCES
+          ? current
+          : [...current, held]
+      ))
+    }
+    const applied = applyMention(prompt, activeMention, candidate.label)
+    setPrompt(applied.prompt)
+    setMentionDismissed(true)
+    setMentionIndex(0)
+    focusComposerAt(applied.caret)
+  }
+
+  const composerField = (key: string, label: string, control: ReactNode): ReactNode => createElement(
+    'label',
+    { key, className: 'dsh-forge-canvas-composer-field' },
+    createElement('span', { className: 'dsh-forge-canvas-composer-field-label' }, label),
+    control,
+  )
+
   /** Bottom canvas composer: the always-available first sentence of the next run. */
   const canvasComposer = createElement('div', {
     className: 'dsh-forge-canvas-composer',
     'data-canvas-composer': 'true',
   }, [
-    createElement('textarea', {
-      key: 'prompt',
-      rows: 2,
-      value: prompt,
-      placeholder: references.length > 0 ? '描述你希望这张图怎么改…' : '描述下一张画面…',
-      'aria-label': '画布提示词',
-      onChange: (event: ChangeEvent<HTMLTextAreaElement>) => setPrompt(event.target.value),
-      onKeyDown: (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-          event.preventDefault()
-          void generate()
-        }
-      },
-    }),
+    createElement('div', { key: 'prompt-wrap', className: 'dsh-forge-canvas-composer-prompt-wrap' }, [
+      createElement('textarea', {
+        key: 'prompt',
+        ref: composerPromptRef,
+        rows: 2,
+        value: prompt,
+        placeholder: references.length > 0 ? '描述你希望这张图怎么改… 输入 @ 添加参考图' : '描述下一张画面… 输入 @ 添加参考图',
+        'aria-label': '画布提示词',
+        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => {
+          const value = event.target.value
+          setPrompt(value)
+          setPromptCaret(event.target.selectionStart ?? value.length)
+          setMentionDismissed(false)
+          setMentionIndex(0)
+        },
+        onSelect: (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+          setPromptCaret(event.currentTarget.selectionStart ?? prompt.length)
+        },
+        onKeyUp: (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+          if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+            setPromptCaret(event.currentTarget.selectionStart ?? prompt.length)
+            setMentionDismissed(false)
+          }
+        },
+        onBlur: () => {
+          setTimeout(() => { setMentionDismissed(true) }, 120)
+        },
+        onKeyDown: (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+          const composing = event.nativeEvent.isComposing
+          if (!composing && activeMention !== undefined && mentionResults.length > 0) {
+            if (event.key === 'ArrowDown') {
+              event.preventDefault()
+              setMentionIndex((current) => (current + 1) % mentionResults.length)
+              return
+            }
+            if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              setMentionIndex((current) => (current - 1 + mentionResults.length) % mentionResults.length)
+              return
+            }
+            if (event.key === 'Enter' || event.key === 'Tab') {
+              event.preventDefault()
+              acceptMention(mentionResults[highlightedMention])
+              return
+            }
+          }
+          if (!composing && event.key === 'Escape' && activeMention !== undefined) {
+            event.preventDefault()
+            setMentionDismissed(true)
+            return
+          }
+          if (event.key === 'Enter' && !event.shiftKey && !composing) {
+            event.preventDefault()
+            void generate()
+          }
+        },
+      }),
+      activeMention === undefined ? null : createElement(
+        'div',
+        { key: 'mentions', className: 'dsh-forge-canvas-mention-popover', role: 'listbox', 'aria-label': '参考图候选' },
+        ...(mentionResults.length === 0
+          ? [createElement('p', { key: 'empty', className: 'dsh-forge-canvas-mention-empty' }, '当前画板没有可添加的参考图')]
+          : mentionResults.map((candidate, index) => createElement(
+              'button',
+              {
+                key: candidate.id,
+                type: 'button',
+                role: 'option',
+                'aria-selected': index === highlightedMention,
+                className: index === highlightedMention ? 'dsh-forge-canvas-mention-item is-active' : 'dsh-forge-canvas-mention-item',
+                onMouseDown: (event: { preventDefault(): void }) => { event.preventDefault() },
+                onClick: () => { acceptMention(candidate) },
+              },
+              candidate.previewUrl === undefined
+                ? null
+                : createElement('img', { src: candidate.previewUrl, alt: '' }),
+              createElement('span', { className: 'dsh-forge-canvas-mention-copy' },
+                createElement('strong', {}, candidate.label),
+                candidate.detail === undefined ? null : createElement('small', {}, candidate.detail),
+              ),
+            ))),
+      ),
+    ]),
     createElement('div', { key: 'controls', className: 'dsh-forge-canvas-composer-controls' }, [
-      createElement('select', {
-        key: 'ratio',
+      composerField('ratio', '画幅', createElement('select', {
         value: ratio,
         'aria-label': '画幅比例',
         onChange: (event: ChangeEvent<HTMLSelectElement>) => setRatio(event.target.value),
-      }, ...STUDIO_RATIOS.map((choice) => createElement('option', { key: choice, value: choice }, choice))),
-      createElement('select', {
-        key: 'count',
+      }, ...STUDIO_RATIOS.map((choice) => createElement('option', { key: choice, value: choice }, choice)))),
+      composerField('resolution', '分辨率', createElement('select', {
+        value: sizeTier,
+        'aria-label': '输出分辨率',
+        onChange: (event: ChangeEvent<HTMLSelectElement>) => setSizeTier(event.target.value as SizeTier),
+      }, ...SIZE_TIERS.map((tier) => {
+        const pair = sizesForTier(tier)[ratio as WhRatio] ?? sizesForTier(tier)['1:1']
+        return createElement('option', { key: tier, value: tier }, `${tier === '2k' ? '2K' : '1.5MP'} · ${String(pair[0])}×${String(pair[1])}`)
+      }))),
+      composerField('count', '张数', createElement('select', {
         value: String(count),
         'aria-label': '出图张数',
         onChange: (event: ChangeEvent<HTMLSelectElement>) => setCount(Number(event.target.value)),
-      }, ...Array.from({ length: STUDIO_MAX_COUNT }, (_unused, index) => createElement('option', { key: String(index + 1), value: String(index + 1) }, `${String(index + 1)} 张`))),
-      createElement('input', {
-        key: 'steps',
-        type: 'number',
-        min: 1,
-        max: 200,
-        placeholder: '步数',
-        'aria-label': '采样步数',
-        value: steps,
-        onChange: (event: ChangeEvent<HTMLInputElement>) => setSteps(event.target.value),
-      }),
+      }, ...Array.from({ length: STUDIO_MAX_COUNT }, (_unused, index) => createElement('option', { key: String(index + 1), value: String(index + 1) }, `${String(index + 1)} 张`)))),
       createElement('button', {
         key: 'generate',
         type: 'button',
@@ -5008,6 +5232,26 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
     className: 'dsh-forge-canvas-bottom-chrome',
     'data-canvas-bottom-chrome': 'true',
   }, [canvasZoomDock, canvasComposer])
+
+  /** Canvas-wide gesture legend, kept at the top where the composer cannot cover it. */
+  const canvasGestureGuide = createElement('div', {
+    className: 'dsh-forge-canvas-gesture-guide',
+    'data-canvas-gesture-guide': 'true',
+    'aria-hidden': 'true',
+  }, [
+    createElement(
+      'span',
+      { key: 'copy', className: 'dsh-forge-canvas-gesture-copy' },
+      references.length === 0
+        ? '空白拖动平移 · Shift 拖动框选 · 点击节点编辑'
+        : `已选 ${String(references.length)} 张参考图，下一轮将按这些图改图`,
+    ),
+    createElement(
+      'span',
+      { key: 'wheel', className: 'dsh-forge-canvas-gesture-hint' },
+      references.length === 0 ? '滚轮平移 · Ctrl/⌘+滚轮缩放' : '空白拖动平移 · Shift 拖动框选',
+    ),
+  ])
 
   /** The panel's own last word, kept above the canvas now that the form is gone. */
   const canvasStatus = error === undefined && note === undefined
@@ -5295,7 +5539,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
         const caption = node.draft.summary.caption.trim()
         const plan = layoutGeneratePlan(node.draft, node.references?.length ?? 0)
         setPrompt(caption)
-        if (plan.ok) setRatio(plan.params.ratio)
+        if (plan.ok && plan.params.ratio !== undefined) setRatio(plan.params.ratio)
         setNote(caption.length === 0
           ? '这个布局还没有整图描述；正文已清空，先写整图描述。'
           : '已把布局的整图描述送进提示词框；改完点「生成」即可。')
@@ -5764,11 +6008,42 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
       )
       : null,
   )
+  const assetsPanel = createElement(
+    'div',
+    { className: 'dsh-forge-assets', 'data-asset-scope': 'all' },
+    assets.length === 0
+      ? createElement('div', { className: 'dsh-forge-studio-empty' }, assetsBusy ? '正在读取素材…' : '还没有素材')
+      : createElement(
+        'div',
+        { className: 'dsh-forge-assets-grid' },
+        ...assets.map((asset) => createElement(
+          'a',
+          {
+            key: `${asset.boardId}:${asset.id}`,
+            className: 'dsh-forge-asset',
+            href: studioFileUrl(asset.markdownPath),
+            target: '_blank',
+            rel: 'noreferrer',
+            title: asset.path,
+          },
+          createElement('span', { className: 'dsh-forge-asset-thumb' },
+            createElement('img', {
+              src: studioFileUrl(asset.markdownPath, STUDIO_NODE_THUMB_WIDTH),
+              alt: describeAsset(asset),
+              loading: 'lazy',
+              decoding: 'async',
+            })),
+          createElement('span', { className: 'dsh-forge-asset-prompt' }, describeAsset(asset)),
+          createElement('span', { className: 'dsh-forge-asset-meta' }, `${asset.boardName} · ${String(asset.width)}×${String(asset.height)}`),
+        )),
+      ),
+  )
   const resultsHead = view === 'canvas' ? canvasResultsHead : galleryResultsHead
   const workspaceModeBar = createElement(
     'div',
     { className: 'dsh-forge-workspace-mode-bar' },
     resultsViewToggle,
+    view === 'canvas' ? canvasGestureGuide : null,
     createElement('div', { className: 'dsh-forge-workspace-mode-env' }, environmentControl),
   )
   // G26: the wire's `<path d>`, computed once per frame instead of twice. It is
@@ -6347,7 +6622,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 // §6.3: `tabIndex=0` is what makes the canvas container the owner of
                 // the keyboard table; the shortcuts deliberately do not bubble from
                 // the form, which keeps Delete and Ctrl+Z editing text there.
-                className: panHeld || handMode ? 'dsh-forge-canvas is-pan' : 'dsh-forge-canvas',
+                className: panHeld ? 'dsh-forge-canvas is-pan' : 'dsh-forge-canvas',
                 tabIndex: 0,
                 ref: canvasRef,
                 onPointerDown: onCanvasPointerDown,
@@ -6368,7 +6643,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 },
               }
               : {
-                className: panHeld || handMode ? 'dsh-forge-canvas is-flow is-pan' : 'dsh-forge-canvas is-flow',
+                className: panHeld ? 'dsh-forge-canvas is-flow is-pan' : 'dsh-forge-canvas is-flow',
                 ref: canvasRef,
               },
             canvasSlot === undefined
@@ -6381,7 +6656,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 : null)
               // The engine the shell supplies (`FlowCanvas`): it draws the board
               // and owns every gesture; this object is the whole contract.
-              : createElement(canvasSlot as (input: unknown) => unknown, {
+              : createElement(canvasSlot as ComponentType<Record<string, unknown>>, {
                 boardId,
                 nodes,
                 selection,
@@ -6397,6 +6672,8 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 onRemove: removeNode,
                 onOpen: openLightbox,
                 onGenerateLayout: generateLayoutNode,
+                onLayoutMode: updateLayoutMode,
+                ...(config?.layoutExperimental === undefined ? {} : { layoutExperimental: config.layoutExperimental }),
                 onLayoutCaption: updateLayoutCaption,
                 // Step 2: the gestures the DOM canvas had. Each one lands on the
                 // same studio callback the fallback path uses, so the undo stack,
@@ -6413,7 +6690,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                 // whose camera has not been read yet.
                 initialCamera: boardView.camera,
                 boardLoaded: boardView.loaded,
-                panMode: panHeld || handMode,
+
                 // §7.1/§7.3: the engine is what covers the canvas now, so it is
                 // also what has to accept a dropped file or library card.
                 onDragOver: onCanvasDragOver,
@@ -6536,9 +6813,9 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                       'div',
                       {
                         className: 'dsh-forge-node-meta dsh-forge-node-caption',
-                        title: node.image.prompt.length > 0 ? node.image.prompt : '这张图没有记录提示词',
+                        title: (node.prompt ?? '').length > 0 ? node.prompt : '这张图没有记录提示词',
                       },
-                      firstLine(node.image.prompt, '未记录提示词'),
+                      firstLine(node.prompt ?? '', '未记录提示词'),
                     ),
                     sole
                       ? createElement(
@@ -6647,7 +6924,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                       { className: 'dsh-forge-draft-body', title: node.params?.prompt ?? '' },
                       described.length > 0
                         ? described
-                        : source === undefined ? '还没有参数：在右侧抽屉里写' : '来源：' + describeNode(source),
+                        : source === undefined ? '还没有参数：在右侧抽屉里写' : '参考图：' + describeNode(source),
                     ),
                     createElement(
                       'div',
@@ -6795,7 +7072,7 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                     event.stopPropagation()
                   },
                 },
-                createElement('div', { className: 'dsh-forge-context-head' }, '在这里新建（血缘指向来源）'),
+                createElement('div', { className: 'dsh-forge-context-head' }, '在这里新建（当前图作为参考图）'),
                 ...connectMenuItems().map((item) => createElement(
                   'button',
                   {
@@ -7047,16 +7324,6 @@ export function StudioPanel(props?: StudioPanelProps): ReturnType<typeof createE
                   ),
                 ),
               ),
-            createElement(
-              'div',
-              { className: 'dsh-forge-canvas-foot' },
-              references.length === 0
-                ? '点一个节点，编辑层会贴着它展开；点空白或按 Esc 收起。选中图片后按「按这张继续」会从它拉一条线出来。'
-                : `已选 ${String(references.length)} 张参考图，下一轮将是改图。`,
-              // G01: the one-line hint the new wheel split needs. Not a toast and
-              // not a modal — the corner of the canvas is where the gesture is.
-              createElement('span', { className: 'dsh-forge-canvas-foot-hint' }, '滚轮平移 · Ctrl/⌘+滚轮缩放'),
-            ),
             ),
             canvasToolDock,
             canvasBottomChrome,

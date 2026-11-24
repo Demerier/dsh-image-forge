@@ -20,9 +20,17 @@ import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 import * as plugin from '../lib/index.js'
 import { MOSS_NEGATIVE_PROMPT } from '../testlib/comfyui.js'
+import { runStudioGeneration } from '../testlib/studio-service.js'
+import { readBoard } from '../testlib/boards.js'
+
+const LAYOUT_SAMPLE = readFileSync(
+  fileURLToPath(new URL('./fixtures/layout/layout_prompt.json', import.meta.url)),
+  'utf8',
+)
 
 /** The three MOSS weight files, as a real install's `/object_info` lists them. */
 const OBJECT_INFO = {
@@ -46,6 +54,10 @@ const OBJECT_INFO = {
   VAELoader: {
     input: { required: { vae_name: [['qwen_image_2.1_vae_bf16.safetensors', 'flux2-vae_small.safetensors'], {}] } },
   },
+  LoraLoaderModelOnly: {
+    input: { required: { lora_name: [['moss_image_edit_lora_rank_64_bf16.safetensors'], {}] } },
+  },
+  TextEncodeMOSSImageEdit: { input: { required: {} } },
 }
 
 const PROMPT_ID = 'fake-moss-edit-prompt-id'
@@ -126,6 +138,8 @@ async function startFakeComfy(options = {}) {
   const seen = []
   const state = { graph: undefined, uploads: [] }
   const rendered = options.rendered ?? makePng(1248, 1248)
+  const objectInfo = options.objectInfo ?? OBJECT_INFO
+  let promptRequests = 0
   const server = createServer((request, response) => {
     const chunks = []
     request.on('data', (chunk) => chunks.push(chunk))
@@ -158,9 +172,11 @@ async function startFakeComfy(options = {}) {
       }
       if (url.pathname.startsWith('/object_info/')) {
         const node = url.pathname.slice('/object_info/'.length)
-        return send(200, JSON.stringify(node in OBJECT_INFO ? { [node]: OBJECT_INFO[node] } : {}))
+        return send(200, JSON.stringify(node in objectInfo ? { [node]: objectInfo[node] } : {}))
       }
       if (url.pathname === '/prompt' && request.method === 'POST') {
+        promptRequests += 1
+        if (options.failPrompt === true) return send(500, JSON.stringify({ error: { type: 'prompt_outputs_failed_validation', message: 'layout edit rejected' } }))
         state.graph = JSON.parse(body.toString('utf8')).prompt
         return send(200, JSON.stringify({ prompt_id: PROMPT_ID, number: 1, node_errors: {} }))
       }
@@ -184,6 +200,7 @@ async function startFakeComfy(options = {}) {
   return {
     seen,
     state,
+    get promptRequests() { return promptRequests },
     port,
     endpoint: `http://127.0.0.1:${port}`,
     rendered,
@@ -214,6 +231,22 @@ function referenceFile(outputDir, name, width, height) {
   const path = join(outputDir, name)
   writeFileSync(path, makePng(width, height))
   return path
+}
+
+/** The settings `runStudioGeneration` reads, pointed at the fake server. */
+function studioSettings(comfy, outputDir) {
+  return {
+    comfyEndpoint: comfy.endpoint,
+    comfyPorts: [],
+    comfyModelsDir: 'D:\\models',
+    timeoutMs: 30_000,
+    outputDir,
+    defaultSteps: 25,
+    comfyuiSteps: undefined,
+    comfyModel: 'moss-sft',
+    mossSampling: 'comfy',
+    turboSteps: undefined,
+  }
 }
 
 /** Every node class in a captured graph. */
@@ -412,5 +445,107 @@ test('the official MOSS register reaches the edit sampler too', async () => {
   } finally {
     await comfy.close()
     rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+test('layout generation keeps official Layout pure, then opts into all references explicitly', async () => {
+  const comfy = await startFakeComfy()
+  const outputDir = mkdtempSync(join(tmpdir(), 'forge-moss-layout-modes-'))
+  try {
+    const reference = referenceFile(outputDir, 'ref.png', 1024, 768)
+    const settings = studioSettings(comfy, outputDir)
+    const base = {
+      prompt: 'poster',
+      ratio: '3:2',
+      width: 1536,
+      height: 1024,
+      count: 1,
+      steps: 25,
+      seed: 7,
+      layout: LAYOUT_SAMPLE,
+      references: [{ path: reference, mediaType: 'image/png', name: 'ref.png' }],
+    }
+
+    const official = await runStudioGeneration(
+      settings,
+      { ...base, layoutMode: 'layout' },
+      new AbortController().signal,
+    )
+    assert.equal(comfy.state.uploads.length, 0, 'official Layout never uploads its node references')
+    assert.equal(official.mode, 'generate')
+    assert.equal(official.layoutMode, 'layout')
+    assert.deepEqual([official.width, official.height], [1536, 1024], 'the exact draft canvas is retained')
+    assert.deepEqual([comfy.state.graph['6'].inputs.width, comfy.state.graph['6'].inputs.height], [1536, 1024])
+    assert.equal(comfy.state.graph['4'].inputs.text, LAYOUT_SAMPLE, 'official Layout uses the text-to-image graph')
+    assert.equal(comfy.seen.filter((entry) => entry.path === '/prompt').length, 1)
+    const officialBoard = await readBoard(outputDir, official.board.id)
+    assert.equal(officialBoard.items[0].layoutMode, 'layout', 'the result keeps its layout provenance')
+
+    const experimental = await runStudioGeneration(
+      settings,
+      { ...base, layoutMode: 'layout-edit-experimental' },
+      new AbortController().signal,
+    )
+    assert.equal(comfy.state.uploads.length, 1, 'experimental Layout uploads every reference')
+    assert.equal(experimental.mode, 'edit')
+    assert.equal(experimental.layoutMode, 'layout-edit-experimental')
+    assert.deepEqual([experimental.width, experimental.height], [1536, 1024])
+    assert.equal(comfy.state.graph['7'].inputs.prompt, LAYOUT_SAMPLE, 'compiled Layout JSON is the edit prompt')
+    assert.equal(comfy.state.graph['7'].inputs['images.image_0'][1], 0)
+    assert.equal(comfy.state.graph['8'].inputs.prompt, MOSS_NEGATIVE_PROMPT)
+    assert.deepEqual([comfy.state.graph['5'].inputs.width, comfy.state.graph['5'].inputs.height], [1536, 1024])
+    const experimentalBoard = await readBoard(outputDir, experimental.board.id)
+    assert.equal(experimentalBoard.items[0].layoutMode, 'layout-edit-experimental', 'the result keeps the experimental provenance')
+  } finally {
+    await comfy.close()
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+test('experimental Layout refuses missing capabilities and never silently retries official Layout', async () => {
+  const missingLoraInfo = { ...OBJECT_INFO, LoraLoaderModelOnly: { input: { required: { lora_name: [['other.safetensors'], {}] } } } }
+  const missing = await startFakeComfy({ objectInfo: missingLoraInfo })
+  const missingDir = mkdtempSync(join(tmpdir(), 'forge-moss-layout-missing-'))
+  try {
+    const reference = referenceFile(missingDir, 'ref.png', 1024, 768)
+    await assert.rejects(
+      () => runStudioGeneration(
+        studioSettings(missing, missingDir),
+        {
+          prompt: 'poster', ratio: '3:2', width: 1536, height: 1024, count: 1, steps: 25, seed: 7,
+          layout: LAYOUT_SAMPLE, layoutMode: 'layout-edit-experimental',
+          references: [{ path: reference, mediaType: 'image/png', name: 'ref.png' }],
+        },
+        new AbortController().signal,
+      ),
+      /编辑 LoRA|LoraLoaderModelOnly/,
+    )
+    assert.equal(missing.promptRequests, 0, 'a missing LoRA fails before /prompt')
+    assert.equal(missing.state.uploads.length, 0, 'and before any upload')
+  } finally {
+    await missing.close()
+    rmSync(missingDir, { recursive: true, force: true })
+  }
+
+  const failing = await startFakeComfy({ failPrompt: true })
+  const failingDir = mkdtempSync(join(tmpdir(), 'forge-moss-layout-fail-'))
+  try {
+    const reference = referenceFile(failingDir, 'ref.png', 1024, 768)
+    await assert.rejects(
+      () => runStudioGeneration(
+        studioSettings(failing, failingDir),
+        {
+          prompt: 'poster', ratio: '3:2', width: 1536, height: 1024, count: 1, steps: 25, seed: 7,
+          layout: LAYOUT_SAMPLE, layoutMode: 'layout-edit-experimental',
+          references: [{ path: reference, mediaType: 'image/png', name: 'ref.png' }],
+        },
+        new AbortController().signal,
+      ),
+      /prompt 被拒绝/,
+    )
+    assert.equal(failing.promptRequests, 1, 'a failed overlay submits exactly once')
+  } finally {
+    await failing.close()
+    rmSync(failingDir, { recursive: true, force: true })
   }
 })

@@ -56,7 +56,8 @@ export function resultImages(payload: Record<string, unknown> | undefined): Resu
   if (!Array.isArray(raw)) return []
   return raw.flatMap((entry, position) => {
     const row = recordOf(entry)
-    const path = row?.['path']
+    if (row === undefined) return []
+    const path = row['path']
     if (typeof path !== 'string' || path.length === 0) return []
     return [{
       index: typeof row?.['index'] === 'number' && Number.isFinite(row['index']) ? row['index'] : position + 1,

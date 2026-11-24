@@ -58,6 +58,7 @@ import {
   type ChangeEvent as ReactChangeEvent,
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ComponentType,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
@@ -73,6 +74,7 @@ import {
   applyNodeChanges,
   getBezierPath,
   useStore,
+  type Edge as ReactFlowEdge,
   type EdgeProps,
   type NodeChange,
   type NodeProps,
@@ -136,8 +138,8 @@ import {
   type LayoutEditorHandle,
   type LayoutEditorState,
 } from './layout-editor.ts'
-import type { BoardLayoutDraft, BoardSummary } from './studio-shared.ts'
-import { StudioPanel } from './studio-view.ts'
+import type { BoardLayoutDraft, BoardSummary, StudioLayoutExperimentalCapability } from './studio-shared.ts'
+import { StudioPanel, type StudioPanelProps } from './studio-view.ts'
 // U06: the detail tab is a *sibling* pane (§8.2), so the only two things the
 // canvas needs from it are the read-only preview of a draft (§8.4) and the
 // request type the shell hands down.
@@ -185,7 +187,7 @@ export interface CanvasPaneProps {
  * @returns the tab's tree.
  */
 export function CanvasPane(props: CanvasPaneProps): ReactNode {
-  return createElement(StudioPanel, {
+  return createElement(StudioPanel as ComponentType<StudioPanelProps>, {
     boardId: props.boardId,
     canvas: FlowCanvas,
     workspaceMode: true,
@@ -245,6 +247,8 @@ export interface FlowCanvasProps {
   readonly selection?: ReadonlySet<string>
   /** Which node plays the one-shot creation highlight. */
   readonly highlightedNodeId?: string
+  /** Preflight result for the experimental layout + reference graph. */
+  readonly layoutExperimental?: StudioLayoutExperimentalCapability
   /** Called with the ids React Flow reports selected; `[]` when cleared. */
   readonly onSelect?: (ids: readonly string[]) => void
   /** A layout node's draft changed in its embedded editor. */
@@ -261,6 +265,8 @@ export interface FlowCanvasProps {
   readonly onOpen?: (nodeId: string) => void
   /** Compile a layout node's draft and generate from it (§8.1). */
   readonly onGenerateLayout?: (nodeId: string) => void
+  /** Switch one layout node between the official and experimental graph. */
+  readonly onLayoutMode?: (nodeId: string, mode: 'layout' | 'layout-edit-experimental') => void
   /** The node's inline summary.caption field (the one input 生成 cannot do without). */
   readonly onLayoutCaption?: (nodeId: string, caption: string) => void
   /** Ids that may not be dragged yet (a task in flight stays put). */
@@ -301,8 +307,7 @@ export interface FlowCanvasProps {
   readonly onKeyUp?: (event: ReactKeyboardEvent<HTMLDivElement>) => void
   /** Screen-space overlays (menu, board picker, lightbox) the studio owns. */
   readonly overlay?: ReactNode
-  /** Sticky hand mode: a left-drag pans instead of drawing a marquee. */
-  readonly panMode?: boolean
+
   /**
    * An OS file or a library card dragged over the canvas (§7.1/§7.3).
    *
@@ -601,19 +606,19 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
       ...(selection === undefined ? {} : { selected: selection }),
       ...(locked === undefined ? {} : { locked }),
       ...(props.highlightedNodeId === undefined ? {} : { highlighted: props.highlightedNodeId }),
+      ...(props.layoutExperimental === undefined ? {} : { layoutExperimental: props.layoutExperimental }),
     }),
-    [props.nodes, selection, locked, props.highlightedNodeId],
+    [props.nodes, selection, locked, props.highlightedNodeId, props.layoutExperimental],
   )
 
   const interaction = useMemo(
     () => flowInteractionProps({
       selectable: props.onSelect !== undefined,
-      panMode: props.panMode === true,
       suppressLeftPan: shiftHeld,
       minZoom: FLOW_MIN_ZOOM,
       maxZoom: FLOW_MAX_ZOOM,
     }),
-    [props.onSelect, props.panMode, shiftHeld],
+    [props.onSelect, shiftHeld],
   )
 
   // The model is pure data; the handlers ride along in `data` because React
@@ -633,6 +638,7 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
     onRemove: (nodeId) => { latest.current.onRemove?.(nodeId) },
     onOpen: (nodeId) => { latest.current.onOpen?.(nodeId) },
     onGenerateLayout: (nodeId) => { latest.current.onGenerateLayout?.(nodeId) },
+    onLayoutMode: (nodeId, mode) => { latest.current.onLayoutMode?.(nodeId, mode) },
     onLayoutCaption: (nodeId, caption) => { latest.current.onLayoutCaption?.(nodeId, caption) },
     onOpenDetail: (nodeId) => { latest.current.onOpenDetail?.(nodeId) },
   }), [])
@@ -1124,7 +1130,7 @@ export function FlowCanvas(props: FlowCanvasProps): ReactNode {
             nodes: flowNodes,
             // A lineage wire owes the reader a direction: parent → child.
             // React Flow builds the <marker> defs from these values.
-            edges: edgesWithArrows(model.edges),
+            edges: [...edgesWithArrows(model.edges)] as ReactFlowEdge[],
             nodeTypes: FLOW_NODE_TYPES,
             edgeTypes: FLOW_EDGE_TYPES,
             ...interaction,
@@ -1216,6 +1222,7 @@ interface FlowNodeActions {
   readonly onRemove?: (nodeId: string) => void
   readonly onOpen?: (nodeId: string) => void
   readonly onGenerateLayout?: (nodeId: string) => void
+  readonly onLayoutMode?: (nodeId: string, mode: 'layout' | 'layout-edit-experimental') => void
   /** The node's inline `summary.caption` field: it writes the whole-image sentence. */
   readonly onLayoutCaption?: (nodeId: string, caption: string) => void
   /** U06: the locked thumbnail's "在详情页编辑" — activate that node's tab. */
@@ -1495,17 +1502,16 @@ function LayoutEditorSlot(props: {
 }
 
 /**
- * A layout draft painted from its own data — the read-only thumbnail of §8.4.
+ * A layout draft painted from its own data.
  *
- * Not an editor and not a screenshot: `draftPreviewBoxes` turns the draft's
- * pixel boxes into percentages, so the preview is right at any node size and
- * costs one render. This is what the shell draws while the detail tab owns the
- * draft, which is why `layout-editor.ts` never had to grow a read-only mode.
+ * The canvas node is a live summary now, not a second editor: the body always
+ * paints these percentages, while the detail tab owns mutation. That keeps one
+ * writer per draft and leaves the node free to spend its chrome on status,
+ * metadata and reference thumbnails.
  */
 function LayoutThumb(props: {
   readonly nodeId: string
   readonly draft: BoardLayoutDraft | undefined
-  readonly onOpenDetail?: () => void
 }): ReactNode {
   const boxes = draftPreviewBoxes(props.draft)
   return createElement(
@@ -1514,7 +1520,7 @@ function LayoutThumb(props: {
       className: 'dsh-forge-flow-layout-thumb',
       'data-detail-locked': 'true',
       'data-detail-boxes': String(boxes.length),
-      title: '这个节点正在详情页签里编辑；画布这里是只读缩略。',
+      title: '布局预览；点击「编辑」打开详情页修改画框和参数。',
     },
     ...boxes.map((box, index) => createElement('span', {
       key: `${String(index)}`,
@@ -1526,29 +1532,10 @@ function LayoutThumb(props: {
         height: `${String(box.height)}%`,
       },
     })),
-    createElement(
-      'button',
-      {
-        type: 'button',
-        className: 'dsh-forge-flow-btn is-locked',
-        title: '打开（或切回）这个节点的详情页签',
-        'data-detail-action': 'open-detail',
-        onClick: () => { props.onOpenDetail?.() },
-      },
-      '编辑布局',
-    ),
   )
 }
 
-/**
- * A layout draft as a node: a title bar that can generate from it, the editor
- * body, and a footnote carrying the draft's own size and box count.
- *
- * U06 (§8.4, WD10): while this node's detail tab is open the body is
- * {@link LayoutThumb} instead of the editor. The decision comes from the tab
- * strip through `data.detailOpen`; the note below the head says which window
- * owns the draft, so "why can I not drag a box here" never has to be guessed.
- */
+/** The layout node: live preview, readiness, references and an explicit mode switch. */
 export function LayoutFlowNode(props: NodeProps): ReactNode {
   const data = props.data as Record<string, unknown>
   const actions = actionsOf(data)
@@ -1558,8 +1545,22 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
   const boxes = typeof data['boxes'] === 'number' ? data['boxes'] : 0
   const width = typeof data['width'] === 'number' ? data['width'] : 0
   const height = typeof data['height'] === 'number' ? data['height'] : 0
-  const referenceCount = typeof data['referenceCount'] === 'number' ? data['referenceCount'] : 0
+  const ratio = typeof data['ratio'] === 'string' ? data['ratio'] : '—'
+  const caption = typeof data['caption'] === 'string' ? data['caption'] : ''
+  const captionLine = typeof data['captionLine'] === 'string' && data['captionLine'].length > 0
+    ? data['captionLine']
+    : '尚未填写整图描述'
+  const references = Array.isArray(data['references'])
+    ? data['references'].filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+    : []
+  const layoutMode = data['layoutMode'] === 'layout-edit-experimental' ? 'layout-edit-experimental' : 'layout'
+  const experimental = layoutMode === 'layout-edit-experimental'
+  const statusLabel = typeof data['statusLabel'] === 'string' ? data['statusLabel'] : '可生成'
+  const statusTone = typeof data['statusTone'] === 'string' ? data['statusTone'] : 'ready'
+  const experimentalAvailable = data['experimentalAvailable'] !== false
+  const experimentalReason = typeof data['experimentalReason'] === 'string' ? data['experimentalReason'] : undefined
   const detailOpen = data['detailOpen'] === true
+  const visibleReferences = references.slice(0, 4)
   return createElement(
     'div',
     {
@@ -1567,12 +1568,14 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
       'data-node-kind': 'layout',
       'data-node-id': nodeId,
       'data-detail-locked': detailOpen ? 'true' : 'false',
+      'data-layout-mode': layoutMode,
       style: { '--dsh-forge-zoom': String(zoom) },
     },
     createElement(
       'div',
       { className: 'dsh-forge-flow-layout-head' },
       createElement('span', { className: 'dsh-forge-flow-layout-title' }, 'MOSS 布局'),
+      createElement('span', { className: `dsh-forge-flow-layout-status is-${statusTone}` }, statusLabel),
       createElement('div', { className: 'dsh-forge-flow-layout-head-actions' },
         createElement(
           'button',
@@ -1590,7 +1593,12 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
           {
             type: 'button',
             className: 'dsh-forge-flow-btn',
-            title: '按布局生成：compiled 作为 MOSS 正向编码文本（仅 moss-sft）',
+            title: experimental
+              ? (experimentalAvailable
+                  ? '实验性 Layout + 参考图：失败会明确报错，不会回退纯 Layout'
+                  : `实验叠加不可用：${experimentalReason ?? '当前环境不满足要求'}`)
+              : '使用官方 MOSS Layout，参考图只保留在节点上不参与生成',
+            disabled: experimental && !experimentalAvailable,
             onClick: () => { actions.onGenerateLayout?.(nodeId) },
           },
           '生成',
@@ -1599,30 +1607,61 @@ export function LayoutFlowNode(props: NodeProps): ReactNode {
     ),
     createElement(
       'div',
-      { className: 'dsh-forge-flow-layout-caption', title: typeof data['caption'] === 'string' ? data['caption'] : '' },
-      typeof data['caption'] === 'string' && data['caption'].length > 0 ? data['caption'] : '尚未填写整图描述',
+      { className: 'dsh-forge-flow-layout-caption', title: caption },
+      captionLine,
     ),
     createElement(
       'div',
-      { className: 'dsh-forge-flow-layout-body nodrag nopan nowheel' },
-      draft === undefined
-        ? createElement('div', { className: 'dsh-forge-flow-layout-error' }, '草稿缺失')
-        : createElement(LayoutThumb, {
-          nodeId,
-          draft,
-          onOpenDetail: () => { actions.onOpenDetail?.(nodeId) },
+      { className: 'dsh-forge-flow-layout-body nopan nowheel' },
+      createElement(LayoutThumb, { nodeId, draft }),
+    ),
+    references.length === 0 ? null : createElement(
+      'div',
+      { className: 'dsh-forge-flow-layout-refs', title: `已连接 ${String(references.length)} 张参考图` },
+      ...visibleReferences.map((reference, index) => createElement(
+        'span',
+        { key: String(reference['nodeId'] ?? index), className: 'dsh-forge-flow-layout-ref' },
+        createElement('img', {
+          src: String(reference['thumbUrl'] ?? ''),
+          alt: String(reference['name'] ?? `参考图 ${String(index + 1)}`),
+          draggable: false,
+          loading: 'lazy',
         }),
+      )),
+      references.length > visibleReferences.length
+        ? createElement('span', { className: 'dsh-forge-flow-layout-ref-more' }, `+${String(references.length - visibleReferences.length)}`)
+        : null,
+    ),
+    references.length === 0 ? null : createElement(
+      'button',
+      {
+        type: 'button',
+        className: experimental
+          ? 'dsh-forge-flow-layout-mode is-experimental'
+          : 'dsh-forge-flow-layout-mode',
+        'aria-pressed': experimental,
+        disabled: !experimentalAvailable,
+        title: !experimentalAvailable
+          ? `实验叠加不可用：${experimentalReason ?? '当前环境不满足要求'}`
+          : experimental
+            ? '当前为实验性 Layout + 参考图；点击切回官方纯 Layout'
+            : '当前为官方纯 Layout；点击启用实验性 Layout + 参考图',
+        onClick: () => {
+          actions.onLayoutMode?.(nodeId, experimental ? 'layout' : 'layout-edit-experimental')
+        },
+      },
+      createElement('span', { className: 'dsh-forge-flow-layout-mode-dot' }),
+      experimental ? 'Layout + 参考（实验）' : '纯 Layout',
     ),
     createElement(
       'div',
       { className: 'dsh-forge-flow-layout-foot' },
-      `${String(boxes)} 框 · ${String(width)}×${String(height)}`
-        + (referenceCount > 0 ? ` · ${String(referenceCount)} 参考（布局通路不支持参考图）` : ''),
+      `${String(boxes)} 框 · ${String(width)}×${String(height)} · ${ratio}`
+        + (references.length > 0 ? ` · ${String(references.length)} 参考` : ''),
     ),
     createElement(NodeHandles, { kind: 'layout' }),
   )
 }
-
 /** The placeholder a wire drop creates: it names what it is waiting for. */
 export function DraftFlowNode(props: NodeProps): ReactNode {
   const data = props.data as Record<string, unknown>
@@ -1702,15 +1741,17 @@ export function LineageEdge(props: EdgeProps): ReactNode {
       ? null
       : createElement(
           EdgeLabelRenderer,
-          { key: 'label' },
-          createElement(
-            'div',
-            {
-              className: 'dsh-forge-flow-edge-label',
-              style: { transform: `translate(-50%, -50%) translate(${String(labelX)}px, ${String(labelY)}px)` },
-            },
-            label,
-          ),
+          {
+            key: 'label',
+            children: createElement(
+              'div',
+              {
+                className: 'dsh-forge-flow-edge-label',
+                style: { transform: `translate(-50%, -50%) translate(${String(labelX)}px, ${String(labelY)}px)` },
+              },
+              label,
+            ),
+          },
         ),
   ]
 }

@@ -485,7 +485,7 @@ export function ProjectsPane(props: ProjectsPaneProps): ReturnType<typeof create
                           role: 'menuitem',
                           className: 'dsh-forge-workbench-action',
                           'aria-label': `复制 ${board.name}`,
-                          title: '复制一份：条目、位置与血缘都复制，图片文件不复制',
+                          title: '复制一份：条目、位置与参考关系都复制，图片文件不复制',
                           onClick: () => {
                             setConfirming(undefined)
                             setMenuFor(undefined)

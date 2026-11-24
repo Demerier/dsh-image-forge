@@ -23,6 +23,7 @@ import test from 'node:test'
 import { renderTextToImage } from '../src/comfyui.ts'
 import {
   MODEL_PROFILES,
+  MOSS_IMAGE_LAYOUT_EDIT_WORKFLOW,
   MOSS_IMAGE_LAYOUT_WORKFLOW,
   MOSS_IMAGE_WORKFLOW,
   parseMossLayout,
@@ -56,6 +57,14 @@ test('only the MOSS profile carries a layout template', () => {
   // The no-layout path feeds the sampler straight from the text encoders.
   assert.deepEqual(MOSS_IMAGE_WORKFLOW['8'].inputs.positive, ['4', 0])
   assert.deepEqual(MOSS_IMAGE_WORKFLOW['8'].inputs.negative, ['5', 0])
+})
+
+test('the experimental layout edit graph swaps only the positive edit prompt', () => {
+  assert.equal(MOSS_IMAGE_LAYOUT_EDIT_WORKFLOW['7'].inputs.prompt, '{{layout_json}}')
+  assert.equal(MOSS_IMAGE_LAYOUT_EDIT_WORKFLOW['8'].inputs.prompt, '{{negative_prompt}}')
+  assert.equal(MOSS_IMAGE_LAYOUT_EDIT_WORKFLOW['9'].class_type, 'KSampler')
+  assert.deepEqual(MOSS_IMAGE_LAYOUT_EDIT_WORKFLOW['9'].inputs.positive, ['7', 0])
+  assert.deepEqual(MOSS_IMAGE_LAYOUT_EDIT_WORKFLOW['9'].inputs.negative, ['8', 0])
 })
 
 test('the layout graph changes only the positive encoder text', () => {

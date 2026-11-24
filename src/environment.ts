@@ -37,7 +37,7 @@ import net from 'node:net'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type InferValue } from '@deepseek-ai/dsh-tools'
 import {
   comfySystemStats,
   discoverComfyUi,
@@ -262,8 +262,9 @@ export interface EnvironmentDeps {
 }
 
 /** Coerce a payload into lossless JSON (`undefined` becomes `null` at every depth). */
-function jsonSafe<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value, (_key, inner) => (inner === undefined ? null : inner))) as T
+type ToolJson = InferValue<{ type: 'json' }>
+function jsonSafe(value: unknown): ToolJson {
+  return JSON.parse(JSON.stringify(value, (_key, inner) => (inner === undefined ? null : inner))) as ToolJson
 }
 
 /** First line of a message, so a structured note stays one line. */
@@ -466,7 +467,7 @@ function attemptsOf(probed: unknown): EnvironmentProbeAttempt[] {
 /** Normalise `/system_stats` into the JSON-safe shape the report stores. */
 function statsOf(stats: ComfySystemStats | null): ComfySystemStats | null {
   if (!stats) return null
-  return { version: stats.version ?? null, devices: stats.devices ?? [], note: stats.note ?? null }
+  return { version: stats.version ?? null, devices: stats.devices ?? [], note: stats.note ?? undefined }
 }
 
 /** One probe outcome: either a ComfyUI that answered, or why none did. */
@@ -1483,7 +1484,7 @@ export async function runInstallAutomation(deps: EnvironmentDeps = {}): Promise<
   if (!gate || gate.authorized !== true) return { ran: false, note: '未获 computer use 授权：不执行任何自动安装动作（手动步骤见 install.steps）。' }
   if (typeof gate.run !== 'function') return { ran: false, note: '已授权但宿主没有提供安装执行器：不假装能装，退回手工步骤。' }
   try {
-    const result = await gate.run()
+    const result = await gate.run() as { readonly note?: string } | undefined
     return { ran: true, note: typeof result?.note === 'string' ? result.note : '自动安装执行器已运行。' }
   } catch (error) {
     return { ran: false, note: '自动安装执行器失败：' + (error instanceof Error ? error.message : String(error)) }

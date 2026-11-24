@@ -38,10 +38,14 @@ import { CONNECT_THRESHOLD, nodeUnderPoint, reaches } from './canvas-connections
 import type { ConnectNode } from './canvas-connections.ts'
 import { clampLayoutNodeWidth, layoutNodeHeight } from './layout-editor.ts'
 import {
+  STUDIO_LAYOUT_RATIO_TOLERANCE,
   STUDIO_NODE_THUMB_WIDTH,
+  fitStudioRatio,
   studioFileUrl,
   type BoardLayoutDraft,
   type BoardTaskParams,
+  type StudioLayoutExperimentalCapability,
+  type StudioLayoutMode,
 } from './studio-shared.ts'
 
 /* -------------------------------------------------------------------------- */
@@ -81,11 +85,19 @@ export interface FlowTaskSource {
   readonly error?: string
 }
 
+/** One picture wired into a layout node, as far as the node painter reads it. */
+export interface FlowLayoutReference {
+  readonly nodeId?: string
+  readonly name: string
+  readonly previewUrl: string
+}
+
 /** A MOSS layout draft: the editor plus its display box (§8.1). */
 export interface FlowLayoutSource {
   readonly kind: 'layout'
-  /** Pictures wired into this draft (the node shows the count). */
-  readonly references?: readonly unknown[]
+  /** Pictures wired into this draft, in connection order. */
+  readonly references?: readonly FlowLayoutReference[]
+  readonly layoutMode?: StudioLayoutMode
   readonly id: string
   readonly x: number
   readonly y: number
@@ -317,6 +329,8 @@ export interface FlowModel {
 export interface FlowModelOptions {
   /** Ids the caller considers selected; painted onto the nodes. */
   readonly selected?: ReadonlySet<string>
+  /** Capability snapshot for the opt-in layout + reference graph. */
+  readonly layoutExperimental?: StudioLayoutExperimentalCapability
   /**
    * Whether each lineage edge carries its kind as a label.
    *
@@ -343,8 +357,47 @@ const EDGE_LABELS: Readonly<Record<FlowSourceNode['kind'], string>> = {
   draft: '待生成',
 }
 
+export type FlowLayoutStatusTone = 'ready' | 'warning' | 'experimental'
+
+export interface FlowLayoutStatus {
+  readonly key: 'missing-draft' | 'missing-boxes' | 'missing-caption' | 'ratio-mismatch' | 'missing-reference' | 'experimental-unavailable' | 'experimental' | 'ready'
+  readonly label: string
+  readonly tone: FlowLayoutStatusTone
+}
+
+/** The readiness badge the layout node paints, derived from the same draft it previews. */
+export function layoutStatusOf(
+  draft: BoardLayoutDraft | undefined,
+  layoutMode: StudioLayoutMode = 'layout',
+  referenceCount = 0,
+  capability?: StudioLayoutExperimentalCapability,
+): FlowLayoutStatus {
+  if (draft === undefined) return { key: 'missing-draft', label: '草稿缺失', tone: 'warning' }
+  if (!Array.isArray(draft.items) || draft.items.length === 0) return { key: 'missing-boxes', label: '缺画框', tone: 'warning' }
+  const caption = typeof draft.summary?.caption === 'string' ? draft.summary.caption.trim() : ''
+  if (caption.length === 0) return { key: 'missing-caption', label: '缺整图描述', tone: 'warning' }
+  const fit = fitStudioRatio(draft.width, draft.height)
+  if (fit === undefined || fit.deviation > STUDIO_LAYOUT_RATIO_TOLERANCE) {
+    return { key: 'ratio-mismatch', label: '比例不匹配', tone: 'warning' }
+  }
+  if (layoutMode === 'layout-edit-experimental' && referenceCount === 0) {
+    return { key: 'missing-reference', label: '缺参考图', tone: 'warning' }
+  }
+  if (layoutMode === 'layout-edit-experimental' && capability?.available === false) {
+    return { key: 'experimental-unavailable', label: '实验不可用', tone: 'warning' }
+  }
+  if (layoutMode === 'layout-edit-experimental') {
+    return { key: 'experimental', label: '实验叠加', tone: 'experimental' }
+  }
+  return { key: 'ready', label: '可生成', tone: 'ready' }
+}
+
 /** The `data` payload of one node — the only thing its component reads. */
-function dataOf(node: FlowSourceNode, highlighted: boolean): FlowNodeData {
+function dataOf(
+  node: FlowSourceNode,
+  highlighted: boolean,
+  layoutExperimental?: StudioLayoutExperimentalCapability,
+): FlowNodeData {
   if (node.kind === 'image') {
     return {
       kind: 'image',
@@ -375,15 +428,33 @@ function dataOf(node: FlowSourceNode, highlighted: boolean): FlowNodeData {
     }
   }
   if (node.kind === 'layout') {
+    const caption = typeof node.draft.summary?.caption === 'string' ? node.draft.summary.caption : ''
+    const references = (node.references ?? []).map((reference) => ({
+      nodeId: reference.nodeId,
+      name: reference.name,
+      thumbUrl: reference.previewUrl,
+    }))
+    const layoutMode = node.layoutMode ?? 'layout'
+    const status = layoutStatusOf(node.draft, layoutMode, references.length, layoutExperimental)
+    const fit = fitStudioRatio(node.draft.width, node.draft.height)
     return {
       kind: 'layout',
       nodeId: node.id,
       draft: node.draft,
-      caption: typeof node.draft.summary?.caption === 'string' ? node.draft.summary.caption : '',
+      caption,
+      captionLine: caption.split(/\r?\n/, 1)[0]?.trim() ?? '',
       boxes: node.draft.items.length,
       width: node.draft.width,
       height: node.draft.height,
-      referenceCount: node.references?.length ?? 0,
+      ratio: fit?.ratio ?? '—',
+      references,
+      referenceCount: references.length,
+      layoutMode,
+      statusKey: status.key,
+      statusLabel: status.label,
+      statusTone: status.tone,
+      ...(layoutExperimental === undefined ? {} : { experimentalAvailable: layoutExperimental.available }),
+      ...(layoutExperimental?.reason === undefined ? {} : { experimentalReason: layoutExperimental.reason }),
       ...(highlighted ? { highlighted: true } : {}),
     }
   }
@@ -444,7 +515,7 @@ export function toFlowModel(
       height: size.height,
       selected: selected.has(node.id),
       draggable: !locked.has(node.id),
-      data: dataOf(node, options.highlighted === node.id),
+      data: dataOf(node, options.highlighted === node.id, options.layoutExperimental),
     })
     for (const parentId of node.parents) {
       if (!known.has(parentId)) {
@@ -487,7 +558,22 @@ export function flowModelFingerprint(model: FlowModel): string {
     (node) =>
       `${node.id}:${node.type}:${String(node.position.x)},${String(node.position.y)}:${String(node.width)}x${String(node.height)}:${node.selected ? '1' : '0'}:${
         typeof node.data['status'] === 'string' ? node.data['status'] : ''
-      }:${typeof node.data['percent'] === 'number' ? String(node.data['percent']) : ''}:${node.data['highlighted'] === true ? 'focus' : ''}`,
+      }:${typeof node.data['percent'] === 'number' ? String(node.data['percent']) : ''}:${node.data['highlighted'] === true ? 'focus' : ''}:${
+        node.type === 'layout'
+          ? [
+              node.data['statusKey'],
+              node.data['statusLabel'],
+              node.data['captionLine'],
+              node.data['referenceCount'],
+              node.data['layoutMode'],
+              node.data['boxes'],
+              node.data['width'],
+              node.data['height'],
+              node.data['ratio'],
+              node.data['experimentalAvailable'],
+            ].map((value) => String(value ?? '')).join(',')
+          : ''
+      }`,
   )
   parts.push('|')
   for (const edge of model.edges) parts.push(`${edge.id}>${edge.source ?? ''}->${edge.target}`)
@@ -724,7 +810,24 @@ function sameFlowNode(left: FlowNodeSpec, right: FlowNodeSpec): boolean {
   const keys = Object.keys(leftData)
   if (keys.length !== Object.keys(rightData).length) return false
   for (const key of keys) {
-    if (!Object.is(leftData[key], rightData[key])) return false
+    if (Object.is(leftData[key], rightData[key])) continue
+    const leftValue = leftData[key]
+    const rightValue = rightData[key]
+    // Layout reference thumbnails are projected into fresh view objects on each
+    // model build. Compare the few drawn fields instead of forcing every node
+    // without changed references to repaint on a progress tick.
+    if (key === 'references' && Array.isArray(leftValue) && Array.isArray(rightValue)) {
+      if (leftValue.length !== rightValue.length) return false
+      for (const [index, leftRef] of leftValue.entries()) {
+        const rightRef = rightValue[index]
+        if (typeof leftRef !== 'object' || leftRef === null || typeof rightRef !== 'object' || rightRef === null) return false
+        const a = leftRef as Record<string, unknown>
+        const b = rightRef as Record<string, unknown>
+        if (a['nodeId'] !== b['nodeId'] || a['name'] !== b['name'] || a['thumbUrl'] !== b['thumbUrl']) return false
+      }
+      continue
+    }
+    return false
   }
   return true
 }
@@ -754,13 +857,12 @@ function sameFlowNode(left: FlowNodeSpec, right: FlowNodeSpec): boolean {
  *   its Shift-union), so the library must not draw a second one.
  * - `panOnDrag` — left-drag pans by default (v2: blank-drag is pan, not marquee);
  *   Shift+left is the marquee, handled by the pane so the library never draws a
- *   second one. Middle-drag still pans, and hand mode keeps every button panning.
+ *   second one. Middle-drag still pans, and Space is handled by React Flow.
  */
 export interface FlowInteractionOptions {
   /** Whether a selection callback exists at all; drives `elementsSelectable`. */
   readonly selectable?: boolean
-  /** Sticky hand mode (`panHeld`, or the toolbar toggle). */
-  readonly panMode?: boolean
+
   /**
    * While Shift is held the pane must not pan on left-drag: that gesture is the
    * custom marquee. Middle-drag and Space+drag still pan (React Flow's own keys).
@@ -790,7 +892,7 @@ export interface FlowInteractionProps {
   readonly multiSelectionKeyCode: null
   readonly selectionKeyCode: null
   readonly selectionOnDrag: false
-  readonly panOnDrag: true | readonly number[]
+  readonly panOnDrag: true | number[]
   readonly zoomOnDoubleClick: false
   readonly minZoom: number
   readonly maxZoom: number

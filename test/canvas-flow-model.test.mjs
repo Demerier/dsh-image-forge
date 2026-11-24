@@ -80,6 +80,7 @@ import {
   initialFlowView,
   initialFlowViewForBoard,
   judgeConnection,
+  layoutStatusOf,
   nodeSizeOf,
   nodeTypeOf,
   planConnectionDrop,
@@ -157,6 +158,8 @@ function layoutNode(id, options = {}) {
     w: options.w ?? LAYOUT_NODE_DEFAULT_WIDTH,
     h: options.h ?? layoutNodeHeight(options.w ?? LAYOUT_NODE_DEFAULT_WIDTH, draft),
     draft,
+    ...(options.layoutMode === undefined ? {} : { layoutMode: options.layoutMode }),
+    ...(options.references === undefined ? {} : { references: options.references }),
   }
 }
 
@@ -290,12 +293,35 @@ test('the task payload carries everything its painter prints', () => {
   assert.equal(node.data.error, '显存不足')
 })
 
-test('a layout payload keeps the draft itself, never a rendered copy', () => {
-  const source = layoutNode('l1')
+test('a layout payload is a live, default-official summary', () => {
+  const source = layoutNode('l1', {
+    references: [{ nodeId: 'img1', name: 'one.png', previewUrl: 'thumb://one' }],
+  })
   const [node] = toFlowModel([source]).nodes
   assert.equal(node.data.draft, source.draft, 'the draft is passed through by identity')
   assert.equal(node.data.boxes, 1)
   assert.deepEqual([node.data.width, node.data.height], [1536, 1024], 'the draft pixels, not the display box')
+  assert.equal(node.data.captionLine, '一张海报')
+  assert.equal(node.data.ratio, '3:2')
+  assert.equal(node.data.layoutMode, 'layout', 'old data without a mode is official Layout')
+  assert.equal(node.data.statusKey, 'ready')
+  assert.equal(node.data.statusLabel, '可生成')
+  assert.equal(node.data.referenceCount, 1)
+  assert.deepEqual(node.data.references, [{ nodeId: 'img1', name: 'one.png', thumbUrl: 'thumb://one' }])
+})
+
+test('layout status names the one thing blocking generation', () => {
+  const draft = layoutNode('l1').draft
+  assert.equal(layoutStatusOf(draft, 'layout', 0).key, 'ready')
+  assert.equal(layoutStatusOf({ ...draft, items: [] }, 'layout', 0).key, 'missing-boxes')
+  assert.equal(layoutStatusOf({ ...draft, summary: { caption: '  ' } }, 'layout', 0).key, 'missing-caption')
+  assert.equal(layoutStatusOf({ ...draft, width: 1024, height: 640 }, 'layout', 0).key, 'ratio-mismatch')
+  assert.equal(layoutStatusOf(draft, 'layout-edit-experimental', 0).key, 'missing-reference')
+  assert.equal(layoutStatusOf(draft, 'layout-edit-experimental', 1).key, 'experimental')
+  assert.equal(
+    layoutStatusOf(draft, 'layout-edit-experimental', 1, { available: false, reason: '缺 LoRA' }).key,
+    'experimental-unavailable',
+  )
 })
 
 /* -------------------------------------------------------------------------- */
@@ -646,8 +672,8 @@ test('flowInteractionProps turns off every key the library would handle itself',
 
   // Shift is the marquee trigger: while held, React Flow must not pan on left.
   assert.deepEqual(flowInteractionProps({ selectable: true, suppressLeftPan: true }).panOnDrag, [1])
-  // Hand mode keeps every button panning.
-  assert.equal(flowInteractionProps({ selectable: true, panMode: true }).panOnDrag, true)
+  // Selection never introduces a mode: a blank left-drag still pans.
+  assert.equal(flowInteractionProps({ selectable: true }).panOnDrag, true)
   // No selection callback, no selectable elements.
   assert.equal(flowInteractionProps().elementsSelectable, false)
 })

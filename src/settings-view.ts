@@ -533,7 +533,7 @@ export function QwenImageSettingsSection(props: SettingsSectionProps<unknown>): 
   let snapshot: ConfigFormSnapshotLike<unknown> | undefined
   try { snapshot = form?.getSnapshot() } catch { snapshot = undefined }
   const ready = snapshot !== undefined && snapshot.status === 'ready' && typeof snapshot.value === 'object' && snapshot.value !== null
-  const values = ready ? snapshot.value as Record<string, unknown> : {}
+  const values = ready && snapshot !== undefined ? snapshot.value as Record<string, unknown> : {}
   const baseEntries = draft ?? draftFromValues(SETTINGS_FIELDS, values)
   const validation = normalizeSettingsDraft(SETTINGS_FIELDS, baseEntries, values)
   const errors = Object.fromEntries(validation.errors.map((error) => [error.key, error.message]))

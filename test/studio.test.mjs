@@ -228,6 +228,7 @@ import {
 } from '../testlib/studio-routes.js'
 import {
   resolveStudioSteps,
+  runStudioGeneration,
   studioSettingsOf,
   studioSize,
   studioSizeTable,
@@ -313,6 +314,7 @@ import {
 // U06: the node detail tab's decisions, imported from the shipped source for the
 // same reason as the drawer's above — they are pure, and a `testlib/` snapshot
 // would only be rebuilt with the whole host bundle.
+import { applyMention, filterMentionCandidates, mentionRangeAt } from '../src/studio-mentions.ts'
 import {
   EMPTY_DRAFT_HISTORY,
   NODE_DETAIL_KIND_LABELS,
@@ -524,6 +526,32 @@ test('a board mutation is a closed action set with bounded payloads', () => {
 
   // A typo in the panel must look like a refusal, not a successful save.
   assert.throws(() => parseBoardAction({ action: 'nope' }), /未知的画板操作/)
+
+  // Layout references are ordered, deduplicated and capped at the MOSS edit
+  // graph's ten slots. The mode travels with the same write.
+  const draft = {
+    width: 1024, height: 1024, bbox_coord_space: 'abs', bbox_format: 'xyxy',
+    summary: { caption: 'poster' }, items: [{ label: 'object', caption: 'cup', bbox: [0, 0, 10, 10] }],
+  }
+  const refs = Array.from({ length: 10 }, (_, index) => `img-${String(index)}`)
+  const layoutWrite = parseBoardActionLive({
+    action: 'save-layout-node',
+    draft,
+    w: 480,
+    h: 420,
+    references: [...refs, 'img-2'],
+    layoutMode: 'layout-edit-experimental',
+  })
+  assert.deepEqual(layoutWrite.references, refs)
+  assert.equal(layoutWrite.layoutMode, 'layout-edit-experimental')
+  assert.throws(
+    () => parseBoardActionLive({ action: 'save-layout-node', draft, w: 480, h: 420, references: [...refs, 'img-10'] }),
+    /最多支持 10 张参考图/,
+  )
+  assert.throws(
+    () => parseBoardActionLive({ action: 'save-layout-node', draft, w: 480, h: 420, layoutMode: 'blend' }),
+    /layoutMode/,
+  )
   assert.throws(() => parseBoardAction(null), /请求格式无效/)
   assert.throws(() => parseBoardAction({}), /未知的画板操作/)
 
@@ -2742,6 +2770,28 @@ test('C14: a draft maps onto the official ratio ladder, and a stretched draft is
   assert.equal(fitStudioRatio(0, 100), undefined)
 })
 
+test('C14: the API rejects a layout canvas outside the official ratio tolerance before any socket', async () => {
+  const settings = {
+    comfyEndpoint: 'http://127.0.0.1:1',
+    comfyPorts: [],
+    comfyModelsDir: '',
+    timeoutMs: 1_000,
+    outputDir: process.cwd(),
+    defaultSteps: 25,
+    comfyuiSteps: undefined,
+    comfyModel: 'moss-sft',
+    mossSampling: 'comfy',
+    turboSteps: undefined,
+  }
+  await assert.rejects(
+    () => runStudioGeneration(settings, {
+      prompt: 'poster', ratio: '3:2', width: 1536, height: 1008, count: 1,
+      layout: LAYOUT_SAMPLE, layoutMode: 'layout',
+    }, new AbortController().signal),
+    /与画幅 3:2 不匹配/,
+  )
+})
+
 test('C14: the layout request is T21-shaped, and the no-layout graph stays byte-identical', () => {
   const resolved = { width: 1248, height: 832, count: 1, steps: 25, seed: 7 }
   const plain = studioTextToImageRequestOf({ prompt: '  A minimalist poster.  ' }, resolved)
@@ -3781,7 +3831,7 @@ test('U04 S4: a task node’s buttons reach the studio callbacks that own them',
   assert.ok(remove.includes('deleteFile &&'), 'and only an explicit delete asks for the file')
 })
 
-test('U04 S4: a layout node saves its draft, and its box is the box its editor is mounted in', () => {
+test('U04 S4: a layout node persists its draft and renders a live summary', () => {
   // 编辑后保存: the editor's change is one coalesced undo step plus the debounced
   // `save-layout-node` write — which is what makes the draft survive a reload.
   const draft = sourceBlock('updateLayoutDraft')
@@ -3790,14 +3840,23 @@ test('U04 S4: a layout node saves its draft, and its box is the box its editor i
   assert.ok(draft.includes('layoutNodeHeight('), 'the node height follows the draft')
   assert.ok(draft.includes('clampLayoutNodeWidth('), 'and the width stays inside the band')
   assert.ok(CLIENT_SOURCE.includes('onDraft: updateLayoutDraft'), 'the embedded editor reports into it')
-  // The node is the draft plus chrome: a 480×420 box leaves 320 px for a 1536×1024
-  // draft, while the standalone editor needs ~690 px for its toolbar, caption rows,
-  // hint and export box. So the node's host **scrolls** (nothing is clipped away)
-  // and the one field a generation cannot do without — `summary.caption`, which T21
-  // takes as the prompt — is a real input on the node itself.
-  assert.ok(CLIENT_SOURCE.includes('dsh-forge-flow-layout-caption-input'), 'the caption is an input on the node')
-  assert.ok(CLIENT_SOURCE.includes('onLayoutCaption'), 'and it writes through the draft path')
-  assert.ok(/dsh-forge-flow-layout-host.{0,80}overflow:auto/.test(CLIENT_SOURCE) || CLIENT_SOURCE.includes('dsh-forge-flow-layout-host{position:absolute;inset:0;overflow:auto'), 'the node host scrolls instead of clipping the editor fields')
+  // The node is a live summary, not a second editor: caption, status, layout
+  // thumbnails and the per-node mode switch come from the persisted draft and
+  // references. Editing happens in the detail page only.
+  assert.equal(CLIENT_SOURCE.includes('dsh-forge-flow-layout-caption-input'), false, 'the node no longer owns a caption input')
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-flow-layout-status'), 'the node paints a readiness badge')
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-flow-layout-refs'), 'the node paints reference thumbnails')
+  assert.ok(CLIENT_SOURCE.includes('dsh-forge-flow-layout-mode'), 'the node exposes the pure/experimental switch')
+  assert.ok(CLIENT_SOURCE.includes('onLayoutMode'), 'and the switch writes through the node mode path')
+  assert.match(
+    CLIENT_SOURCE,
+    /\.dsh-forge-flow-layout-body\{[^}]*display:flex[^}]*\}/,
+    'the thumbnail container must flex, or the absolutely-positioned boxes collapse to zero height',
+  )
+  assert.ok(
+    CLIENT_SOURCE.includes('dsh-forge-flow-layout-body nopan nowheel'),
+    'the preview body must not carry nodrag: node dragging works from the boxes just like its edges',
+  )
 
   // 尺寸与 zoom 来源: the editor measures its own box with `getBoundingClientRect`
   // *inside* the zoomed viewport, so the zoom is already in that measurement and
@@ -3922,7 +3981,8 @@ test('U05: the field set and the buttons follow the node kind', () => {
   assert.equal(fieldOf(image, 'seed').value, '7')
   assert.equal(fieldOf(image, 'model').value, 'qwen_image_2.1.safetensors', '底模 is profile-level, shown read-only')
   assert.equal(fieldOf(image, 'size').value, '1248×1248')
-  assert.deepEqual(image.lineage, ['p1'], 'where it grew from')
+  assert.deepEqual(image.lineage, ['p1'], 'the referenced item id survives')
+  assert.equal(fieldOf(image, 'lineage').label, '参考图', 'user-facing lineage uses reference-image language')
   // U06: 打开详情 sits between "look at it" and "remove" — every persisted node
   // kind has a detail tab now (§8.2), so the picture offers the same entry.
   assert.deepEqual(image.actions.map((action) => action.id), ['continue', 'open', 'open-detail', 'remove'])
@@ -4009,6 +4069,51 @@ test('U05: the drawer’s values are the generate body, key for key', () => {
   assert.equal(canGenerateFromDrawer({ ...EMPTY_DRAFT_VALUES, prompt: '猫' }, 11), false, 'over the reference cap')
 })
 
+test('U05: @ mentions resolve the active query and replace only that token', () => {
+  assert.deepEqual(mentionRangeAt('把 @ra 改成蓝色', 5), { start: 2, end: 5, query: 'ra' })
+  assert.equal(mentionRangeAt('普通提示词', 4), undefined)
+  assert.equal(mentionRangeAt('a@b', 3), undefined, 'whitespace is required after an @ query')
+  const candidates = [
+    { id: 'a', label: 'rainy-wide.png', detail: '雨夜街口', path: 'C:/out/rainy-wide.png' },
+    { id: 'b', label: 'rainy-tall.png', detail: '同一条街', path: 'C:/out/rainy-tall.png' },
+  ]
+  assert.deepEqual(filterMentionCandidates(candidates, 'tall').map((item) => item.id), ['b'])
+  assert.deepEqual(filterMentionCandidates(candidates, '', ['C:/out/rainy-wide.png']).map((item) => item.id), ['b'])
+  const applied = applyMention('把 @ra 改成蓝色', { start: 2, end: 5, query: 'ra' }, 'rainy-wide.png')
+  assert.deepEqual(applied, { prompt: '把 @rainy-wide.png  改成蓝色', caret: 18 })
+})
+
+test('U05: the composer labels its controls and sends the selected 2K canvas', async () => {
+  const requests = []
+  const { network, panel } = await mountWorkbench({
+    board: HARNESS_BOARD,
+    generate: (init) => {
+      requests.push(JSON.parse(init.body))
+      return fakeResponse(generateResult([resultImage('u05res1')]))
+    },
+  })
+  try {
+    const composer = byClassNow(panel, 'dsh-forge-canvas-composer')
+    assert.ok(composer !== undefined)
+    const labels = findAll(panel.tree, (element) => element.props?.className === 'dsh-forge-canvas-composer-field-label').map(fakeText)
+    assert.deepEqual(labels, ['画幅', '分辨率', '张数'])
+    assert.equal(findAll(panel.tree, (element) => element.props?.['aria-label'] === '采样步数').length, 0, 'steps are not the quick composer parameter')
+
+    findAll(panel.tree, (element) => element.props?.['aria-label'] === '画布提示词')[0].props.onChange({
+      target: { value: '一只橘猫', selectionStart: 4 },
+    })
+    findAll(panel.tree, (element) => element.props?.['aria-label'] === '输出分辨率')[0].props.onChange({ target: { value: '2k' } })
+    await settle(panel)
+    findAll(panel.tree, (element) => typeof element.props?.className === 'string' && element.props.className.includes('dsh-forge-canvas-composer-primary'))[0].props.onClick()
+    await settle(panel)
+
+    assert.equal(requests.length, 1)
+    assert.deepEqual([requests[0].width, requests[0].height], [2048, 2048], '1:1 at the 2K tier is the exact advertised canvas')
+  } finally {
+    network.restore()
+  }
+})
+
 test('U05: the canvas tab has no permanent drawer and uses a selected-node context panel', async () => {
   const { network, panel } = await mountWorkbench({ board: U05_BOARD })
   try {
@@ -4018,6 +4123,12 @@ test('U05: the canvas tab has no permanent drawer and uses a selected-node conte
     assert.equal(byClassNow(panel, 'dsh-forge-textarea'), undefined, 'and no duplicate form prompt box')
     assert.ok(byClassNow(panel, 'dsh-forge-canvas-shell') !== undefined, 'the canvas keeps its box')
     assert.ok(byClassNow(panel, 'dsh-forge-canvas-composer') !== undefined, 'the bottom composer is the canvas entry')
+    assert.equal(buttonByLabel(panel, '选择与框选'), undefined, 'selection is not a toolbar mode')
+    assert.equal(buttonByLabel(panel, '平移画布'), undefined, 'panning is not a toolbar mode')
+    const gestureGuide = byClassNow(panel, 'dsh-forge-canvas-gesture-guide')
+    assert.ok(gestureGuide !== undefined, 'the gesture legend lives on the canvas')
+    assert.match(fakeText(gestureGuide), /Shift 拖动框选/)
+    assert.match(fakeText(gestureGuide), /Ctrl\/⌘\+滚轮缩放/)
     assert.equal(inspectorElement(panel), undefined, 'nothing selected means no drawer and no empty placeholder')
 
     buttonByLabel(panel, '新建生成节点').props.onClick()
@@ -4030,8 +4141,46 @@ test('U05: the canvas tab has no permanent drawer and uses a selected-node conte
     assert.ok(byClassNow(panel, 'dsh-forge-studio-form') !== undefined, '画廊 keeps the form')
     const scope = findAll(panel.tree, (element) => typeof element.props.className === 'string' && element.props.className.includes('dsh-forge-gallery-scope-item')).map(fakeText)
     assert.deepEqual(scope, ['当前画板', '全部素材'], 'asset scope is a gallery filter, not a third mode')
+    const allAssets = findAll(panel.tree, (element) => element.type === 'button' && element.props?.className === 'dsh-forge-gallery-scope-item' && fakeText(element) === '全部素材')[0]
+    assert.ok(allAssets !== undefined, 'the gallery exposes the all-assets scope switch')
+    allAssets.props.onClick()
+    await settle(panel)
+    assert.ok(byClassNow(panel, 'dsh-forge-assets') !== undefined, 'switching to all assets renders the library instead of an undefined branch')
+    assert.ok(byClassNow(panel, 'dsh-forge-assets-grid') === undefined, 'an empty fixture renders the empty state without inventing assets')
     assert.ok(byClassNow(panel, 'dsh-forge-textarea') !== undefined)
     assert.equal(inspectorElement(panel), undefined, 'and the node editor belongs to the canvas tab alone')
+  } finally {
+    network.restore()
+  }
+})
+
+test('canvas tool dock cancels a pending close when the pointer returns', async () => {
+  const { network, panel } = await mountWorkbench({ board: U05_BOARD })
+  try {
+    const dock = () => {
+      let found
+      fakeVisit(panel.tree, (entry) => {
+        if (found !== undefined || typeof entry.props.className !== 'string') return
+        if (entry.props.className.split(' ').includes('dsh-forge-canvas-tool-dock')) found = entry
+      })
+      assert.ok(found !== undefined, 'the canvas tool dock must render')
+      return found
+    }
+    assert.equal(dock().props['data-open'], 'false', 'the rail starts compact')
+    dock().props.onPointerEnter()
+    await settle(panel)
+    assert.equal(dock().props['data-open'], 'true', 'hover opens the rail')
+
+    dock().props.onPointerLeave()
+    dock().props.onPointerEnter()
+    await new Promise((resolve) => setTimeout(resolve, 210))
+    await settle(panel)
+    assert.equal(dock().props['data-open'], 'true', 'returning during the grace period cancels the close')
+
+    dock().props.onPointerLeave()
+    await new Promise((resolve) => setTimeout(resolve, 210))
+    await settle(panel)
+    assert.equal(dock().props['data-open'], 'false', 'leaving for the full grace period closes it')
   } finally {
     network.restore()
   }
@@ -4766,20 +4915,31 @@ test('the live-progress line is collapsed until a run reports something', async 
     network.restore()
   }
 })
-test('a layout node wired to a picture refuses the layout run by name', () => {
-  // The MOSS layout graph is text-to-image only: its positive conditioning is the
-  // compiled JSON, and it has no reference slots. Landing a wire on a layout is
-  // still meaningful (the node keeps the reference and shows it), but the run has
-  // to say why it will not silently ignore it.
+test('layout mode keeps official and experimental generation distinct', () => {
   const draft = {
     width: 1024, height: 1024, bbox_coord_space: 'abs', bbox_format: 'xyxy',
     summary: { caption: 'poster' },
     items: [{ label: 'object', caption: 'cup', bbox: [0, 0, 400, 400] }],
   }
-  assert.equal(layoutGeneratePlan(draft, 0).ok, true)
-  const refused = layoutGeneratePlan(draft, 2)
-  assert.equal(refused.ok, false)
-  assert.match(refused.reason, /参考图/)
+  // References are allowed in the default official mode and remain node data;
+  // the generation plan stays official, so the host will ignore them.
+  const official = layoutGeneratePlan(draft, 2)
+  assert.equal(official.ok, true)
+  assert.equal(official.params.layoutMode, 'layout')
+  assert.match(official.params.layout, /abs_centralized/)
+
+  const missing = layoutGeneratePlan(draft, 0, 'layout-edit-experimental')
+  assert.equal(missing.ok, false)
+  assert.match(missing.reason, /至少需要一张参考图/)
+
+  const experimental = layoutGeneratePlan(draft, 2, 'layout-edit-experimental')
+  assert.equal(experimental.ok, true)
+  assert.equal(experimental.params.layoutMode, 'layout-edit-experimental')
+  assert.deepEqual([experimental.params.width, experimental.params.height], [1024, 1024], 'the exact draft size rides along')
+
+  const unavailable = layoutGeneratePlan(draft, 2, 'layout-edit-experimental', { available: false, reason: '缺 MOSS 编辑 LoRA' })
+  assert.equal(unavailable.ok, false)
+  assert.match(unavailable.reason, /缺 MOSS 编辑 LoRA/)
 })
 
 test('client stylesheet rule nesting stays balanced', () => {

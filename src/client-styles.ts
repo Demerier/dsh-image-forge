@@ -196,10 +196,10 @@ export const STUDIO_CSS = `
 .dsh-forge-layout-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:2px 8px 5px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;flex:0 0 auto;white-space:nowrap;overflow:hidden}
 .dsh-forge-layout-grip{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;border-right:2px solid rgba(59,130,246,.7);border-bottom:2px solid rgba(59,130,246,.7);border-bottom-right-radius:4px;z-index:1}
 .dsh-forge-canvas-hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;margin:0;padding:0 28px;text-align:center;font-size:12.5px;line-height:1.7;opacity:.45;pointer-events:none}
-.dsh-forge-canvas-foot{position:absolute;left:0;right:0;bottom:0;padding:6px 10px;font-size:10.5px;opacity:.55;background:linear-gradient(transparent,rgba(127,127,127,.14));pointer-events:none;text-align:center}
+.dsh-forge-canvas-gesture-guide{flex:0 1 auto;min-width:0;max-width:min(680px,48vw);display:flex;align-items:center;gap:8px;padding:5px 9px;border:1px solid color-mix(in srgb,var(--forge-line) 70%,transparent);border-radius:999px;background:color-mix(in srgb,var(--forge-panel) 72%,transparent);color:var(--forge-muted);font-size:10.5px;line-height:1.4;pointer-events:none} .dsh-forge-canvas-gesture-copy{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* G01: the wheel hint sits at the right end of the same line, dimmer than the
    selection hint, because it is a legend and not status. */
-.dsh-forge-canvas-foot-hint{float:right;opacity:.75;font-variant-numeric:tabular-nums}
+.dsh-forge-canvas-gesture-hint{flex:none;padding-left:8px;border-left:1px solid color-mix(in srgb,var(--forge-line) 78%,transparent);opacity:.78;font-variant-numeric:tabular-nums;white-space:nowrap}
 .dsh-forge-marquee{position:absolute;z-index:3;pointer-events:none;border:1px solid rgba(59,130,246,.85);background:rgba(59,130,246,.12);border-radius:2px}
 .dsh-forge-context,.dsh-forge-transfer{position:absolute;z-index:6;display:flex;flex-direction:column;gap:1px;min-width:172px;max-width:280px;padding:4px;border-radius:8px;border:1px solid rgba(127,127,127,.34);box-shadow:0 8px 24px rgba(0,0,0,.22);background:#fff;background:Canvas;color:#111;color:CanvasText}
 .dsh-forge-context-item{appearance:none;font:inherit;font-size:12.5px;line-height:1.5;text-align:left;padding:6px 9px;border:0;border-radius:5px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -357,7 +357,7 @@ export const STUDIO_CSS = `
 .is-workbench .dsh-forge-canvas-side{--dsh-forge-inspector-width:304px;flex:0 0 min(304px,32vw)}
 .is-workbench .dsh-forge-canvas{width:100%;height:auto;min-height:0;border-radius:12px;border-color:color-mix(in srgb,currentColor 16%,transparent);box-shadow:inset 0 1px 0 color-mix(in srgb,currentColor 5%,transparent)}
 .is-workbench .dsh-forge-canvas.is-flow{background:color-mix(in srgb,currentColor 2%,transparent)}
-.is-workbench .dsh-forge-canvas-foot{font-size:10px;opacity:.55}
+.is-workbench .dsh-forge-canvas-gesture-guide{font-size:10px;opacity:.84}
 .is-workbench .dsh-forge-flow-node{border-radius:12px;border-color:color-mix(in srgb,currentColor 22%,transparent);background:color-mix(in srgb,Canvas 8%,transparent);box-shadow:0 10px 30px rgba(0,0,0,.12),0 1px 3px rgba(0,0,0,.08)}
 .is-workbench .dsh-forge-flow-node.is-selected{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.25),0 12px 32px rgba(0,0,0,.14)}
 .is-workbench .dsh-forge-flow-task{background:color-mix(in srgb,Canvas 7%,transparent)}
@@ -558,11 +558,23 @@ export const CANVAS_FLOW_CSS = `
 .dsh-forge-flow-btn.is-danger:hover{color:#dc2626;border-color:rgba(220,38,38,.5);background:rgba(220,38,38,.08)}
 .dsh-forge-flow-node.is-layout{background:rgba(127,127,127,.06)}
 .dsh-forge-flow-layout-head{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 8px;border-bottom:1px solid rgba(127,127,127,.2);cursor:grab}
-.dsh-forge-flow-layout-title{font-size:11px;font-weight:600;opacity:.8}
-.dsh-forge-flow-layout-caption{padding:3px 6px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto;display:flex}
-.dsh-forge-flow-layout-caption-input{width:100%;box-sizing:border-box;padding:2px 6px;border-radius:5px;border:1px solid rgba(127,127,127,.4);background:rgba(127,127,127,.07);color:inherit;font:11px/1.4 system-ui,sans-serif;cursor:text}
-.dsh-forge-flow-layout-caption-input:focus{outline:none;border-color:#3b82f6}
-.dsh-forge-flow-layout-body{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
+.dsh-forge-flow-layout-title{min-width:0;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap}
+.dsh-forge-flow-layout-status{flex:none;border-radius:999px;padding:1px 6px;font-size:9.5px;line-height:1.5;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsh-forge-flow-layout-status.is-ready{background:rgba(47,158,68,.16);color:#2b8a3e}
+.dsh-forge-flow-layout-status.is-warning{background:rgba(245,158,11,.18);color:#b45309}
+.dsh-forge-flow-layout-status.is-experimental{background:rgba(99,102,241,.16);color:#6366f1}
+.dsh-forge-flow-layout-caption{padding:7px 10px 6px;border-bottom:1px solid rgba(127,127,127,.16);flex:0 0 auto;font-size:11px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-forge-flow-layout-body{position:relative;display:flex;flex:1 1 auto;min-height:0;overflow:hidden}
+.dsh-forge-flow-layout-refs{display:flex;align-items:center;gap:4px;flex:0 0 auto;padding:6px 10px 0}
+.dsh-forge-flow-layout-ref{display:block;width:34px;height:34px;overflow:hidden;border-radius:7px;border:1px solid rgba(127,127,127,.28);background:rgba(127,127,127,.1)}
+.dsh-forge-flow-layout-ref img{display:block;width:100%;height:100%;object-fit:cover}
+.dsh-forge-flow-layout-ref-more{display:grid;place-items:center;width:34px;height:34px;border-radius:7px;background:rgba(127,127,127,.14);font-size:10px;font-weight:650;opacity:.78}
+.dsh-forge-flow-layout-mode{appearance:none;display:flex;align-items:center;gap:5px;margin:6px 10px 0;padding:4px 7px;border:1px solid rgba(127,127,127,.28);border-radius:7px;background:transparent;color:inherit;font:inherit;font-size:10px;line-height:1.4;text-align:left;cursor:pointer}
+.dsh-forge-flow-layout-mode:hover:not(:disabled){background:rgba(127,127,127,.1)}
+.dsh-forge-flow-layout-mode.is-experimental{border-color:rgba(99,102,241,.42);background:rgba(99,102,241,.09);color:#6366f1}
+.dsh-forge-flow-layout-mode:disabled{cursor:not-allowed;opacity:.48}
+.dsh-forge-flow-layout-mode-dot{width:6px;height:6px;flex:none;border-radius:50%;background:currentColor;opacity:.72}
+.dsh-forge-flow-layout-mode.is-experimental .dsh-forge-flow-layout-mode-dot{box-shadow:0 0 0 3px rgba(99,102,241,.13)}
 .dsh-forge-flow-layout-host{position:absolute;inset:0;overflow:auto;scrollbar-width:thin}
 .dsh-forge-flow-layout-foot{display:flex;justify-content:space-between;gap:6px;padding:3px 8px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums;border-top:1px solid rgba(127,127,127,.2)}
 .dsh-forge-flow-layout-error{padding:8px;font-size:10.5px;line-height:1.5;color:#dc2626}
@@ -625,7 +637,7 @@ export const NODE_DETAIL_CSS = `
 .dsh-forge-detail-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-top:6px;border-top:1px solid rgba(127,127,127,.24)}
 /* §8.4: the canvas node while its detail tab owns the draft. The boxes are
    percentages of the draft, so the preview is right at any node size. */
-.dsh-forge-flow-layout-thumb{position:relative;flex:1 1 auto;min-height:0;margin:4px;border-radius:6px;background:rgba(127,127,127,.09);border:1px dashed rgba(127,127,127,.32);overflow:hidden}
+.dsh-forge-flow-layout-thumb{position:relative;flex:1 1 auto;width:auto;min-width:0;min-height:0;margin:4px;border-radius:6px;background:rgba(127,127,127,.09);border:1px dashed rgba(127,127,127,.32);overflow:hidden}
 .dsh-forge-flow-layout-box{position:absolute;border:1px solid rgba(59,130,246,.85);border-radius:2px;background:rgba(59,130,246,.16);pointer-events:none}
 .dsh-forge-flow-btn.is-locked{position:absolute;left:50%;bottom:4px;transform:translateX(-50%);white-space:nowrap;z-index:2}
 @media (max-width: 760px){
@@ -736,7 +748,7 @@ export const DESIGN_CSS = `
 .dsh-forge-studio-body.is-canvas { display: block; height: 100%; min-height: 0; }
 .dsh-forge-canvas-shell { position: relative; display: block; height: 100%; min-height: 560px; border-radius: var(--forge-radius-lg); overflow: hidden; background: var(--forge-paper); }
 .dsh-forge-canvas-shell > .dsh-forge-canvas { width: 100%; height: 100%; min-height: 0; }\n.dsh-forge-canvas { position: relative; height: 100%; min-height: 0; border: 0; border-radius: var(--forge-radius-lg); background: var(--forge-paper); }
-.dsh-forge-canvas-foot { position: absolute; left: 16px; bottom: 14px; right: 16px; z-index: 2; pointer-events: none; color: var(--forge-muted); font-size: 11.5px; background: transparent; border: 0; padding: 0; display: flex; justify-content: space-between; gap: 12px; }
+.dsh-forge-canvas-gesture-guide { flex: 0 1 auto; min-width: 0; max-width: min(680px, 48vw); display: flex; align-items: center; gap: 8px; padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--forge-line) 70%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--forge-panel) 72%, transparent); color: var(--forge-muted); font-size: 10.5px; line-height: 1.4; pointer-events: none; }
 .dsh-forge-studio-results { position: relative; }\n.dsh-forge-results-head { position: absolute; left: 14px; right: 14px; top: 14px; z-index: 4; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; background: color-mix(in srgb, var(--forge-panel) 88%, transparent); backdrop-filter: blur(14px); border: 1px solid color-mix(in srgb, var(--forge-line) 80%, transparent); border-radius: 999px; box-shadow: var(--forge-shadow-sm); padding: 7px; pointer-events: auto; }
 .dsh-forge-results-head .dsh-forge-view-toggle { background: transparent; border: 0; padding: 0; }
 .dsh-forge-view-item,
@@ -766,14 +778,24 @@ export const DESIGN_CSS = `
 .dsh-forge-canvas-tool-dock { position: absolute; z-index: 6; left: 14px; top: 76px; display: flex; flex-direction: column; gap: 5px; padding: 5px; border: 1px solid color-mix(in srgb, var(--forge-line) 82%, transparent); border-radius: 14px; background: color-mix(in srgb, var(--forge-panel) 90%, transparent); box-shadow: var(--forge-shadow-sm); backdrop-filter: blur(14px); }
 .dsh-forge-canvas-tool { width: 38px; height: 38px; border: 0; border-radius: 10px; background: transparent; color: var(--forge-muted); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
 .dsh-forge-canvas-tool:hover { background: var(--forge-accent-soft); color: var(--forge-accent); }
-.dsh-forge-canvas-tool.is-active { background: var(--forge-accent); color: #fff; }
 .dsh-forge-canvas-tool:focus-visible { outline: 2px solid var(--forge-accent); outline-offset: 2px; }
 .dsh-forge-canvas-composer { position: absolute; z-index: 6; left: 50%; bottom: 32px; transform: translateX(-50%); width: min(760px, calc(100% - 36px)); box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid color-mix(in srgb, var(--forge-line) 82%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--forge-panel) 94%, transparent); box-shadow: var(--forge-shadow-md); backdrop-filter: blur(18px); }
+.dsh-forge-canvas-composer-prompt-wrap { position: relative; min-width: 0; }
 .dsh-forge-canvas-composer textarea { width: 100%; min-height: 52px; max-height: 160px; resize: vertical; box-sizing: border-box; border: 0; outline: 0; background: transparent; color: var(--forge-ink); font: inherit; font-size: 14px; line-height: 1.5; padding: 4px 6px; }
-.dsh-forge-canvas-composer-controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.dsh-forge-canvas-composer-controls { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
+.dsh-forge-canvas-composer-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dsh-forge-canvas-composer-field-label { padding-left: 3px; color: var(--forge-muted); font-size: 9.5px; line-height: 1; letter-spacing: .04em; }
 .dsh-forge-canvas-composer-controls select,
 .dsh-forge-canvas-composer-controls input { min-height: 32px; border: 1px solid var(--forge-line); border-radius: 9px; background: var(--forge-panel); color: var(--forge-ink); font: inherit; font-size: 12px; padding: 4px 8px; }
-.dsh-forge-canvas-composer-controls input { width: 82px; }
+.dsh-forge-canvas-composer-controls select { max-width: 205px; }
+.dsh-forge-canvas-mention-popover { position: absolute; z-index: 12; left: 4px; bottom: calc(100% + 7px); width: min(430px, calc(100% - 8px)); max-height: 310px; display: flex; flex-direction: column; gap: 3px; overflow: auto; padding: 5px; border: 1px solid var(--forge-line); border-radius: 12px; background: var(--forge-panel); box-shadow: var(--forge-shadow-md); scrollbar-width: thin; }
+.dsh-forge-canvas-mention-item { appearance: none; display: grid; grid-template-columns: 42px minmax(0,1fr); align-items: center; gap: 8px; width: 100%; padding: 5px; border: 0; border-radius: 8px; background: transparent; color: var(--forge-ink); font: inherit; text-align: left; cursor: pointer; }
+.dsh-forge-canvas-mention-item:hover,.dsh-forge-canvas-mention-item.is-active { background: var(--forge-accent-soft); }
+.dsh-forge-canvas-mention-item img { width: 42px; height: 42px; object-fit: cover; border-radius: 7px; border: 1px solid var(--forge-line); }
+.dsh-forge-canvas-mention-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dsh-forge-canvas-mention-copy strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+.dsh-forge-canvas-mention-copy small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--forge-muted); font-size: 10px; }
+.dsh-forge-canvas-mention-empty { margin: 0; padding: 10px; color: var(--forge-muted); font-size: 11px; text-align: center; }
 .dsh-forge-canvas-composer-primary { margin-left: auto; min-height: 40px; min-width: 104px; border: 0; border-radius: 11px; background: var(--forge-accent); color: #fff; font: inherit; font-weight: 650; cursor: pointer; }
 .dsh-forge-canvas-composer-primary:disabled { opacity: .55; cursor: not-allowed; }
 .dsh-forge-canvas-composer-primary:focus-visible { outline: 2px solid color-mix(in srgb, var(--forge-accent) 62%, transparent); outline-offset: 3px; }
@@ -925,13 +947,11 @@ export const DESIGN_CSS = `
 
 .dsh-forge-canvas-tool-dock { left: 14px; top: 72px; width: 144px; flex-direction: column; align-items: stretch; gap: 3px; padding: 8px; border-radius: 16px; }
 .dsh-forge-canvas-tool-group-label { padding: 1px 7px 3px; color: var(--forge-muted); font-size: 10px; font-weight: 650; letter-spacing: .12em; }
-.dsh-forge-canvas-tool-group-label.is-create { margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--forge-line); }
 .dsh-forge-canvas-tool { width: 100%; height: 34px; min-height: 34px; display: flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 4px 8px; border-radius: 9px; font-size: 12px; text-align: left; }
 .dsh-forge-canvas-tool.is-create-action { color: var(--forge-ink); }
 .dsh-forge-canvas-tool.is-create-action:hover { background: var(--forge-accent-soft); }
 .dsh-forge-canvas-tool-icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .dsh-forge-canvas-tool-label { min-width: 0; white-space: nowrap; }
-.dsh-forge-canvas-tool.is-active .dsh-forge-canvas-tool-icon { stroke-width: 2; }
 
 .dsh-forge-canvas-bottom-chrome { position: absolute; z-index: 7; left: 14px; right: calc(14px + var(--forge-context-width, 0px)); bottom: 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: end; gap: 12px; pointer-events: none; }
 .dsh-forge-canvas-bottom-chrome .dsh-forge-canvas-zoom-dock { position: static; justify-self: start; pointer-events: auto; }
@@ -981,9 +1001,6 @@ export const DESIGN_CSS = `
 .dsh-forge-layout-box-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .dsh-forge-layout-box-kind { color: var(--forge-muted); font-size: 10px; }
 .dsh-forge-layout-box-edit { min-height: 28px; border: 1px solid var(--forge-line); border-radius: 7px; background: var(--forge-panel); color: var(--forge-ink); padding: 3px 7px; font: inherit; font-size: 11px; cursor: pointer; }
-.dsh-forge-layout-reference { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.dsh-forge-layout-reference img { width: 54px; height: 54px; object-fit: cover; border-radius: 8px; border: 1px solid var(--forge-line); }
-.dsh-forge-layout-reference span { min-width: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; font-size: 11px; color: var(--forge-muted); }
 .dsh-forge-box-float { position: absolute; z-index: 14; width: 340px; min-width: 300px; max-width: min(480px, calc(100% - 16px)); max-height: 70%; display: flex; flex-direction: column; overflow: hidden; resize: both; border: 1px solid var(--forge-line); border-radius: 14px; background: var(--forge-panel); box-shadow: var(--forge-shadow-md); }
 .dsh-forge-box-float-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--forge-line); cursor: move; user-select: none; }
 .dsh-forge-box-float-head strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
@@ -998,7 +1015,18 @@ export const DESIGN_CSS = `
 .dsh-forge-box-float-actions { flex: none; padding: 9px 10px; border-top: 1px solid var(--forge-line); }
 .dsh-forge-box-float-actions .dsh-forge-btn { width: 100%; }
 .dsh-forge-flow-layout-head-actions { display: flex; align-items: center; gap: 4px; }
-.dsh-forge-flow-layout-caption { padding: 2px 10px 5px; color: var(--forge-muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-forge-flow-layout-caption { padding: 7px 11px 6px; color: var(--forge-muted); font-size: 11px; line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 0; }
+.dsh-forge-flow-layout-thumb { margin: 0 10px 8px; border-radius: 9px; background: color-mix(in srgb, var(--forge-paper) 72%, var(--forge-panel)); }
+.dsh-forge-flow-layout-foot { padding: 5px 10px; color: var(--forge-muted); }
+.dsh-forge-layout-mode-settings { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px; border: 1px solid var(--forge-line); border-radius: 9px; background: var(--forge-paper); }
+.dsh-forge-layout-mode-settings .dsh-forge-btn { flex: none; }
+.dsh-forge-layout-reference-list { display: flex; flex-direction: column; gap: 6px; }
+.dsh-forge-layout-reference-row { display: grid; grid-template-columns: 24px 44px minmax(0,1fr) auto; align-items: center; gap: 7px; padding: 6px; border: 1px solid var(--forge-line); border-radius: 9px; background: var(--forge-paper); }
+.dsh-forge-layout-reference-row img { width: 44px; height: 44px; object-fit: cover; border-radius: 7px; border: 1px solid var(--forge-line); }
+.dsh-forge-layout-reference-number { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--forge-accent-soft); color: var(--forge-accent); font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dsh-forge-layout-reference-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+.dsh-forge-layout-reference-remove { min-height: 28px; border: 1px solid var(--forge-line); border-radius: 7px; background: var(--forge-panel); color: var(--forge-muted); padding: 3px 7px; font: inherit; font-size: 10.5px; cursor: pointer; }
+.dsh-forge-layout-reference-remove:hover { border-color: rgba(220,38,38,.45); color: #dc2626; background: rgba(220,38,38,.06); }
 @media (max-width: 900px) {
   .dsh-forge-layout-workspace { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(320px, 1fr) minmax(180px, 42vh); }
   .dsh-forge-layout-rail { border-top: 1px solid var(--forge-line); padding-top: 8px; }
@@ -1027,7 +1055,7 @@ export const DESIGN_CSS = `
   .dsh-forge-workbench-hero { display: block; }
   .dsh-forge-workbench-hero-badge { display: inline-flex; margin-top: 12px; }
   .dsh-forge-canvas-composer { bottom: 14px; width: calc(100% - 20px); }
-  .dsh-forge-canvas-foot { display: none; }
+  .dsh-forge-canvas-gesture-guide { display: none; }
   .dsh-forge-node-editor { left: 10px !important; right: 10px; top: 74px !important; width: auto !important; max-height: 52vh !important; }
 }
 /* 200% page zoom and short desktop panes: the same tools reflow horizontally
@@ -1040,30 +1068,44 @@ export const DESIGN_CSS = `
   .dsh-forge-canvas-bottom-chrome .dsh-forge-canvas-zoom-dock { grid-row: 2; justify-self: start; }
   .dsh-forge-canvas-bottom-chrome .dsh-forge-canvas-composer { max-width: none; padding: 10px; }
   .dsh-forge-canvas-composer textarea { min-height: 42px; }
-  .dsh-forge-canvas-foot { display: none; }
+  .dsh-forge-canvas-gesture-guide { display: none; }
 }
 /* Canvas 2.2: compact hover tool dock, session history and shared ComfyUI control. */
 .dsh-forge-canvas-tool-dock {
-  width: 52px;
+  width: 54px;
   align-items: stretch;
-  gap: 5px;
+  gap: 4px;
+  padding: 8px;
   overflow: hidden;
-  transition: width 160ms cubic-bezier(.22,1,.36,1), box-shadow 160ms ease;
+  border-color: color-mix(in srgb, var(--forge-line) 74%, transparent);
+  background: color-mix(in srgb, var(--forge-panel) 94%, transparent);
+  box-shadow: 0 2px 5px rgba(34,33,29,.06), 0 12px 28px rgba(34,33,29,.10);
+  transition: width 180ms cubic-bezier(.22,1,.36,1), box-shadow 180ms ease, border-color 180ms ease;
 }
 .dsh-forge-canvas-tool {
-  width: 36px;
-  height: 36px;
-  min-height: 36px;
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
   align-self: center;
   justify-content: center;
   gap: 0;
   padding: 0;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  transition: width 180ms cubic-bezier(.22,1,.36,1), padding 180ms cubic-bezier(.22,1,.36,1), gap 180ms ease, background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease, transform 100ms ease;
 }
+.dsh-forge-canvas-tool:hover {
+  border-color: color-mix(in srgb, var(--forge-accent) 20%, transparent);
+  background: var(--forge-accent-soft);
+  color: var(--forge-accent);
+}
+.dsh-forge-canvas-tool:active { transform: scale(.96); }
 .dsh-forge-canvas-tool-label {
   max-width: 0;
   opacity: 0;
   overflow: hidden;
-  transition: max-width 140ms ease, opacity 120ms ease;
+  transform: translateX(-4px);
+  transition: max-width 150ms ease, opacity 110ms ease, transform 150ms ease;
 }
 .dsh-forge-canvas-tool-group-label {
   max-height: 0;
@@ -1073,47 +1115,38 @@ export const DESIGN_CSS = `
   overflow: hidden;
   white-space: nowrap;
   pointer-events: none;
-  transition: max-height 140ms ease, opacity 100ms ease, padding 140ms ease;
-}
-.dsh-forge-canvas-tool-group-label.is-create {
-  margin-top: 0;
-  border-top-color: transparent;
+  transform: translateX(-3px);
+  transition: max-height 150ms ease, opacity 100ms ease, padding 150ms ease, transform 150ms ease;
 }
 .dsh-forge-canvas-tool-dock.is-open {
-  width: 158px;
+  width: 176px;
   gap: 3px;
+  border-color: color-mix(in srgb, var(--forge-line) 92%, transparent);
+  box-shadow: 0 4px 9px rgba(34,33,29,.07), 0 18px 38px rgba(34,33,29,.14);
 }
 .dsh-forge-canvas-tool-dock.is-open .dsh-forge-canvas-tool {
   width: 100%;
   align-self: stretch;
   justify-content: flex-start;
-  gap: 8px;
-  padding: 4px 8px;
+  gap: 10px;
+  padding: 0 11px;
 }
 .dsh-forge-canvas-tool-dock.is-open .dsh-forge-canvas-tool-label {
-  max-width: 100px;
+  max-width: 112px;
   opacity: 1;
+  transform: translateX(0);
 }
 .dsh-forge-canvas-tool-dock.is-open .dsh-forge-canvas-tool-group-label {
   max-height: 24px;
   padding: 1px 7px 3px;
   opacity: 1;
-}
-.dsh-forge-canvas-tool-dock.is-open .dsh-forge-canvas-tool-group-label.is-create {
-  margin-top: 5px;
-  padding-top: 7px;
-  border-top-color: var(--forge-line);
-}
-.dsh-forge-canvas-tool-dock.is-closing {
-  width: 52px;
-  pointer-events: none;
+  transform: translateX(0);
 }
 @media (hover: none) {
-  .dsh-forge-canvas-tool-dock { width: 158px; gap: 3px; }
-  .dsh-forge-canvas-tool { width: 100%; align-self: stretch; justify-content: flex-start; gap: 8px; padding: 4px 8px; }
-  .dsh-forge-canvas-tool-label { max-width: 100px; opacity: 1; }
-  .dsh-forge-canvas-tool-group-label { max-height: 24px; padding: 1px 7px 3px; opacity: 1; }
-  .dsh-forge-canvas-tool-group-label.is-create { margin-top: 5px; padding-top: 7px; border-top-color: var(--forge-line); }
+  .dsh-forge-canvas-tool-dock { width: 176px; gap: 3px; }
+  .dsh-forge-canvas-tool { width: 100%; align-self: stretch; justify-content: flex-start; gap: 10px; padding: 0 11px; }
+  .dsh-forge-canvas-tool-label { max-width: 112px; opacity: 1; transform: translateX(0); }
+  .dsh-forge-canvas-tool-group-label { max-height: 24px; padding: 1px 7px 3px; opacity: 1; transform: translateX(0); }
 }
 
 .dsh-forge-results-head.is-canvas { position: absolute; }
@@ -1201,9 +1234,11 @@ export const DESIGN_CSS = `
 .dsh-forge-workbench-log-note { padding: 7px 10px; border-radius: 8px; background: color-mix(in srgb, var(--forge-accent) 7%, transparent); color: var(--forge-muted); font-size: 11.5px; }
 
 @media (max-width: 760px), (max-height: 620px) {
-  .dsh-forge-canvas-tool-dock { width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 5px; }
-  .dsh-forge-canvas-tool { width: auto; min-height: 34px; flex: 0 0 auto; justify-content: flex-start; gap: 6px; padding: 4px 8px; }
-  .dsh-forge-canvas-tool-label { max-width: 100px; opacity: 1; }
+  .dsh-forge-canvas-tool-dock,
+  .dsh-forge-canvas-tool-dock.is-open { width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 5px; }
+  .dsh-forge-canvas-tool,
+  .dsh-forge-canvas-tool-dock.is-open .dsh-forge-canvas-tool { width: auto; min-height: 34px; flex: 0 0 auto; justify-content: flex-start; gap: 6px; padding: 4px 8px; }
+  .dsh-forge-canvas-tool-label { max-width: 100px; opacity: 1; transform: translateX(0); }
   .dsh-forge-canvas-tool-group-label { display: none; }
   .dsh-image-forge-sidebar-layout-canvas { flex-basis: 210px; }
   .dsh-image-forge-sidebar-box-coordinates { grid-template-columns: repeat(2, minmax(0,1fr)); }

@@ -43,13 +43,16 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import type {
-  BoardDetail,
-  BoardItem,
-  BoardLayoutDraft,
-  BoardSummary,
-  BoardTaskInfo,
-  StudioAsset,
+import {
+  STUDIO_LAYOUT_MODES,
+  STUDIO_MAX_REFERENCES,
+  type BoardDetail,
+  type BoardItem,
+  type BoardLayoutDraft,
+  type BoardSummary,
+  type BoardTaskInfo,
+  type StudioAsset,
+  type StudioLayoutMode,
 } from './studio-shared.ts'
 
 /** Directory name under `outputDir` that holds every board artifact. */
@@ -127,6 +130,8 @@ export interface NewBoardItem {
   seed?: number | null
   mode?: BoardItem['mode']
   backend?: string | null
+  /** Layout provenance when this run was conditioned by a MOSS layout. */
+  layoutMode?: BoardItem['layoutMode']
   parents?: readonly string[]
   /**
    * Paths of the images this one was edited from, resolved against **this
@@ -410,6 +415,8 @@ function isBoardItemV2(value: unknown): value is BoardItem {
   const item = value as Record<string, unknown>
   if (typeof item.id !== 'string') return false
   const kind = item.kind ?? 'image'
+  if (item.layoutMode !== undefined
+    && (typeof item.layoutMode !== 'string' || !(STUDIO_LAYOUT_MODES as readonly string[]).includes(item.layoutMode))) return false
   if (kind === 'image') return typeof item.path === 'string' && typeof item.markdownPath === 'string'
   if (kind === 'task') return isTaskItem(item)
   if (kind === 'layout') return isLayoutItem(item)
@@ -432,7 +439,26 @@ function isLayoutItem(item: Record<string, unknown>): boolean {
   if (typeof draft !== 'object' || draft === null) return false
   const record = draft as Record<string, unknown>
   if (!Number.isFinite(record.width) || !Number.isFinite(record.height)) return false
+  if (item.references !== undefined) {
+    if (!Array.isArray(item.references) || item.references.length > STUDIO_MAX_REFERENCES) return false
+    if (item.references.some((id) => typeof id !== 'string' || id.length === 0)) return false
+  }
   return Array.isArray(record.items)
+}
+
+/** Deduplicate reference ids in connection order and enforce the graph's cap. */
+function layoutReferenceIds(ids: readonly string[] | undefined): string[] {
+  if (ids === undefined) return []
+  const unique: string[] = []
+  for (const id of ids) {
+    const value = typeof id === 'string' ? id.trim() : ''
+    if (value.length === 0 || unique.includes(value)) continue
+    if (unique.length >= STUDIO_MAX_REFERENCES) {
+      throw new Error(`布局节点最多支持 ${String(STUDIO_MAX_REFERENCES)} 张参考图`)
+    }
+    unique.push(value)
+  }
+  return unique
 }
 
 /** Summary projection, so a list request never carries every prompt. */
@@ -731,6 +757,7 @@ export async function recordItems(
         seed: incoming.seed ?? null,
         mode: incoming.mode ?? 'generate',
         backend: incoming.backend ?? null,
+        ...(incoming.layoutMode === undefined ? {} : { layoutMode: incoming.layoutMode }),
         parents: resolveParents(board.items, incoming),
         createdAt: existingIndex >= 0 ? board.items[existingIndex].createdAt : now,
         sessionId: incoming.sessionId ?? board.sessionId,
@@ -1006,6 +1033,8 @@ export interface LayoutItemWrite {
   readonly parents?: readonly string[]
   /** Board ids of the pictures wired into this draft as references. */
   readonly references?: readonly string[]
+  /** Official layout, or the explicit experimental overlay. */
+  readonly layoutMode?: StudioLayoutMode
   /** The editable draft, in draft pixels; never touched by a node resize. */
   readonly draft: BoardLayoutDraft
   /** Display width/height in world units (§8.3: width-driven, height proportional). */
@@ -1119,6 +1148,10 @@ export async function saveLayoutItem(
   entry: LayoutItemWrite,
 ): Promise<BoardTransfer | undefined> {
   assertLayoutDraft(entry.draft, entry.w, entry.h)
+  if (entry.layoutMode !== undefined && !(STUDIO_LAYOUT_MODES as readonly string[]).includes(entry.layoutMode)) {
+    throw new Error('layoutMode 只能是 layout 或 layout-edit-experimental')
+  }
+  const references = layoutReferenceIds(entry.references)
   return serialized(boardsRoot(outputDir), async () => {
     const { board } = await ensureBoardLocked(outputDir, ref, {})
     const now = new Date().toISOString()
@@ -1152,9 +1185,8 @@ export async function saveLayoutItem(
       draft: entry.draft,
       w: entry.w,
       h: entry.h,
-      ...(entry.references === undefined || entry.references.length === 0
-        ? {}
-        : { references: [...entry.references] }),
+      ...(references.length === 0 ? {} : { references }),
+      ...(entry.layoutMode === undefined ? {} : { layoutMode: entry.layoutMode }),
     }
     if (index >= 0) board.items[index] = item
     else board.items.push(item)

@@ -190,7 +190,8 @@ test('the artifact stays inside the size budget the pane was measured at', (t) =
   // wrapper (component code, not just the stylesheet) and the edge builder.
   assert.ok(BUNDLE.includes('dsh-forge-flow-node'), 'the pane’s node painters must ship')
   assert.ok(BUNDLE.includes('dsh-forge-canvas-tool-dock.is-open'), 'the state-driven hover dock must ship')
-  assert.ok(BUNDLE.includes('dsh-forge-canvas-tool-dock.is-closing'), 'the closing lockout must ship')
+  assert.ok(BUNDLE.includes('data-open'), 'the dock must expose its hover-intent state')
+  assert.ok(!BUNDLE.includes('dsh-forge-canvas-tool-dock.is-closing'), 'the old pointer-events closing lockout must stay removed')
   assert.ok(BUNDLE.includes('onPointerEnter'), 'the hover dock must use pointer hysteresis, not :hover width flapping')
   assert.ok(BUNDLE.includes('.dsh-forge-flow .react-flow__node.selectable'), 'node wrapper cursor must share the frame cursor')
   assert.ok(BUNDLE.includes('cursor:grab'), 'node frames and their wrapper must agree on the grab cursor')

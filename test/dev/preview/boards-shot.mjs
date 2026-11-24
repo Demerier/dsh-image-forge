@@ -169,7 +169,7 @@ try {
       current: select ? select.value : null,
       nodes: document.querySelectorAll('.dsh-forge-node').length,
       count: document.querySelector('.dsh-forge-board-count')?.textContent ?? null,
-      footer: document.querySelector('.dsh-forge-canvas-foot')?.textContent ?? null,
+      gestureGuide: document.querySelector('.dsh-forge-canvas-gesture-guide')?.textContent ?? null,
     }
   })()`)
   console.log('after switch', JSON.stringify(after))

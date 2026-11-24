@@ -251,7 +251,7 @@ export function WorkbenchLogPane(): ReturnType<typeof createElement> {
       { className: 'dsh-forge-workbench-log-meta' },
       createElement('span', {}, `来源：${logSourceLabel(environment)}`),
       page === undefined ? null : createElement('span', {}, `共 ${String(page.totalLines)} 行 ·${lines.length === 0 ? ' 当前 0 行' : ` 已载入 ${String(lines[0]?.number)}–${String(lines[lines.length - 1]?.number)}`}`),
-      page?.modifiedAt === undefined ? null : createElement('span', {}, `文件修改：${new Date(page.modifiedAt).toLocaleString()}`),
+      page?.modifiedAt == null ? null : createElement('span', {}, `文件修改：${new Date(page.modifiedAt).toLocaleString()}`),
       lastUpdated === undefined ? null : createElement('span', {}, `最后刷新：${lastUpdated}`),
     ),
     createElement(

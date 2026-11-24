@@ -104,6 +104,19 @@ async function clickPoint(x, y) {
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 })
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 })
 }
+async function dragPoint(from, to) {
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 })
+  for (let step = 1; step <= 4; step += 1) {
+    await send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: from.x + ((to.x - from.x) * step / 4),
+      y: from.y + ((to.y - from.y) * step / 4),
+      button: 'left',
+      buttons: 1,
+    })
+  }
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1 })
+}
 
 const report = { url: PAGE_URL, viewport: VIEWPORT, deviceScaleFactor: 1 }
 try {
@@ -117,31 +130,85 @@ try {
   await until("document.querySelectorAll('[data-node-id]').length >= 8", 30_000, 'canvas nodes')
   await sleep(700)
 
+  report.gestureGuide = await ev(`(() => {
+    const guide = document.querySelector('.dsh-forge-canvas-gesture-guide')?.getBoundingClientRect()
+    const actions = document.querySelector('.dsh-forge-canvas-top-actions')?.getBoundingClientRect()
+    const dock = document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect()
+    const composer = document.querySelector('.dsh-forge-canvas-composer')?.getBoundingClientRect()
+    return {
+      exists: guide !== undefined,
+      text: document.querySelector('.dsh-forge-canvas-gesture-guide')?.textContent ?? '',
+      top: guide?.top ?? null,
+      right: guide?.right ?? null,
+      bottom: guide?.bottom ?? null,
+      actionsLeft: actions?.left ?? null,
+      dockTop: dock?.top ?? null,
+      composerTop: composer?.top ?? null,
+    }
+  })()`)
+
+  report.composer = await ev(`(() => {
+    const composer = document.querySelector('.dsh-forge-canvas-composer')
+    const resolution = composer?.querySelector('select[aria-label="输出分辨率"]')
+    return {
+      labels: [...(composer?.querySelectorAll('.dsh-forge-canvas-composer-field-label') ?? [])].map((node) => node.textContent),
+      resolutions: [...(resolution?.querySelectorAll('option') ?? [])].map((node) => node.textContent),
+      hasSteps: composer?.querySelector('input[aria-label="采样步数"]') !== null,
+    }
+  })()`)
+  await ev(`(() => {
+    const textarea = document.querySelector('.dsh-forge-canvas-composer textarea')
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+    setter?.call(textarea, '@')
+    textarea?.focus()
+    textarea?.setSelectionRange?.(1, 1)
+    textarea?.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await until("document.querySelectorAll('.dsh-forge-canvas-mention-item').length > 0", 10_000, '@ reference candidates')
+  report.mention = await ev(`(() => ({
+    count: document.querySelectorAll('.dsh-forge-canvas-mention-item').length,
+    labels: [...document.querySelectorAll('.dsh-forge-canvas-mention-item strong')].map((node) => node.textContent),
+  }))()`)
+  report.mentionShot = await shot('canvas22-mention-popover')
+  await ev("document.querySelector('.dsh-forge-canvas-mention-item')?.click()")
+  await sleep(250)
+  report.mention.after = await ev(`(() => ({
+    prompt: document.querySelector('.dsh-forge-canvas-composer textarea')?.value ?? '',
+    action: document.querySelector('.dsh-forge-canvas-composer-primary')?.textContent ?? '',
+  }))()`)
+
   const dock = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().toJSON()")
   report.toolDock = {
     collapsedWidth: dock?.width ?? 0,
     collapsedLabelOpacity: await ev("getComputedStyle(document.querySelector('.dsh-forge-canvas-tool-label')).opacity"),
   }
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dock.left + dock.width / 2, y: dock.top + 20 })
-  await sleep(260)
+  await sleep(240)
   report.toolDock.expandedWidth = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
   report.toolDock.expandedLabelOpacity = await ev("getComputedStyle(document.querySelector('.dsh-forge-canvas-tool-label')).opacity")
+  report.toolDock.expandedShot = await shot('canvas22-tool-dock-expanded')
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dock.left + 120, y: dock.top + 20 })
-  await sleep(220)
+  await sleep(180)
   report.toolDock.widthInsideExpanded = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
-  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dock.left + 176, y: dock.top + 20 })
-  await sleep(40)
+
+  // Leave briefly: the grace period keeps the drawer open and hit-testable.
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dock.left + 220, y: dock.top + 20 })
+  await sleep(60)
+  report.toolDock.stayedOpenDuringGrace = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.dataset.open")
   report.toolDock.closingPointerEvents = await ev("getComputedStyle(document.querySelector('.dsh-forge-canvas-tool-dock')).pointerEvents")
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dock.left + 120, y: dock.top + 20 })
-  await sleep(240)
-  report.toolDock.reenteredDuringCloseWidth = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
-  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 900, y: 500 })
-  await sleep(30)
+  await sleep(220)
+  report.toolDock.widthAfterCloseCancel = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
+
+  // Leave long enough for the shrink to start, then re-enter mid-transition.
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dock.left + 220, y: dock.top + 20 })
+  await sleep(220)
+  report.toolDock.shrinkStartedWidth = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dock.left + 20, y: dock.top + 20 })
-  await sleep(260)
-  report.toolDock.reopenedWidth = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
+  await sleep(240)
+  report.toolDock.reopenedAfterShrinkWidth = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 900, y: 500 })
-  await sleep(430)
+  await sleep(460)
   report.toolDock.closedWidth = await ev("document.querySelector('.dsh-forge-canvas-tool-dock')?.getBoundingClientRect().width")
   report.nodeCursors = await ev(`(() => {
     const wrapper = document.querySelector('.react-flow__node.draggable')
@@ -225,11 +292,44 @@ try {
     button?.click()
   })()`)
   await until("document.querySelector('[data-node-id=\"node-layout\"]') !== null", 15_000, 'layout node')
-  await ev(`(() => {
-    const node = document.querySelector('[data-node-id="node-layout"]')
-    node?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 900, clientY: 720 }))
-    node?.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 900, clientY: 720 }))
+  await ev("document.querySelector('button[title=\"适应全部节点\"]')?.click()")
+  await sleep(300)
+  report.layoutNode = await ev(`(() => {
+    const node = document.querySelector('[data-node-id=\"node-layout\"]')
+    const thumb = node?.querySelector('.dsh-forge-flow-layout-thumb')?.getBoundingClientRect()
+    const boxes = [...(node?.querySelectorAll('.dsh-forge-flow-layout-box') ?? [])]
+    const firstBox = boxes[0]?.getBoundingClientRect()
+    const shell = node?.getBoundingClientRect()
+    return {
+      status: node?.querySelector('.dsh-forge-flow-layout-status')?.textContent ?? null,
+      caption: node?.querySelector('.dsh-forge-flow-layout-caption')?.textContent ?? null,
+      references: node?.querySelectorAll('.dsh-forge-flow-layout-ref').length ?? 0,
+      mode: node?.querySelector('.dsh-forge-flow-layout-mode')?.textContent ?? null,
+      footer: node?.querySelector('.dsh-forge-flow-layout-foot')?.textContent ?? null,
+      boxes: boxes.length,
+      thumbHeight: thumb?.height ?? 0,
+      visibleBoxes: boxes.filter((box) => {
+        const rect = box.getBoundingClientRect()
+        return rect.width > 0 && rect.height > 0
+      }).length,
+      boxCenter: firstBox ? { x: firstBox.left + firstBox.width / 2, y: firstBox.top + firstBox.height / 2 } : null,
+      shellLeft: shell?.left ?? null,
+      shellTop: shell?.top ?? null,
+    }
   })()`)
+  if (report.layoutNode.boxCenter === null) throw new Error('layout preview has no draggable box centre')
+  await dragPoint(report.layoutNode.boxCenter, { x: report.layoutNode.boxCenter.x + 36, y: report.layoutNode.boxCenter.y - 24 })
+  await sleep(350)
+  report.layoutNode.dragged = await ev(`(() => {
+    const shell = document.querySelector('[data-node-id=\"node-layout\"]')?.getBoundingClientRect()
+    return { left: shell?.left ?? null, top: shell?.top ?? null }
+  })()`)
+  const detailPoint = await ev(`(() => {
+    const box = document.querySelector('[data-node-id=\"node-layout\"] .dsh-forge-flow-layout-box')?.getBoundingClientRect()
+    return box ? { x: box.left + box.width / 2, y: box.top + box.height / 2 } : null
+  })()`)
+  if (detailPoint === null) throw new Error('layout box disappeared before detail click')
+  await clickPoint(detailPoint.x, detailPoint.y)
   await until("document.querySelector('.dsh-forge-context-panel') !== null", 10_000, 'layout summary')
   await ev("([...document.querySelectorAll('.dsh-forge-context-panel button')].find((node) => node.textContent.trim() === '打开详情'))?.click()")
   await until("document.querySelector('.dsh-forge-detail.is-layout .dsh-forge-layout-workspace') !== null", 20_000, 'layout detail')
@@ -241,6 +341,8 @@ try {
       frameHeight: frame?.getBoundingClientRect().height,
       badge: document.querySelector('.dsh-image-forge-layout-frame-badge')?.textContent,
       boxRows: document.querySelectorAll('.dsh-forge-layout-box-row').length,
+      referenceRows: document.querySelectorAll('.dsh-forge-layout-reference-row').length,
+      modeSetting: document.querySelector('.dsh-forge-layout-mode-settings')?.textContent ?? null,
       boxSection: [...document.querySelectorAll('.dsh-forge-layout-rail-title')].map((node) => node.textContent).find((text) => text.includes('布局框')),
       visibleSchemaDump: document.body.textContent.includes('summary.caption'),
       canvasOnly: document.querySelector('.dsh-forge-layout-editor .dsh-forge-layout-item-row') === null,
@@ -262,23 +364,50 @@ try {
   }))()`)
   report.boxFloatShot = await shot('canvas22-box-float')
 
-  report.ok = report.toolDock.collapsedWidth < 60
-    && report.toolDock.expandedWidth > 100
-    && report.toolDock.widthInsideExpanded === 158
-    && report.toolDock.closingPointerEvents === 'none'
-    && report.toolDock.reenteredDuringCloseWidth === 52
-    && report.toolDock.reopenedWidth === 158
-    && report.toolDock.closedWidth === 52
+  report.ok = report.gestureGuide.exists
+    && /Shift 拖动框选/.test(report.gestureGuide.text)
+    && /Ctrl\/⌘\+滚轮缩放/.test(report.gestureGuide.text)
+    && report.gestureGuide.bottom < report.gestureGuide.dockTop
+    && report.gestureGuide.right <= report.gestureGuide.actionsLeft
+    && report.gestureGuide.bottom < report.gestureGuide.composerTop
+    && report.toolDock.collapsedWidth === 54
+    && report.toolDock.expandedWidth === 176
+    && report.toolDock.widthInsideExpanded === 176
+    && report.toolDock.stayedOpenDuringGrace === 'true'
+    && report.toolDock.closingPointerEvents === 'auto'
+    && report.toolDock.widthAfterCloseCancel === 176
+    && report.toolDock.shrinkStartedWidth < 176
+    && report.toolDock.reopenedAfterShrinkWidth === 176
+    && report.toolDock.closedWidth === 54
     && report.nodeCursors.wrapper === 'grab'
     && report.nodeCursors.inner === 'grab'
+    && report.composer.labels.join(',') === '画幅,分辨率,张数'
+    && report.composer.hasSteps === false
+    && report.composer.resolutions.some((label) => label.includes('1.5MP'))
+    && report.composer.resolutions.some((label) => label.includes('2K'))
+    && report.mention.count >= 3
+    && /^@/.test(report.mention.after.prompt)
+    && report.mention.after.action === '改这张'
     && Number(report.toolDock.collapsedLabelOpacity) < 0.2
     && Number(report.toolDock.expandedLabelOpacity) > 0.8
     && report.history.jumpedCount === afterCreate - 1
     && report.history.latestCount === afterCreate
     && report.modeBarStable === true
+    && report.layoutNode.status === '可生成'
+    && report.layoutNode.caption === '雨夜街角的双人构图草图'
+    && report.layoutNode.references === 2
+    && /纯 Layout/.test(report.layoutNode.mode ?? '')
+    && /2 参考/.test(report.layoutNode.footer ?? '')
+    && report.layoutNode.boxes === 2
+    && report.layoutNode.visibleBoxes === 2
+    && report.layoutNode.thumbHeight > 20
+    && report.layoutNode.dragged.left > report.layoutNode.shellLeft + 10
+    && report.layoutNode.dragged.top < report.layoutNode.shellTop - 10
     && report.layoutDetail.frameWidth > 100
     && report.layoutDetail.frameHeight > 100
     && report.layoutDetail.boxSection === '布局框（共 2 个）'
+    && report.layoutDetail.referenceRows === 2
+    && /官方纯 Layout/.test(report.layoutDetail.modeSetting ?? '')
     && report.layoutDetail.visibleSchemaDump === false
     && report.contextPanel.bodyScroll === report.contextPanel.bodyClient
 } catch (error) {

@@ -68,7 +68,9 @@ import { sniffImageMime, type GeneratedImage, type GenerateRequest, type Referen
 import { resolveBackendPlan, runThroughBackends } from './backend.ts'
 import {
   MODEL_PROFILES,
+  MOSS_EDIT_LORA,
   assertLatentAligned,
+  mossLayoutEditWorkflow,
   parseMossLayout,
   resolveProfile,
   resolveSampling,
@@ -76,6 +78,7 @@ import {
   type ApiGraph,
   type ComfyModelChoice,
   type ModelProfile,
+  type MossSamplingPreset,
   type WeightRule,
 } from './model-profiles.ts'
 
@@ -100,6 +103,7 @@ export {
   TURBO_STEPS,
   editTurboWorkflow,
   editWorkflow,
+  mossLayoutEditWorkflow,
   parseMossLayout,
   withoutQwenCache,
 } from './model-profiles.ts'
@@ -529,7 +533,7 @@ async function requestBytes(url: string, timeoutMs: number, signal?: AbortSignal
       } catch {
         note = ''
       }
-      return { status: response.status, ok: false, bytes: new Uint8Array(), contentType: null, note }
+      return { status: response.status, ok: false, bytes: new Uint8Array(), contentType: undefined, note }
     }
     const bytes = new Uint8Array(await response.arrayBuffer())
     return {
@@ -782,6 +786,55 @@ export async function loadComfyModels(target: ComfyTarget, options: ComfyOptions
   }
 }
 
+/** Whether the opt-in MOSS layout + reference graph can run on this ComfyUI. */
+export interface MossLayoutEditCapability {
+  readonly available: boolean
+  readonly reason?: string
+}
+
+/**
+ * Preflight the non-official MOSS layout + reference graph before any upload.
+ *
+ * This checks the three facts `loadComfyModels` cannot answer on its own: the
+ * profile is MOSS, the community edit LoRA is listed by `LoraLoaderModelOnly`,
+ * and ComfyUI exposes `TextEncodeMOSSImageEdit`. The base UNET/CLIP/VAE have
+ * already been resolved by the caller. Failures are returned, not thrown, so the
+ * panel can disable the switch with a reason instead of showing a blank error.
+ */
+export async function probeMossLayoutEditCapability(
+  target: ComfyTarget,
+  models: ComfyModels,
+  options: ComfyOptions,
+  signal?: AbortSignal,
+): Promise<MossLayoutEditCapability> {
+  if (resolveProfile(options.comfyModel).family !== 'moss-image') {
+    return { available: false, reason: '当前模型不是 moss-sft；实验性 Layout + 参考图仅支持 MOSS-Image。' }
+  }
+  if (models.unet.trim().length === 0 || models.clip.trim().length === 0 || models.vae.trim().length === 0) {
+    return { available: false, reason: 'MOSS 基础模型没有完整解析，无法启用实验叠加。' }
+  }
+  const timeout = options.portProbeTimeoutMs ?? 800
+  try {
+    const [lora, encoder] = await Promise.all([
+      requestJson(`${target.endpoint}/object_info/LoraLoaderModelOnly`, { method: 'GET' }, timeout, signal),
+      requestJson(`${target.endpoint}/object_info/TextEncodeMOSSImageEdit`, { method: 'GET' }, timeout, signal),
+    ])
+    if (!lora.ok || prop(lora.payload, 'LoraLoaderModelOnly') === undefined) {
+      return { available: false, reason: 'ComfyUI 缺少 LoraLoaderModelOnly 节点，无法加载 MOSS 编辑 LoRA。' }
+    }
+    const loras = loaderField(lora.payload, 'LoraLoaderModelOnly', 'lora_name')
+    if (loras === undefined || !loras.includes(MOSS_EDIT_LORA)) {
+      return { available: false, reason: `MOSS 编辑 LoRA 未安装：需要 ${MOSS_EDIT_LORA}。` }
+    }
+    if (!encoder.ok || prop(encoder.payload, 'TextEncodeMOSSImageEdit') === undefined) {
+      return { available: false, reason: 'ComfyUI 缺少 TextEncodeMOSSImageEdit 节点，无法运行实验叠加。' }
+    }
+    return { available: true }
+  } catch (error) {
+    return { available: false, reason: `实验能力检测失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
 /** A whole-string placeholder. */
 const WHOLE_PLACEHOLDER = /^\{\{([a-z_]+)\}\}$/
 
@@ -863,7 +916,7 @@ export async function uploadReferenceImage(
   const digest = createHash('sha256').update(image.bytes).digest('hex').slice(0, 16)
   const name = `dsh-forge-ref-${digest}${extension}`
   const form = new FormData()
-  form.append('image', new Blob([image.bytes], { type: image.mime }), name)
+  form.append('image', new Blob([new Uint8Array(image.bytes)], { type: image.mime }), name)
   form.append('type', 'input')
   form.append('overwrite', 'true')
 
@@ -1372,20 +1425,28 @@ async function renderEditGraph(
   if (references.length === 0) {
     throw new Error('comfyui backend: the edit path needs reference images, but request.images is empty')
   }
+  const layout = request.layout
+  if (layout !== undefined) {
+    if (profile.family !== 'moss-image') {
+      throw new Error('comfyui backend: layout + reference is only available on the MOSS-Image experimental path')
+    }
+    parseMossLayout(layout)
+  }
   const edit = requireEditGraph(profile)
   const deadline = Date.now() + options.timeoutMs
   const names: string[] = []
   for (const reference of references) {
     names.push(await uploadReferenceImage(target, reference, Math.max(1, deadline - Date.now()), signal))
   }
-  const built = edit.build(names)
+  const built = layout === undefined ? edit.build(names) : mossLayoutEditWorkflow(names)
   // Old ComfyUI: drop the prefix-cache shim rather than submit a graph whose node
   // class the server does not know.
   const template = profile.family === 'qwen-image-2.1' && !models.cache ? withoutQwenCache(built) : built
   return renderWorkflow(template, {
     ...textToImageValues(profile, models, request, options.mossSampling),
+    ...(layout === undefined ? {} : { layout_json: layout }),
     resolution: referenceBudget(request.width, request.height),
-    filename_prefix: `${profile.filenamePrefix}-edit`,
+    filename_prefix: layout === undefined ? `${profile.filenamePrefix}-edit` : `${profile.filenamePrefix}-layout-edit`,
   }) as Record<string, unknown>
 }
 

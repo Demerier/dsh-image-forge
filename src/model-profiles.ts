@@ -740,6 +740,31 @@ export function mossEditWorkflow(imageNames: readonly string[]): ApiGraph {
   return graph
 }
 
+/**
+ * Experimental bridge: give the edit LoRA the compiled layout JSON as its
+ * positive prompt while retaining every reference-image slot. This is not an
+ * official MOSS graph combination; callers must opt in and surface failures.
+ */
+export const MOSS_IMAGE_LAYOUT_EDIT_WORKFLOW: ApiGraph = {
+  ...MOSS_IMAGE_EDIT_WORKFLOW,
+  '7': {
+    class_type: 'TextEncodeMOSSImageEdit',
+    inputs: { ...MOSS_IMAGE_EDIT_WORKFLOW['7']!.inputs, prompt: '{{layout_json}}' },
+  },
+}
+
+/** Build the experimental layout-edit graph with one slot per reference. */
+export function mossLayoutEditWorkflow(imageNames: readonly string[]): ApiGraph {
+  const graph = mossEditWorkflow(imageNames)
+  const positive = graph['7']
+  if (positive === undefined) return graph
+  graph['7'] = {
+    ...positive,
+    inputs: { ...positive.inputs, prompt: '{{layout_json}}' },
+  }
+  return graph
+}
+
 // ---------------------------------------------------------------------------
 // The profile shape
 // ---------------------------------------------------------------------------

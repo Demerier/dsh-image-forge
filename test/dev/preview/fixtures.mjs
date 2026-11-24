@@ -273,6 +273,8 @@ function layoutItem(input) {
     createdAt: input.createdAt,
     sessionId: null,
     batchId: 'pv-layout-1',
+    ...(input.references === undefined ? {} : { references: input.references }),
+    ...(input.layoutMode === undefined ? {} : { layoutMode: input.layoutMode }),
     x: input.x,
     y: input.y,
     draft: {
@@ -420,6 +422,8 @@ export function writeFixtures(root) {
       prompt: '雨夜街角的双人构图草图',
       x: 560,
       y: 840,
+      references: ['node-wide', 'node-tall'],
+      layoutMode: 'layout',
       createdAt: ago(8),
     }),
   ]

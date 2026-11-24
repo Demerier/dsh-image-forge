@@ -48,11 +48,13 @@ import {
   STUDIO_IMPORT_ROUTE,
   STUDIO_LOG_DEFAULT_LIMIT,
   STUDIO_LOG_MAX_LIMIT,
+  STUDIO_LAYOUT_MODES,
   STUDIO_LOG_ROUTE,
   STUDIO_MAX_BODY_BYTES,
   STUDIO_MAX_LAYOUT_CHARS,
   STUDIO_MAX_PARENT_IDS,
   STUDIO_MAX_PROMPT_CHARS,
+  STUDIO_MAX_REFERENCES,
   STUDIO_OPTIMIZE_ROUTE,
   STUDIO_RATIOS,
   STUDIO_THUMB_DIR,
@@ -68,6 +70,7 @@ import {
   type StudioGenerateRequest,
   type StudioImportRequest,
   type StudioImportResponse,
+  type StudioLayoutMode,
   type StudioLogLine,
   type StudioLogPage,
   type StudioOptimizeRequest,
@@ -1003,6 +1006,9 @@ export function parseGenerate(value: unknown): StudioGenerateRequest {
   const steps = optionalInteger(body.steps, '步数')
   const seed = optionalInteger(body.seed, '种子')
   const count = optionalInteger(body.count, '出图张数')
+  const width = parseCanvasDimension(body.width, '宽度')
+  const height = parseCanvasDimension(body.height, '高度')
+  if ((width === undefined) !== (height === undefined)) throw new Error('width 和 height 必须成对提供')
   const references = body.references === undefined ? undefined : parseReferences(body.references)
   const board = typeof body.board === 'string' && body.board.trim().length > 0 ? body.board.trim().slice(0, 80) : undefined
   const clientId = parseClientId(body.clientId)
@@ -1010,10 +1016,17 @@ export function parseGenerate(value: unknown): StudioGenerateRequest {
   // the same parser the tool boundary uses, so a malformed layout is a 400 with
   // a named field instead of a run that fails after the weights load.
   const layout = body.layout === undefined ? undefined : parseLayoutText(body.layout)
+  const layoutMode = parseLayoutMode(body.layoutMode)
+  if (layoutMode !== undefined && layout === undefined) throw new Error('layoutMode 只能和 layout 一起使用')
+  if (layoutMode === 'layout-edit-experimental' && (references === undefined || references.length === 0)) {
+    throw new Error('实验性 Layout + 参考图至少需要一张参考图')
+  }
   const parents = parseParentIds(body.parents)
   return {
     prompt,
     ratio,
+    ...(width === undefined || height === undefined ? {} : { width, height }),
+    ...(layoutMode === undefined ? {} : { layoutMode }),
     ...(steps === undefined ? {} : { steps }),
     ...(seed === undefined ? {} : { seed }),
     ...(count === undefined ? {} : { count }),
@@ -1104,7 +1117,8 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
   const task = body.task === undefined ? undefined : parseBoardTask(body.task)
   const draft = body.draft === undefined ? undefined : parseBoardDraft(body.draft)
   // Layout references are board item ids, same shape as `parents`.
-  const layoutReferences = parseParentIds(body.references)
+  const layoutReferences = parseLayoutReferenceIds(body.references)
+  const layoutMode = parseLayoutMode(body.layoutMode)
   const workspace = body.workspace
   const w = parseCoordinate(body.w)
   const h = parseCoordinate(body.h)
@@ -1129,6 +1143,7 @@ export function parseBoardAction(value: unknown): StudioBoardRequest {
     ...(x === undefined || y === undefined ? {} : { x, y }),
     ...(parents === undefined ? {} : { parents }),
     ...(layoutReferences === undefined ? {} : { references: layoutReferences }),
+    ...(layoutMode === undefined ? {} : { layoutMode }),
     ...(task === undefined ? {} : { task }),
     ...(draft === undefined ? {} : { draft }),
     ...(w === undefined ? {} : { w }),
@@ -1189,6 +1204,23 @@ function parseParentIds(value: unknown): string[] | undefined {
     .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
     .map((entry) => entry.trim().slice(0, 80))
     .slice(0, STUDIO_MAX_PARENT_IDS)
+  return ids.length === 0 ? undefined : ids
+}
+
+/** Layout references are ordered, deduplicated and capped by the MOSS edit graph. */
+function parseLayoutReferenceIds(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) throw new Error('references 必须是数组')
+  const ids: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) throw new Error('参考图 id 必须是非空字符串')
+    const id = entry.trim().slice(0, 80)
+    if (ids.includes(id)) continue
+    if (ids.length >= STUDIO_MAX_REFERENCES) {
+      throw new Error(`布局节点最多支持 ${String(STUDIO_MAX_REFERENCES)} 张参考图`)
+    }
+    ids.push(id)
+  }
   return ids.length === 0 ? undefined : ids
 }
 
@@ -1424,6 +1456,7 @@ function isTurn(value: StudioOptimizeTurn | undefined): value is StudioOptimizeT
 /** References: base64 plus a container hint, capped in count. */
 function parseReferences(value: unknown): StudioReferencePayload[] {
   if (!Array.isArray(value)) throw new Error('参考图格式无效')
+  if (value.length > STUDIO_MAX_REFERENCES) throw new Error(`最多支持 ${String(STUDIO_MAX_REFERENCES)} 张参考图`)
   return value.map((entry, index) => {
     const reference = record(entry)
     if (reference === undefined) throw new Error('参考图格式无效')
@@ -1472,6 +1505,23 @@ function optionalInteger(value: unknown, label: string): number | undefined {
   if (value === undefined || value === null) return undefined
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${label}必须是数字`)
   return Math.trunc(value)
+}
+
+function parseCanvasDimension(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new Error(`${label}必须是整数`)
+  if (value < 256 || value > 4096 || value % 16 !== 0) {
+    throw new Error(`${label}必须是 256–4096 之间且能被 16 整除的像素值`)
+  }
+  return value
+}
+
+function parseLayoutMode(value: unknown): StudioLayoutMode | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !(STUDIO_LAYOUT_MODES as readonly string[]).includes(value)) {
+    throw new Error('layoutMode 只能是 layout 或 layout-edit-experimental')
+  }
+  return value as StudioLayoutMode
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

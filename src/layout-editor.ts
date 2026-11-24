@@ -267,6 +267,8 @@ export interface LayoutSummary {
 
 /** One item of an editable draft. */
 export interface LayoutDraftItem {
+  /** Human-readable editor name; never sent to the model compiler. */
+  name?: string
   label: LayoutItemLabel
   caption: string
   bbox: LayoutBbox

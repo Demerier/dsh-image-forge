@@ -382,9 +382,12 @@ export interface GenerateParamsBody {
   readonly prompt: string
   readonly ratio: string
   readonly count: number
+  readonly width?: number
+  readonly height?: number
   readonly steps?: number
   readonly seed?: number
   readonly layout?: string
+  readonly layoutMode?: BoardTaskParams['layoutMode']
 }
 
 /**
@@ -400,9 +403,11 @@ export function generateParamsBody(params: BoardTaskParams): GenerateParamsBody 
     prompt: params.prompt,
     ratio: params.ratio ?? '1:1',
     count: params.count ?? 1,
+    ...(params.width === undefined || params.height === undefined ? {} : { width: params.width, height: params.height }),
     ...(params.steps === undefined ? {} : { steps: params.steps }),
     ...(params.seed === undefined ? {} : { seed: params.seed }),
     ...(params.layout === undefined ? {} : { layout: params.layout }),
+    ...(params.layoutMode === undefined ? {} : { layoutMode: params.layoutMode }),
   }
 }
 
@@ -603,7 +608,7 @@ export function inspectorSpecFor(
     const editing = options.editing === true
     const params = node.params
     const progress = node.progress
-    const fields: InspectorField[] = editing
+    const fields: readonly InspectorField[] = editing
       ? editableFields(inspectorValuesOf(node), options)
       : [
         {
@@ -734,7 +739,7 @@ export function inspectorSpecFor(
         advanced: true,
       },
       { id: 'file', label: '文件路径', value: image?.path ?? '', editable: false, advanced: true },
-      ...(lineage.length === 0 ? [] : [{ id: 'lineage', label: '血缘来源', value: lineage.join(' → '), editable: false, advanced: true }]),
+      ...(lineage.length === 0 ? [] : [{ id: 'lineage', label: '参考图', value: lineage.join(' → '), editable: false, advanced: true }]),
     ],
     references: [],
     canEditReferences: false,
@@ -937,7 +942,7 @@ function lineageOf(spec: InspectorSpec): ReactNode[] {
   return [createElement(
     'div',
     { className: 'dsh-forge-inspector-lineage', 'data-inspector-lineage': String(spec.lineage.length) },
-    createElement('span', { className: 'dsh-forge-label' }, '血缘来源'),
+    createElement('span', { className: 'dsh-forge-label' }, '参考图'),
     ...spec.lineage.map((id, index) => createElement(
       'code',
       { key: `${id}-${String(index)}`, className: 'dsh-forge-inspector-parent', title: id },

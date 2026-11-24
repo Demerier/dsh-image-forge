@@ -31,6 +31,7 @@ import {
 } from './better-sidebar-handoff.ts'
 import {
   STUDIO_BOARD_ROUTE,
+  notifyStudioBoardChange,
   studioFileUrl,
   type BoardDetail,
   type BoardItem,
@@ -152,16 +153,17 @@ async function saveLayoutNode(boardId: string, item: BoardItem, draft: BoardLayo
       h: item.h,
       references: item.references ?? [],
       parents: item.parents,
+      layoutMode: item.layoutMode ?? 'layout',
     }),
   })
   const payload = await readJson(response)
   if (!response.ok) throw new Error(typeof payload?.['error'] === 'string' ? payload['error'] : `保存布局失败（HTTP ${String(response.status)}）`)
+  notifyStudioBoardChange(boardId, 'sidebar')
 }
 
 /** Mount the shared editor and mirror external draft swaps into it. */
 function LayoutEditorPanel(props: {
   readonly draft: BoardLayoutDraft
-  readonly imageUrl: string
   readonly theme?: 'auto' | 'light' | 'dark'
   readonly onChange: (draft: BoardLayoutDraft) => void
   readonly onEditor?: (editor: LayoutEditorHandle | undefined) => void
@@ -182,7 +184,6 @@ function LayoutEditorPanel(props: {
       editor = mountLayoutEditor(host, {
         draft: latestRef.current.draft as unknown as LayoutDraft,
         canvasOnly: true,
-        backgroundImageUrl: latestRef.current.imageUrl,
         theme: latestRef.current.theme ?? 'auto',
         onChange: (state: LayoutEditorState) => {
           const next = stateToDraft(state) as unknown as BoardLayoutDraft
@@ -222,7 +223,6 @@ function sidebarListValue(text: string): string[] {
 /** The Better Sidebar adaptation of the layout detail page. */
 function SidebarLayoutWorkbench(props: {
   readonly draft: BoardLayoutDraft
-  readonly imageUrl: string
   readonly theme?: 'auto' | 'light' | 'dark'
   readonly saving: boolean
   readonly busy: boolean
@@ -397,7 +397,6 @@ function SidebarLayoutWorkbench(props: {
     createElement('div', { key: 'canvas', className: 'dsh-image-forge-sidebar-layout-canvas' },
       createElement(LayoutEditorPanel, {
         draft: props.draft,
-        imageUrl: props.imageUrl,
         theme: props.theme ?? 'auto',
         onChange: props.onDraftChange,
         onEditor: (editor) => { editorRef.current = editor },
@@ -494,12 +493,6 @@ function SidebarLayoutWorkbench(props: {
             event.target.selectedIndex = 0
           },
         }, createElement('option', { value: '' }, '选择模板…'), ...LAYOUT_TEMPLATES.map((template) => createElement('option', { key: template.id, value: template.id }, template.label))),
-      ], true),
-      section('background', '背景参考', [
-        createElement('div', { key: 'bg', className: 'dsh-forge-layout-reference' },
-          createElement('img', { src: props.imageUrl, alt: '布局背景参考' }),
-          createElement('span', {}, '当前画面作为布局参考'),
-        ),
       ], true),
     ]),
     propertyPanel,
@@ -846,12 +839,11 @@ export function ImageEditorTab(props: ImageEditorTabProps): ReactNode {
         : createElement(SidebarLayoutWorkbench, {
           key: 'editor',
           draft: layoutDraft,
-          imageUrl: studioFileUrl(meta.imagePath),
           theme: meta.theme ?? 'auto',
           saving: layoutSaving,
           busy,
           gateReady: gate.ready,
-          gateReason: gate.reason,
+          gateReason: gate.reason ?? '',
           ...(status === undefined ? {} : { status }),
           ...(actionError === undefined ? {} : { error: actionError }),
           onDraftChange: scheduleLayoutSave,

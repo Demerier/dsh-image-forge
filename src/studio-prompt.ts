@@ -563,7 +563,7 @@ export async function optimizeStudioPrompt(
   signal: AbortSignal,
 ): Promise<StudioOptimizeResponse> {
   const resolution = await resolveOptimizerFor(ctx)
-  if (!resolution.ok) throw new OptimizeUnavailableError(resolution)
+  if ('stage' in resolution) throw new OptimizeUnavailableError(resolution)
   const llm = llmOf(ctx)
   if (llm === undefined) {
     throw new OptimizeUnavailableError({ ok: false, stage: 'llm-missing', detail: 'llm 服务在解析目标之后变得不可用（宿主侧卸载？）' })

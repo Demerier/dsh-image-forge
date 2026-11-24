@@ -817,17 +817,34 @@ test('a stored layout node keeps its box names and its references', async () => 
       items: [{ label: 'object', caption: 'cup', name: '杯子', bbox: [0, 0, 400, 400] }],
     }
     const written = await saveLayoutItem(dir, undefined, {
-      draft, w: 480, h: 420, x: 0, y: 0, references: ['img-1'],
+      draft,
+      w: 480,
+      h: 420,
+      x: 0,
+      y: 0,
+      references: ['img-2', 'img-1', 'img-2'],
+      layoutMode: 'layout-edit-experimental',
     })
     assert.ok(written !== undefined)
     const item = written.item
     assert.equal(item.draft.items[0].name, '杯子', 'the box name survives the store')
-    assert.deepEqual(item.references, ['img-1'], 'the reference ids survive the store')
+    assert.deepEqual(item.references, ['img-2', 'img-1'], 'reference order survives, duplicates collapse')
+    assert.equal(item.layoutMode, 'layout-edit-experimental', 'the explicit mode survives the store')
     // The read side hands the same values back after a reload.
     const board = await readBoard(dir, written.board.id)
     const reloaded = board.items.find((entry) => entry.id === item.id)
     assert.equal(reloaded.draft.items[0].name, '杯子')
-    assert.deepEqual(reloaded.references, ['img-1'])
+    assert.deepEqual(reloaded.references, ['img-2', 'img-1'])
+    assert.equal(reloaded.layoutMode, 'layout-edit-experimental')
+    await assert.rejects(
+      () => saveLayoutItem(dir, written.board.id, {
+        draft,
+        w: 480,
+        h: 420,
+        references: Array.from({ length: 11 }, (_, index) => `img-${String(index)}`),
+      }),
+      /最多支持 10 张参考图/,
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

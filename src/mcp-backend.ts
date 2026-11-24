@@ -210,8 +210,8 @@ async function connectHost(options: {
     client,
     pid: typeof transport.pid === 'number' ? transport.pid : undefined,
     close: async () => {
-      await client.close().catch(() => undefined)
-      await transport.close?.().catch?.(() => undefined)
+      await Promise.resolve(client.close()).catch(() => undefined)
+      await Promise.resolve(transport.close?.()).catch(() => undefined)
     },
   }
 }
