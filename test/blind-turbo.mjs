@@ -7,6 +7,7 @@
  * 用法：node test/blind-turbo.mjs [题数]
  *  默认 5 题；每题约 25s（turbo）+ 60s（base），5 题全程 ~8 分钟。
  */
+import { randomInt } from 'node:crypto'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -114,7 +115,7 @@ async function run(graph, label) {
 function shuffle(items) {
   const a = [...items]
   for (let i = a.length - 1; i > 0; i--) {
-    const j = Number(crypto.getRandomValues(new Uint32Array(1))[0]) % (i + 1)
+    const j = randomInt(i + 1)
     ;[a[i], a[j]] = [a[j], a[i]]
   }
   return a
@@ -124,7 +125,7 @@ function shuffle(items) {
 const tiles = []
 const key = []
 for (const q of QUESTIONS) {
-  const seed = 1_000_000 + Number(crypto.getRandomValues(new Uint32Array(1))[0] % 9_000_000)
+  const seed = randomInt(1_000_000, 10_000_000)
   console.log(`[${q.id}] seed=${seed} 生成中…`)
   const base = await run(graph('base', q.prompt, seed), `${q.id}/base`)
   console.log(`  base 25步: ${(base.ms / 1000).toFixed(1)}s`)
