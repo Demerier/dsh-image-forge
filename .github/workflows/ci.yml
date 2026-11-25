@@ -11,6 +11,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-review:
+    name: Dependency review
+    # Only meaningful for PRs: it diffs the dependency manifest between the base
+    # and head commit and fails when the PR pulls in a vulnerable dependency.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/dependency-review-action@v4
+        with:
+          # Block high and critical known vulnerabilities; lower severities are
+          # reported in the check summary without failing the PR. No PR comment:
+          # fork PRs only get a read-only token, so commenting there would fail
+          # the job instead of just lacking a comment.
+          fail-on-severity: high
+
   test:
     name: Build & test
     runs-on: ubuntu-latest

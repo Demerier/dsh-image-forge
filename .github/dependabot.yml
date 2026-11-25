@@ -1,0 +1,26 @@
+# Dependabot 定期依赖更新。漏洞告警与安全修复 PR 由仓库设置里的
+# Dependabot alerts / security updates 驱动，不依赖本文件。
+# 小版本与补丁统一合并成一个 PR，减少 review 噪音；安全修复 PR 由 Dependabot
+# 单独开，不受分组规则影响。
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3

@@ -241,6 +241,8 @@ image_forge_edit(prompt = <改图指令>, images = ["D:\\pictures\\room.png"], r
 
 > 「Qwen」「千问」是阿里巴巴集团商标。本项目是第三方作品，与阿里巴巴无关联、未获其背书。开源许可不授予商标使用权。详见 [docs/license-and-limits.md](docs/license-and-limits.md)。
 
+安全问题请走 [SECURITY.md](SECURITY.md) 的私密报告渠道，不要开公开 issue。
+
 ComfyUI 后端与工作流占位符协议（`{{prompt}}` / `{{seed}}` / `{{image}}`）参考并移植自 [dsh-image-gen](https://github.com/shanliuling/dsh-image-gen)（Copyright 2026 shanliuling，Apache-2.0），许可全文见 [THIRD-PARTY](THIRD-PARTY/dsh-image-gen/LICENSE)。
 
 ---
