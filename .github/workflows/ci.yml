@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/dependency-review-action@v5
         with:
           # Block high and critical known vulnerabilities; lower severities are
           # reported in the check summary without failing the PR. No PR comment:
