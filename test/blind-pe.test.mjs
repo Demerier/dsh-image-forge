@@ -171,7 +171,7 @@ test('ranking page needs unique ranks in every group and exports only when compl
   assert.equal(html.includes('key.json'), false)
   assert.doesNotMatch(html, /\b(?:qwen21-base|moss-sft|official-skill|text-generate-v2|GOLD)\b/i)
 
-  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = html.match(/<script>([\s\S]*?)<\/script>/i)?.[1]
   assert.ok(script)
   const selects = [
     ...['g1', 'g1', 'g1'].map((group, index) => ({ dataset: { group, item: String.fromCharCode(65 + index) }, value: '', classList: { contains: (name) => name === 'rank-select' } })),

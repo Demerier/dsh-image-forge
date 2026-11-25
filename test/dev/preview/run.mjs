@@ -204,7 +204,8 @@ const server = createServer(async (req, res) => {
     send(res, 404, 'not found', 'text/plain; charset=utf-8')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (!res.headersSent) send(res, 500, JSON.stringify({ ok: false, message }))
+    console.error(`[preview] ${message}`)
+    if (!res.headersSent) send(res, 500, JSON.stringify({ ok: false, message: '开发预览服务处理请求失败。' }))
     else res.end()
   }
 })

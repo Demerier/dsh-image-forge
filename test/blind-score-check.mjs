@@ -41,7 +41,7 @@ for (const entry of key.key) {
 }
 
 // 3. 跑脚本
-const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1]
+const script = html.match(/<script>([\s\S]*?)<\/script>/i)?.[1]
 if (!script) {
   console.error('score.html 里没有 <script>')
   process.exit(1)

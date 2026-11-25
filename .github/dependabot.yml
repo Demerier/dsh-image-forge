@@ -17,6 +17,12 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Canvas API migration is a dedicated change; do not keep recreating a
+      # major-version PR until that work is scheduled.
+      - dependency-name: "@xyflow/react"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
